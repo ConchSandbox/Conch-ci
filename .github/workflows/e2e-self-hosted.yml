@@ -55,7 +55,25 @@ jobs:
         run: |
           set -euo pipefail
 
+          require_cmd() {
+            local tool="$1"
+            if ! command -v "$tool"; then
+              echo "::error::Required command not found on the self-hosted runner: $tool" >&2
+              exit 1
+            fi
+          }
+
+          require_file() {
+            local path="$1"
+            local name="$2"
+            if [ ! -f "$path" ]; then
+              echo "::error::$name does not exist: $path" >&2
+              exit 1
+            fi
+          }
+
           arch="$(uname -m)"
+          echo "Detected runner architecture: $arch"
           case "$arch" in
             aarch64|arm64) ;;
             *)
@@ -64,20 +82,43 @@ jobs:
               ;;
           esac
 
-          sudo -n true
-          sudo test -r /dev/kvm
-          sudo test -w /dev/kvm
+          if ! sudo -n true; then
+            echo "::error::Passwordless sudo is required for the self-hosted runner user." >&2
+            exit 1
+          fi
+
+          if ! sudo -n test -r /dev/kvm; then
+            echo "::error::The runner user cannot read /dev/kvm, or /dev/kvm is missing." >&2
+            exit 1
+          fi
+
+          if ! sudo -n test -w /dev/kvm; then
+            echo "::error::The runner user cannot write /dev/kvm." >&2
+            exit 1
+          fi
 
           for tool in git protoc cloud-hypervisor mkfs.erofs curl ip iptables; do
-            command -v "$tool"
+            require_cmd "$tool"
           done
 
-          test -f "$CONCH_KERNEL_PATH"
-          test -f "$CONCH_INITRD_PATH"
-          sudo modprobe erofs
-          grep -qw erofs /proc/filesystems
-          mkfs_erofs_help="$(mkfs.erofs --help)"
-          grep -q -- '--fsalignblks' <<<"$mkfs_erofs_help"
+          require_file "$CONCH_KERNEL_PATH" "Conch kernel"
+          require_file "$CONCH_INITRD_PATH" "Conch initrd"
+
+          if ! sudo -n modprobe erofs; then
+            echo "::error::Failed to load the erofs kernel module." >&2
+            exit 1
+          fi
+
+          if ! grep -qw erofs /proc/filesystems; then
+            echo "::error::The host kernel does not report erofs support in /proc/filesystems." >&2
+            exit 1
+          fi
+
+          mkfs_erofs_help="$(mkfs.erofs --help 2>&1 || true)"
+          if ! grep -q -- '--fsalignblks' <<<"$mkfs_erofs_help"; then
+            echo "::error::mkfs.erofs does not support --fsalignblks; please upgrade erofs-utils." >&2
+            exit 1
+          fi
 
           protoc --version
           cloud-hypervisor --version
@@ -110,8 +151,17 @@ jobs:
       - name: Verify managed toolchains
         run: |
           set -euo pipefail
-          command -v go
-          command -v python
+
+          require_cmd() {
+            local tool="$1"
+            if ! command -v "$tool"; then
+              echo "::error::actions/setup-* did not provide required command: $tool" >&2
+              exit 1
+            fi
+          }
+
+          require_cmd go
+          require_cmd python
           go version
           python --version
 
