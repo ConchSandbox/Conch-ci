@@ -1,8 +1,6 @@
 name: Conch PR CI
 
 on:
-  pull_request:
-  push:
   workflow_dispatch:
     inputs:
       conch_repository:
