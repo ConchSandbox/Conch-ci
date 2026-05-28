@@ -41,17 +41,46 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            erofs-utils \
+            autoconf \
+            automake \
+            build-essential \
+            curl \
             git \
+            libdeflate-dev \
+            liblz4-dev \
+            liblzma-dev \
+            libtool \
+            libzstd-dev \
+            pkg-config \
             protobuf-compiler \
-            shellcheck
+            shellcheck \
+            uuid-dev \
+            zlib1g-dev
+
+      - name: Install erofs-utils
+        run: |
+          set -euo pipefail
+          workdir="$(mktemp -d)"
+          curl -fsSL \
+            https://git.kernel.org/pub/scm/linux/kernel/git/xiang/erofs-utils.git/snapshot/erofs-utils-1.9.1.tar.gz \
+            -o "$workdir/erofs-utils.tar.gz"
+          tar -xzf "$workdir/erofs-utils.tar.gz" -C "$workdir"
+          cd "$workdir/erofs-utils-1.9.1"
+          ./autogen.sh
+          ./configure --prefix=/usr/local --with-libdeflate --with-libzstd
+          make -j"$(nproc)"
+          sudo make install
 
       - name: Check EROFS support
         run: |
           set -euo pipefail
+          hash -r
           sudo modprobe erofs
           grep -qw erofs /proc/filesystems
-          mkfs.erofs --help >/dev/null
+          command -v mkfs.erofs
+          mkfs.erofs --version
+          mkfs_erofs_help="$(mkfs.erofs --help)"
+          grep -q -- '--fsalignblks' <<<"$mkfs_erofs_help"
 
       - name: Fetch Conch source
         run: |
