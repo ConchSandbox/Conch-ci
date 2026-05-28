@@ -55,10 +55,56 @@ jobs:
         run: |
           set -euo pipefail
 
-          require_cmd() {
+          print_tool_hint() {
             local tool="$1"
-            if ! command -v "$tool"; then
-              echo "::error::Required command not found on the self-hosted runner: $tool" >&2
+            echo "Prepare the missing tool before retrying this workflow:" >&2
+            case "$tool" in
+              cloud-hypervisor)
+                echo "  - cloud-hypervisor must be the Conch-compatible build from github.com/ConchSandbox/cloud-hypervisor." >&2
+                echo "  - For ARM64, install the release asset such as cloud-hypervisor-static-aarch64 as cloud-hypervisor in PATH." >&2
+                ;;
+              mkfs.erofs)
+                echo "  - openEuler example: sudo yum install -y erofs-utils" >&2
+                echo "  - The installed mkfs.erofs must support --fsalignblks." >&2
+                ;;
+              protoc)
+                echo "  - openEuler example: sudo yum install -y protobuf protobuf-compiler" >&2
+                ;;
+              ip)
+                echo "  - openEuler example: sudo yum install -y iproute" >&2
+                ;;
+              iptables)
+                echo "  - openEuler example: sudo yum install -y iptables" >&2
+                ;;
+              curl)
+                echo "  - openEuler example: sudo yum install -y curl" >&2
+                ;;
+              git)
+                echo "  - openEuler example: sudo yum install -y git" >&2
+                ;;
+              *)
+                echo "  - Install $tool and make sure it is visible in the runner user's PATH." >&2
+                ;;
+            esac
+          }
+
+          check_required_commands() {
+            local missing=()
+            local command_path
+            local tool
+
+            for tool in "$@"; do
+              if command_path="$(command -v "$tool")"; then
+                echo "Found required command: $tool -> $command_path"
+              else
+                echo "::error::Required command not found on the self-hosted runner: $tool" >&2
+                print_tool_hint "$tool"
+                missing+=("$tool")
+              fi
+            done
+
+            if [ "${#missing[@]}" -gt 0 ]; then
+              echo "::error::Missing required runner commands: ${missing[*]}" >&2
               exit 1
             fi
           }
@@ -68,8 +114,21 @@ jobs:
             local name="$2"
             if [ ! -f "$path" ]; then
               echo "::error::$name does not exist: $path" >&2
-              exit 1
+              return 1
             fi
+          }
+
+          print_path_hint() {
+            local path="$1"
+            local name="$2"
+            case "$name" in
+              "Conch kernel")
+                echo "Prepare the official Conch kernel on the self-hosted runner, or pass workflow input kernel_path. Expected path: $path" >&2
+                ;;
+              "Conch initrd")
+                echo "Prepare the official Conch initrd on the self-hosted runner, or pass workflow input initrd_path. Expected path: $path" >&2
+                ;;
+            esac
           }
 
           arch="$(uname -m)"
@@ -84,39 +143,49 @@ jobs:
 
           if ! sudo -n true; then
             echo "::error::Passwordless sudo is required for the self-hosted runner user." >&2
+            echo "Prepare passwordless sudo for the runner service user before retrying this workflow." >&2
             exit 1
           fi
 
           if ! sudo -n test -r /dev/kvm; then
             echo "::error::The runner user cannot read /dev/kvm, or /dev/kvm is missing." >&2
+            echo "Prepare KVM access on the self-hosted runner before retrying this workflow." >&2
             exit 1
           fi
 
           if ! sudo -n test -w /dev/kvm; then
             echo "::error::The runner user cannot write /dev/kvm." >&2
+            echo "Prepare KVM write access on the self-hosted runner before retrying this workflow." >&2
             exit 1
           fi
 
-          for tool in git protoc cloud-hypervisor mkfs.erofs curl ip iptables; do
-            require_cmd "$tool"
-          done
+          check_required_commands git protoc cloud-hypervisor mkfs.erofs curl ip iptables
 
-          require_file "$CONCH_KERNEL_PATH" "Conch kernel"
-          require_file "$CONCH_INITRD_PATH" "Conch initrd"
+          if ! require_file "$CONCH_KERNEL_PATH" "Conch kernel"; then
+            print_path_hint "$CONCH_KERNEL_PATH" "Conch kernel"
+            exit 1
+          fi
+          if ! require_file "$CONCH_INITRD_PATH" "Conch initrd"; then
+            print_path_hint "$CONCH_INITRD_PATH" "Conch initrd"
+            exit 1
+          fi
 
           if ! sudo -n modprobe erofs; then
             echo "::error::Failed to load the erofs kernel module." >&2
+            echo "Prepare host kernel EROFS support before retrying this workflow." >&2
             exit 1
           fi
 
           if ! grep -qw erofs /proc/filesystems; then
             echo "::error::The host kernel does not report erofs support in /proc/filesystems." >&2
+            echo "Prepare host kernel EROFS support before retrying this workflow." >&2
             exit 1
           fi
 
           mkfs_erofs_help="$(mkfs.erofs --help 2>&1 || true)"
           if ! grep -q -- '--fsalignblks' <<<"$mkfs_erofs_help"; then
             echo "::error::mkfs.erofs does not support --fsalignblks; please upgrade erofs-utils." >&2
+            echo "Prepare a newer erofs-utils package on the self-hosted runner before retrying this workflow." >&2
             exit 1
           fi
 
