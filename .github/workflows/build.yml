@@ -41,6 +41,7 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
+            erofs-utils \
             git \
             protobuf-compiler \
             shellcheck
@@ -50,6 +51,7 @@ jobs:
           set -euo pipefail
           sudo modprobe erofs
           grep -qw erofs /proc/filesystems
+          mkfs.erofs --help >/dev/null
 
       - name: Fetch Conch source
         run: |
