@@ -137,8 +137,7 @@ jobs:
           fi
           bash -n "${shell_files[@]}"
 
-      - name: Run shellcheck advisory
-        continue-on-error: true
+      - name: Run shellcheck
         working-directory: conch-src
         run: |
           set -euo pipefail
@@ -172,8 +171,7 @@ jobs:
           set -euo pipefail
           go test ./...
 
-      - name: Run Go vet advisory
-        continue-on-error: true
+      - name: Run Go vet
         working-directory: conch-src
         run: |
           set -euo pipefail
