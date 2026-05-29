@@ -32,11 +32,28 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  # Source, image, and binary references for this e2e workflow.
   CONCH_REPOSITORY: ${{ github.event.inputs.conch_repository || vars.CONCH_REPOSITORY || 'https://github.com/ConchSandbox/Conch.git' }}
   CONCH_REF: ${{ github.event.inputs.conch_ref || vars.CONCH_REF || 'dev-cri' }}
   OCI_IMAGE: ${{ github.event.inputs.oci_image || vars.CONCH_E2E_OCI_IMAGE || 'docker.io/library/busybox:latest' }}
   CONCH_KERNEL_PATH: ${{ github.event.inputs.kernel_path || vars.CONCH_E2E_KERNEL_PATH || '/opt/conch/bzImage' }}
   CONCH_INITRD_PATH: ${{ github.event.inputs.initrd_path || vars.CONCH_E2E_INITRD_PATH || '/opt/conch/conch.initrd' }}
+  CONCH_E2E_BOOT_IMAGE_PREFIX: localhost/conch/e2e
+  CONCH_E2E_VMM_NAME: cloud-hypervisor
+  CONCH_CLOUD_HYPERVISOR_REPOSITORY_REF: github.com/ConchSandbox/cloud-hypervisor
+  CONCH_CLOUD_HYPERVISOR_RELEASE_REF: v52.0-conch
+  CONCH_CLOUD_HYPERVISOR_ARM64_ASSET_REF: cloud-hypervisor-static-aarch64
+  CONCH_MKFS_EROFS_REQUIRED_FLAG: --fsalignblks
+
+  # Runner-preparation references. The workflow checks these but does not install them.
+  CONCH_RUNNER_REQUIRED_COMMANDS: git protoc mkfs.erofs curl ip iptables
+  OPENEULER_GIT_PACKAGES: git
+  OPENEULER_PROTOC_PACKAGES: protobuf protobuf-compiler
+  OPENEULER_EROFS_PACKAGES: erofs-utils
+  OPENEULER_IPROUTE_PACKAGES: iproute
+  OPENEULER_IPTABLES_PACKAGES: iptables
+  OPENEULER_CURL_PACKAGES: curl
+
   CONCH_API_TIMEOUT: 15m
   GO_TAGS: exclude_graphdriver_btrfs
 
@@ -59,28 +76,29 @@ jobs:
             local tool="$1"
             echo "Prepare the missing tool before retrying this workflow:" >&2
             case "$tool" in
-              cloud-hypervisor)
-                echo "  - cloud-hypervisor must be the Conch-compatible build from github.com/ConchSandbox/cloud-hypervisor." >&2
-                echo "  - For ARM64, install the release asset such as cloud-hypervisor-static-aarch64 as cloud-hypervisor in PATH." >&2
+              "$CONCH_E2E_VMM_NAME")
+                echo "  - $CONCH_E2E_VMM_NAME must be the Conch-compatible build from $CONCH_CLOUD_HYPERVISOR_REPOSITORY_REF." >&2
+                echo "  - Recommended release: $CONCH_CLOUD_HYPERVISOR_RELEASE_REF." >&2
+                echo "  - For ARM64, install $CONCH_CLOUD_HYPERVISOR_ARM64_ASSET_REF as $CONCH_E2E_VMM_NAME in PATH." >&2
                 ;;
               mkfs.erofs)
-                echo "  - openEuler example: sudo yum install -y erofs-utils" >&2
-                echo "  - The installed mkfs.erofs must support --fsalignblks." >&2
+                echo "  - openEuler example: sudo yum install -y $OPENEULER_EROFS_PACKAGES" >&2
+                echo "  - The installed mkfs.erofs must support $CONCH_MKFS_EROFS_REQUIRED_FLAG." >&2
                 ;;
               protoc)
-                echo "  - openEuler example: sudo yum install -y protobuf protobuf-compiler" >&2
+                echo "  - openEuler example: sudo yum install -y $OPENEULER_PROTOC_PACKAGES" >&2
                 ;;
               ip)
-                echo "  - openEuler example: sudo yum install -y iproute" >&2
+                echo "  - openEuler example: sudo yum install -y $OPENEULER_IPROUTE_PACKAGES" >&2
                 ;;
               iptables)
-                echo "  - openEuler example: sudo yum install -y iptables" >&2
+                echo "  - openEuler example: sudo yum install -y $OPENEULER_IPTABLES_PACKAGES" >&2
                 ;;
               curl)
-                echo "  - openEuler example: sudo yum install -y curl" >&2
+                echo "  - openEuler example: sudo yum install -y $OPENEULER_CURL_PACKAGES" >&2
                 ;;
               git)
-                echo "  - openEuler example: sudo yum install -y git" >&2
+                echo "  - openEuler example: sudo yum install -y $OPENEULER_GIT_PACKAGES" >&2
                 ;;
               *)
                 echo "  - Install $tool and make sure it is visible in the runner user's PATH." >&2
@@ -159,7 +177,8 @@ jobs:
             exit 1
           fi
 
-          check_required_commands git protoc cloud-hypervisor mkfs.erofs curl ip iptables
+          read -r -a required_commands <<< "$CONCH_RUNNER_REQUIRED_COMMANDS"
+          check_required_commands "${required_commands[@]}" "$CONCH_E2E_VMM_NAME"
 
           if ! require_file "$CONCH_KERNEL_PATH" "Conch kernel"; then
             print_path_hint "$CONCH_KERNEL_PATH" "Conch kernel"
@@ -183,14 +202,14 @@ jobs:
           fi
 
           mkfs_erofs_help="$(mkfs.erofs --help 2>&1 || true)"
-          if ! grep -q -- '--fsalignblks' <<<"$mkfs_erofs_help"; then
-            echo "::error::mkfs.erofs does not support --fsalignblks; please upgrade erofs-utils." >&2
-            echo "Prepare a newer erofs-utils package on the self-hosted runner before retrying this workflow." >&2
+          if ! grep -q -- "$CONCH_MKFS_EROFS_REQUIRED_FLAG" <<<"$mkfs_erofs_help"; then
+            echo "::error::mkfs.erofs does not support $CONCH_MKFS_EROFS_REQUIRED_FLAG; please upgrade $OPENEULER_EROFS_PACKAGES." >&2
+            echo "Prepare a newer $OPENEULER_EROFS_PACKAGES package on the self-hosted runner before retrying this workflow." >&2
             exit 1
           fi
 
           protoc --version
-          cloud-hypervisor --version
+          "$CONCH_E2E_VMM_NAME" --version
 
       - name: Fetch Conch source
         run: |
@@ -262,7 +281,7 @@ jobs:
           workdir="${RUNNER_TEMP:-/tmp}/conch-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           sandbox_id="sandbox_e2e_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
           namespace="conch-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          boot_image="localhost/conch/e2e:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          boot_image="${CONCH_E2E_BOOT_IMAGE_PREFIX}:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 
           sudo rm -rf "$workdir"
           mkdir -p "$workdir"
@@ -325,7 +344,7 @@ jobs:
 
           snapshot:
             snapshot_id: ""
-            vmm_name: "cloud-hypervisor"
+            vmm_name: "$CONCH_E2E_VMM_NAME"
             vcpu_num: 1
             vcpu_max: 1
             ram_mb: 512
@@ -333,7 +352,7 @@ jobs:
           image:
             image_name: "$boot_image"
             use_snapshot: false
-            vmm_name: "cloud-hypervisor"
+            vmm_name: "$CONCH_E2E_VMM_NAME"
             vcpu_num: 1
             vcpu_max: 1
             ram_mb: 512
