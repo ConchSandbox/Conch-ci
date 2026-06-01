@@ -1,4 +1,4 @@
-name: Conch PR CI
+name: Conch Build And Static Checks
 
 on:
   workflow_dispatch:
