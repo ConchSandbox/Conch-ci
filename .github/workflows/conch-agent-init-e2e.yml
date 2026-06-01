@@ -12,9 +12,9 @@ on:
         required: false
         default: dev-cri
       kernel_path:
-        description: Linux kernel image path on the self-hosted runner
+        description: Optional agent-init test kernel image path on the self-hosted runner
         required: false
-        default: /opt/conch/bzImage
+        default: /opt/conch-agent-init-e2e/kernel
       alpine_version:
         description: Alpine minirootfs version used for the initramfs
         required: false
@@ -34,7 +34,7 @@ concurrency:
 env:
   CONCH_REPOSITORY: ${{ github.event.inputs.conch_repository || vars.CONCH_REPOSITORY || 'https://github.com/ConchSandbox/Conch.git' }}
   CONCH_REF: ${{ github.event.inputs.conch_ref || vars.CONCH_REF || 'dev-cri' }}
-  CONCH_KERNEL_PATH: ${{ github.event.inputs.kernel_path || vars.CONCH_AGENT_E2E_KERNEL_PATH || '/opt/conch/bzImage' }}
+  CONCH_KERNEL_PATH: ${{ github.event.inputs.kernel_path || vars.CONCH_AGENT_E2E_KERNEL_PATH || '/opt/conch-agent-init-e2e/kernel' }}
   ALPINE_VERSION: ${{ github.event.inputs.alpine_version || vars.CONCH_AGENT_E2E_ALPINE_VERSION || '3.20.3' }}
   ALPINE_MIRROR: ${{ github.event.inputs.alpine_mirror || vars.CONCH_AGENT_E2E_ALPINE_MIRROR || 'https://dl-cdn.alpinelinux.org/alpine' }}
   CONCH_E2E_VMM_NAME: cloud-hypervisor
