@@ -343,6 +343,7 @@ jobs:
 
           for _ in $(seq 1 120); do
             if [ -S "$CONCH_AGENT_VMM_API" ] && [ -S "$CONCH_AGENT_VSOCK_SOCKET" ]; then
+              sudo chmod 0666 "$CONCH_AGENT_VMM_API" "$CONCH_AGENT_VSOCK_SOCKET" || true
               exit 0
             fi
             if ! kill -0 "$(cat "$CONCH_AGENT_VMM_PID_FILE")" >/dev/null 2>&1; then
