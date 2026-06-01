@@ -309,6 +309,7 @@ jobs:
           "$apk_tools_dir/sbin/apk.static" \
             --root "$CONCH_AGENT_ROOTFS" \
             --update-cache \
+            --no-check-certificate \
             --no-scripts \
             --repository "${ALPINE_MIRROR}/${alpine_series}/main" \
             add iproute2-minimal
