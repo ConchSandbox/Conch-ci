@@ -271,49 +271,6 @@ jobs:
           curl -fsSL "$alpine_url" -o "$CONCH_AGENT_E2E_WORKDIR/$alpine_tar"
           tar -xzf "$CONCH_AGENT_E2E_WORKDIR/$alpine_tar" -C "$CONCH_AGENT_ROOTFS"
 
-          apk_index_archive="$CONCH_AGENT_E2E_WORKDIR/APKINDEX-main.tar.gz"
-          apk_index="$CONCH_AGENT_E2E_WORKDIR/APKINDEX"
-          apk_tools_dir="$CONCH_AGENT_E2E_WORKDIR/apk-tools-static"
-
-          curl -fsSL "${ALPINE_MIRROR}/${alpine_series}/main/${alpine_arch}/APKINDEX.tar.gz" -o "$apk_index_archive"
-          tar -xzf "$apk_index_archive" -C "$CONCH_AGENT_E2E_WORKDIR" APKINDEX
-          apk_tools_static_version="$(
-            awk '
-              BEGIN { RS = ""; FS = "\n" }
-              {
-                found = 0
-                version = ""
-                for (i = 1; i <= NF; i++) {
-                  if ($i == "P:apk-tools-static") {
-                    found = 1
-                  } else if ($i ~ /^V:/) {
-                    version = substr($i, 3)
-                  }
-                }
-                if (found && version != "") {
-                  print version
-                  exit
-                }
-              }
-            ' "$apk_index"
-          )"
-          if [ -z "$apk_tools_static_version" ]; then
-            echo "::error::Failed to resolve apk-tools-static from Alpine APKINDEX." >&2
-            exit 1
-          fi
-
-          mkdir -p "$apk_tools_dir"
-          apk_tools_static="apk-tools-static-${apk_tools_static_version}.apk"
-          curl -fsSL "${ALPINE_MIRROR}/${alpine_series}/main/${alpine_arch}/${apk_tools_static}" -o "$CONCH_AGENT_E2E_WORKDIR/$apk_tools_static"
-          tar --warning=no-unknown-keyword -xzf "$CONCH_AGENT_E2E_WORKDIR/$apk_tools_static" -C "$apk_tools_dir" sbin/apk.static
-          "$apk_tools_dir/sbin/apk.static" \
-            --root "$CONCH_AGENT_ROOTFS" \
-            --update-cache \
-            --no-check-certificate \
-            --no-scripts \
-            --repository "${ALPINE_MIRROR}/${alpine_series}/main" \
-            add iproute2-minimal
-
           install -m 0755 "$CONCH_AGENT_E2E_WORKDIR/bin/conch-agent" "$CONCH_AGENT_ROOTFS/sbin/conch-agent"
           mkdir -p "$CONCH_AGENT_ROOTFS"/{proc,sys,dev,run,tmp,var/log/conch-agent}
           if [ -n "${CONCH_AGENT_KERNEL_MODULES:-}" ] && [ -d "$CONCH_AGENT_KERNEL_MODULES" ]; then
