@@ -6,11 +6,11 @@ on:
       conch_repository:
         description: Conch source repository URL
         required: false
-        default: https://github.com/ConchSandbox/Conch.git
+        default: https://github.com/SToPire/Conch.git
       conch_ref:
         description: Conch source ref to validate
         required: false
-        default: dev-cri
+        default: fix-dev-cri-test-failures
 
 permissions:
   contents: read
@@ -20,8 +20,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  CONCH_REPOSITORY: ${{ github.event.inputs.conch_repository || vars.CONCH_REPOSITORY || 'https://github.com/ConchSandbox/Conch.git' }}
-  CONCH_REF: ${{ github.event.inputs.conch_ref || vars.CONCH_REF || 'dev-cri' }}
+  CONCH_REPOSITORY: ${{ github.event.inputs.conch_repository || vars.CONCH_REPOSITORY || 'https://github.com/SToPire/Conch.git' }}
+  CONCH_REF: ${{ github.event.inputs.conch_ref || vars.CONCH_REF || 'fix-dev-cri-test-failures' }}
 
 defaults:
   run:
