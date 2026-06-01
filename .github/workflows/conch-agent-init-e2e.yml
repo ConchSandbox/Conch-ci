@@ -127,7 +127,7 @@ jobs:
           kernel_apk="${kernel_package}-${kernel_version}.apk"
           kernel_url="${ALPINE_MIRROR}/${alpine_series}/main/${alpine_arch}/${kernel_apk}"
           curl -fsSL "$kernel_url" -o "$kernel_workdir/$kernel_apk"
-          tar --warning=no-unknown-keyword -xzf "$kernel_workdir/$kernel_apk" -C "$kernel_workdir" boot/vmlinuz-virt
+          tar --warning=no-unknown-keyword -xzf "$kernel_workdir/$kernel_apk" -C "$kernel_workdir" boot/vmlinuz-virt lib/modules
 
           resolved_kernel="$kernel_workdir/boot/vmlinuz-virt"
           if [ "$alpine_arch" = "aarch64" ]; then
@@ -160,6 +160,7 @@ jobs:
 
           chmod 0644 "$resolved_kernel"
           echo "CONCH_KERNEL_PATH=$resolved_kernel" >> "$GITHUB_ENV"
+          echo "CONCH_AGENT_KERNEL_MODULES=$kernel_workdir/lib/modules" >> "$GITHUB_ENV"
           file "$resolved_kernel"
 
       - name: Check self-hosted runtime prerequisites
@@ -273,6 +274,10 @@ jobs:
 
           install -m 0755 "$CONCH_AGENT_E2E_WORKDIR/bin/conch-agent" "$CONCH_AGENT_ROOTFS/sbin/conch-agent"
           mkdir -p "$CONCH_AGENT_ROOTFS"/{proc,sys,dev,run,tmp,var/log/conch-agent}
+          if [ -n "${CONCH_AGENT_KERNEL_MODULES:-}" ] && [ -d "$CONCH_AGENT_KERNEL_MODULES" ]; then
+            mkdir -p "$CONCH_AGENT_ROOTFS/lib/modules"
+            cp -a "$CONCH_AGENT_KERNEL_MODULES"/. "$CONCH_AGENT_ROOTFS/lib/modules"/
+          fi
 
           cat > "$CONCH_AGENT_ROOTFS/init" <<EOF
           #!/bin/sh
@@ -284,6 +289,10 @@ jobs:
           mkdir -p /dev/pts /run /tmp /var/log/conch-agent
           mount -t devpts devpts /dev/pts || true
           mount -t tmpfs tmpfs /run || true
+
+          modprobe virtio_net || true
+          modprobe vsock || true
+          modprobe vmw_vsock_virtio_transport || true
 
           ip link set lo up || true
           for _ in \$(seq 1 100); do
