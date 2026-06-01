@@ -279,33 +279,7 @@ jobs:
             cp -a "$CONCH_AGENT_KERNEL_MODULES"/. "$CONCH_AGENT_ROOTFS/lib/modules"/
           fi
 
-          cat > "$CONCH_AGENT_ROOTFS/init" <<EOF
-          #!/bin/sh
-          set -eu
-
-          mount -t proc proc /proc || true
-          mount -t sysfs sysfs /sys || true
-          mount -t devtmpfs devtmpfs /dev || mount -t tmpfs dev /dev || true
-          mkdir -p /dev/pts /run /tmp /var/log/conch-agent
-          mount -t devpts devpts /dev/pts || true
-          mount -t tmpfs tmpfs /run || true
-
-          modprobe virtio_net || true
-          modprobe vsock || true
-          modprobe vmw_vsock_virtio_transport || true
-
-          ip link set lo up || true
-          for _ in \$(seq 1 100); do
-            [ -d /sys/class/net/eth0 ] && break
-            sleep 0.1
-          done
-          ip addr add ${CONCH_AGENT_GUEST_IP}/30 dev eth0 || true
-          ip link set eth0 up || true
-
-          echo "CONCH_AGENT_INIT_BOOTED sandbox=${CONCH_AGENT_SANDBOX_ID} guest_ip=${CONCH_AGENT_GUEST_IP}" >/dev/hvc0
-          exec /sbin/conch-agent --init
-          EOF
-          chmod 0755 "$CONCH_AGENT_ROOTFS/init"
+          ln -sf sbin/conch-agent "$CONCH_AGENT_ROOTFS/init"
 
           (
             cd "$CONCH_AGENT_ROOTFS"
@@ -363,14 +337,14 @@ jobs:
           set -euo pipefail
 
           for _ in $(seq 1 120); do
-            if grep -q 'CONCH_AGENT_INIT_BOOTED' "$CONCH_AGENT_CONSOLE_LOG" 2>/dev/null; then
-              grep 'CONCH_AGENT_INIT_BOOTED' "$CONCH_AGENT_CONSOLE_LOG"
+            if grep -q 'Starting conch-agent as init process' "$CONCH_AGENT_CONSOLE_LOG" 2>/dev/null; then
+              grep 'Starting conch-agent as init process' "$CONCH_AGENT_CONSOLE_LOG"
               exit 0
             fi
             sleep 1
           done
 
-          echo "::error::Timed out waiting for conch-agent init boot marker" >&2
+          echo "::error::Timed out waiting for conch-agent init log" >&2
           sed -n '1,240p' "$CONCH_AGENT_CONSOLE_LOG" >&2 || true
           exit 1
 
@@ -447,6 +421,7 @@ jobs:
 
                   script = (
                       f"printf '%s\\n' '{expected}'; "
+                      "readlink /proc/1/exe; "
                       "tr '\\0' ' ' </proc/1/cmdline; "
                       "printf '\\n'"
                   )
@@ -464,8 +439,8 @@ jobs:
                       )
                   if expected not in result.stdout:
                       raise RuntimeError(f"missing expected command marker in stdout: {result.stdout!r}")
-                  if "conch-agent" not in result.stdout or "--init" not in result.stdout:
-                      raise RuntimeError(f"PID 1 does not look like conch-agent --init: {result.stdout!r}")
+                  if "conch-agent" not in result.stdout:
+                      raise RuntimeError(f"PID 1 does not look like conch-agent: {result.stdout!r}")
 
                   print(result.stdout)
                   raise SystemExit(0)
