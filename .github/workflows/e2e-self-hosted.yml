@@ -42,6 +42,7 @@ env:
   CONCH_E2E_VMM_NAME: cloud-hypervisor
   CONCH_CLOUD_HYPERVISOR_REPOSITORY_REF: github.com/ConchSandbox/cloud-hypervisor
   CONCH_CLOUD_HYPERVISOR_RELEASE_REF: v52.0-conch
+  CONCH_CLOUD_HYPERVISOR_X86_64_ASSET_REF: cloud-hypervisor-static
   CONCH_CLOUD_HYPERVISOR_ARM64_ASSET_REF: cloud-hypervisor-static-aarch64
   CONCH_MKFS_EROFS_REQUIRED_FLAG: --fsalignblks
 
@@ -70,6 +71,15 @@ jobs:
     steps:
       - name: Checkout CI repository
         uses: actions/checkout@v4
+
+      - name: Set up cloud-hypervisor
+        uses: ./.github/actions/setup-cloud-hypervisor
+        with:
+          repository-ref: ${{ env.CONCH_CLOUD_HYPERVISOR_REPOSITORY_REF }}
+          release-ref: ${{ env.CONCH_CLOUD_HYPERVISOR_RELEASE_REF }}
+          x86-64-asset-ref: ${{ env.CONCH_CLOUD_HYPERVISOR_X86_64_ASSET_REF }}
+          arm64-asset-ref: ${{ env.CONCH_CLOUD_HYPERVISOR_ARM64_ASSET_REF }}
+          binary-name: ${{ env.CONCH_E2E_VMM_NAME }}
 
       - name: Check self-hosted runtime prerequisites
         uses: ./.github/actions/check-self-hosted-runtime-prerequisites

@@ -1,0 +1,84 @@
+name: Set up cloud-hypervisor
+description: Download a pinned cloud-hypervisor release asset and add it to PATH.
+
+inputs:
+  repository-ref:
+    description: GitHub repository that publishes the cloud-hypervisor release.
+    required: false
+    default: github.com/ConchSandbox/cloud-hypervisor
+  release-ref:
+    description: Release tag to download.
+    required: true
+  x86-64-asset-ref:
+    description: Release asset name for x86_64 runners.
+    required: false
+    default: cloud-hypervisor-static
+  arm64-asset-ref:
+    description: Release asset name for ARM64 runners.
+    required: false
+    default: cloud-hypervisor-static-aarch64
+  binary-name:
+    description: Command name to expose on PATH.
+    required: false
+    default: cloud-hypervisor
+  install-dir:
+    description: Directory where the binary should be installed.
+    required: false
+    default: ""
+
+outputs:
+  binary-path:
+    description: Absolute path to the installed cloud-hypervisor binary.
+    value: ${{ steps.install.outputs.binary-path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Download cloud-hypervisor
+      id: install
+      shell: bash
+      env:
+        REPOSITORY_REF: ${{ inputs.repository-ref }}
+        RELEASE_REF: ${{ inputs.release-ref }}
+        X86_64_ASSET_REF: ${{ inputs['x86-64-asset-ref'] }}
+        ARM64_ASSET_REF: ${{ inputs.arm64-asset-ref }}
+        BINARY_NAME: ${{ inputs.binary-name }}
+        INSTALL_DIR: ${{ inputs.install-dir }}
+      run: |
+        set -euo pipefail
+
+        if ! command -v curl >/dev/null 2>&1; then
+          echo "::error::curl is required to download cloud-hypervisor." >&2
+          exit 1
+        fi
+
+        case "$(uname -m)" in
+          x86_64)
+            asset="$X86_64_ASSET_REF"
+            ;;
+          aarch64|arm64)
+            asset="$ARM64_ASSET_REF"
+            ;;
+          *)
+            echo "::error::Unsupported runner architecture for cloud-hypervisor: $(uname -m)" >&2
+            exit 1
+            ;;
+        esac
+
+        if [ -z "$INSTALL_DIR" ]; then
+          INSTALL_DIR="${RUNNER_TEMP:-/tmp}/conch-cloud-hypervisor/bin"
+        fi
+
+        install -d -m 0755 "$INSTALL_DIR"
+
+        url="https://${REPOSITORY_REF}/releases/download/${RELEASE_REF}/${asset}"
+        binary_path="$INSTALL_DIR/$BINARY_NAME"
+
+        echo "Downloading cloud-hypervisor from $url"
+        curl -fsSL "$url" -o "$binary_path"
+        chmod 0755 "$binary_path"
+
+        echo "$INSTALL_DIR" >> "$GITHUB_PATH"
+        echo "binary-path=$binary_path" >> "$GITHUB_OUTPUT"
+
+        "$binary_path" --version
