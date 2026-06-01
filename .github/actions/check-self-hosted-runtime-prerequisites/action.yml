@@ -1,0 +1,231 @@
+name: Check self-hosted runtime prerequisites
+description: Validate common self-hosted runner requirements for Conch E2E workflows.
+
+inputs:
+  required-commands:
+    description: Space-separated command names that must exist on PATH.
+    required: false
+    default: ""
+  vmm-name:
+    description: Virtual machine monitor command name.
+    required: false
+    default: cloud-hypervisor
+  require-arm64:
+    description: Require the runner architecture to be ARM64.
+    required: false
+    default: "false"
+  require-sudo:
+    description: Require passwordless sudo.
+    required: false
+    default: "true"
+  require-kvm:
+    description: Require readable and writable /dev/kvm.
+    required: false
+    default: "true"
+  kernel-path:
+    description: Kernel image path that must exist.
+    required: false
+    default: ""
+  kernel-name:
+    description: Human-readable name for kernel-path diagnostics.
+    required: false
+    default: Linux kernel image
+  initrd-path:
+    description: Initrd path that must exist.
+    required: false
+    default: ""
+  initrd-name:
+    description: Human-readable name for initrd-path diagnostics.
+    required: false
+    default: Conch initrd
+  require-erofs:
+    description: Require host EROFS support.
+    required: false
+    default: "false"
+  mkfs-erofs-required-flag:
+    description: mkfs.erofs help flag that must be supported.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Check self-hosted runtime prerequisites
+      shell: bash
+      env:
+        REQUIRED_COMMANDS: ${{ inputs.required-commands }}
+        VMM_NAME: ${{ inputs.vmm-name }}
+        REQUIRE_ARM64: ${{ inputs.require-arm64 }}
+        REQUIRE_SUDO: ${{ inputs.require-sudo }}
+        REQUIRE_KVM: ${{ inputs.require-kvm }}
+        KERNEL_PATH: ${{ inputs.kernel-path }}
+        KERNEL_NAME: ${{ inputs.kernel-name }}
+        INITRD_PATH: ${{ inputs.initrd-path }}
+        INITRD_NAME: ${{ inputs.initrd-name }}
+        REQUIRE_EROFS: ${{ inputs.require-erofs }}
+        MKFS_EROFS_REQUIRED_FLAG: ${{ inputs.mkfs-erofs-required-flag }}
+      run: |
+        set -euo pipefail
+
+        is_true() {
+          case "$1" in
+            true|True|TRUE|1|yes|YES) return 0 ;;
+            *) return 1 ;;
+          esac
+        }
+
+        print_tool_hint() {
+          local tool="$1"
+          echo "Prepare the missing tool before retrying this workflow:" >&2
+          case "$tool" in
+            "$VMM_NAME")
+              echo "  - $VMM_NAME must be installed and visible in PATH." >&2
+              if [ -n "${CONCH_CLOUD_HYPERVISOR_REPOSITORY_REF:-}" ]; then
+                echo "  - Expected repository: $CONCH_CLOUD_HYPERVISOR_REPOSITORY_REF." >&2
+              fi
+              if [ -n "${CONCH_CLOUD_HYPERVISOR_RELEASE_REF:-}" ]; then
+                echo "  - Recommended release: $CONCH_CLOUD_HYPERVISOR_RELEASE_REF." >&2
+              fi
+              if [ -n "${CONCH_CLOUD_HYPERVISOR_ARM64_ASSET_REF:-}" ]; then
+                echo "  - For ARM64, install $CONCH_CLOUD_HYPERVISOR_ARM64_ASSET_REF as $VMM_NAME in PATH." >&2
+              fi
+              ;;
+            mkfs.erofs)
+              if [ -n "${OPENEULER_EROFS_PACKAGES:-}" ]; then
+                echo "  - openEuler example: sudo yum install -y $OPENEULER_EROFS_PACKAGES" >&2
+              fi
+              if [ -n "$MKFS_EROFS_REQUIRED_FLAG" ]; then
+                echo "  - The installed mkfs.erofs must support $MKFS_EROFS_REQUIRED_FLAG." >&2
+              fi
+              ;;
+            protoc)
+              [ -n "${OPENEULER_PROTOC_PACKAGES:-}" ] && echo "  - openEuler example: sudo yum install -y $OPENEULER_PROTOC_PACKAGES" >&2
+              ;;
+            ip)
+              [ -n "${OPENEULER_IPROUTE_PACKAGES:-}" ] && echo "  - openEuler example: sudo yum install -y $OPENEULER_IPROUTE_PACKAGES" >&2
+              ;;
+            iptables)
+              [ -n "${OPENEULER_IPTABLES_PACKAGES:-}" ] && echo "  - openEuler example: sudo yum install -y $OPENEULER_IPTABLES_PACKAGES" >&2
+              ;;
+            curl)
+              [ -n "${OPENEULER_CURL_PACKAGES:-}" ] && echo "  - openEuler example: sudo yum install -y $OPENEULER_CURL_PACKAGES" >&2
+              ;;
+            git)
+              [ -n "${OPENEULER_GIT_PACKAGES:-}" ] && echo "  - openEuler example: sudo yum install -y $OPENEULER_GIT_PACKAGES" >&2
+              ;;
+            *)
+              echo "  - Install $tool and make sure it is visible in the runner user's PATH." >&2
+              ;;
+          esac
+        }
+
+        check_required_commands() {
+          local missing=()
+          local command_path
+          local tool
+
+          for tool in "$@"; do
+            if command_path="$(command -v "$tool")"; then
+              echo "Found required command: $tool -> $command_path"
+            else
+              echo "::error::Required command not found on the self-hosted runner: $tool" >&2
+              print_tool_hint "$tool"
+              missing+=("$tool")
+            fi
+          done
+
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Missing required runner commands: ${missing[*]}" >&2
+            exit 1
+          fi
+        }
+
+        require_file() {
+          local path="$1"
+          local name="$2"
+          if [ -z "$path" ]; then
+            return 0
+          fi
+          if [ -f "$path" ]; then
+            return 0
+          fi
+          echo "::error::$name does not exist: $path" >&2
+          case "$name" in
+            *kernel*|*Kernel*)
+              echo "Prepare the kernel image on the self-hosted runner, or pass workflow input kernel_path. Expected path: $path" >&2
+              ;;
+            *initrd*|*Initrd*)
+              echo "Prepare the initrd on the self-hosted runner, or pass workflow input initrd_path. Expected path: $path" >&2
+              ;;
+          esac
+          exit 1
+        }
+
+        arch="$(uname -m)"
+        echo "Detected runner architecture: $arch"
+        if is_true "$REQUIRE_ARM64"; then
+          case "$arch" in
+            aarch64|arm64) ;;
+            *)
+              echo "::error::This workflow must run on ARM64, got: $arch" >&2
+              exit 1
+              ;;
+          esac
+        fi
+
+        if is_true "$REQUIRE_SUDO"; then
+          if ! sudo -n true; then
+            echo "::error::Passwordless sudo is required for the self-hosted runner user." >&2
+            echo "Prepare passwordless sudo for the runner service user before retrying this workflow." >&2
+            exit 1
+          fi
+        fi
+
+        if is_true "$REQUIRE_KVM"; then
+          if ! sudo -n test -r /dev/kvm; then
+            echo "::error::The runner user cannot read /dev/kvm, or /dev/kvm is missing." >&2
+            echo "Prepare KVM access on the self-hosted runner before retrying this workflow." >&2
+            exit 1
+          fi
+
+          if ! sudo -n test -w /dev/kvm; then
+            echo "::error::The runner user cannot write /dev/kvm." >&2
+            echo "Prepare KVM write access on the self-hosted runner before retrying this workflow." >&2
+            exit 1
+          fi
+        fi
+
+        read -r -a required_commands <<< "$REQUIRED_COMMANDS"
+        check_required_commands "${required_commands[@]}" "$VMM_NAME"
+
+        require_file "$KERNEL_PATH" "$KERNEL_NAME"
+        require_file "$INITRD_PATH" "$INITRD_NAME"
+
+        if is_true "$REQUIRE_EROFS"; then
+          if ! sudo -n modprobe erofs; then
+            echo "::error::Failed to load the erofs kernel module." >&2
+            echo "Prepare host kernel EROFS support before retrying this workflow." >&2
+            exit 1
+          fi
+
+          if ! grep -qw erofs /proc/filesystems; then
+            echo "::error::The host kernel does not report erofs support in /proc/filesystems." >&2
+            echo "Prepare host kernel EROFS support before retrying this workflow." >&2
+            exit 1
+          fi
+        fi
+
+        if [ -n "$MKFS_EROFS_REQUIRED_FLAG" ]; then
+          mkfs_erofs_help="$(mkfs.erofs --help 2>&1 || true)"
+          if ! grep -q -- "$MKFS_EROFS_REQUIRED_FLAG" <<<"$mkfs_erofs_help"; then
+            echo "::error::mkfs.erofs does not support $MKFS_EROFS_REQUIRED_FLAG; please upgrade ${OPENEULER_EROFS_PACKAGES:-erofs-utils}." >&2
+            echo "Prepare a newer ${OPENEULER_EROFS_PACKAGES:-erofs-utils} package on the self-hosted runner before retrying this workflow." >&2
+            exit 1
+          fi
+        fi
+
+        for tool in protoc "$VMM_NAME"; do
+          if command -v "$tool" >/dev/null 2>&1; then
+            "$tool" --version
+          fi
+        done

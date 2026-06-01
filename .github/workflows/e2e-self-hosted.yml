@@ -68,148 +68,21 @@ jobs:
     timeout-minutes: 90
 
     steps:
+      - name: Checkout CI repository
+        uses: actions/checkout@v4
+
       - name: Check self-hosted runtime prerequisites
-        run: |
-          set -euo pipefail
-
-          print_tool_hint() {
-            local tool="$1"
-            echo "Prepare the missing tool before retrying this workflow:" >&2
-            case "$tool" in
-              "$CONCH_E2E_VMM_NAME")
-                echo "  - $CONCH_E2E_VMM_NAME must be the Conch-compatible build from $CONCH_CLOUD_HYPERVISOR_REPOSITORY_REF." >&2
-                echo "  - Recommended release: $CONCH_CLOUD_HYPERVISOR_RELEASE_REF." >&2
-                echo "  - For ARM64, install $CONCH_CLOUD_HYPERVISOR_ARM64_ASSET_REF as $CONCH_E2E_VMM_NAME in PATH." >&2
-                ;;
-              mkfs.erofs)
-                echo "  - openEuler example: sudo yum install -y $OPENEULER_EROFS_PACKAGES" >&2
-                echo "  - The installed mkfs.erofs must support $CONCH_MKFS_EROFS_REQUIRED_FLAG." >&2
-                ;;
-              protoc)
-                echo "  - openEuler example: sudo yum install -y $OPENEULER_PROTOC_PACKAGES" >&2
-                ;;
-              ip)
-                echo "  - openEuler example: sudo yum install -y $OPENEULER_IPROUTE_PACKAGES" >&2
-                ;;
-              iptables)
-                echo "  - openEuler example: sudo yum install -y $OPENEULER_IPTABLES_PACKAGES" >&2
-                ;;
-              curl)
-                echo "  - openEuler example: sudo yum install -y $OPENEULER_CURL_PACKAGES" >&2
-                ;;
-              git)
-                echo "  - openEuler example: sudo yum install -y $OPENEULER_GIT_PACKAGES" >&2
-                ;;
-              *)
-                echo "  - Install $tool and make sure it is visible in the runner user's PATH." >&2
-                ;;
-            esac
-          }
-
-          check_required_commands() {
-            local missing=()
-            local command_path
-            local tool
-
-            for tool in "$@"; do
-              if command_path="$(command -v "$tool")"; then
-                echo "Found required command: $tool -> $command_path"
-              else
-                echo "::error::Required command not found on the self-hosted runner: $tool" >&2
-                print_tool_hint "$tool"
-                missing+=("$tool")
-              fi
-            done
-
-            if [ "${#missing[@]}" -gt 0 ]; then
-              echo "::error::Missing required runner commands: ${missing[*]}" >&2
-              exit 1
-            fi
-          }
-
-          require_file() {
-            local path="$1"
-            local name="$2"
-            if [ ! -f "$path" ]; then
-              echo "::error::$name does not exist: $path" >&2
-              return 1
-            fi
-          }
-
-          print_path_hint() {
-            local path="$1"
-            local name="$2"
-            case "$name" in
-              "Conch kernel")
-                echo "Prepare the official Conch kernel on the self-hosted runner, or pass workflow input kernel_path. Expected path: $path" >&2
-                ;;
-              "Conch initrd")
-                echo "Prepare the official Conch initrd on the self-hosted runner, or pass workflow input initrd_path. Expected path: $path" >&2
-                ;;
-            esac
-          }
-
-          arch="$(uname -m)"
-          echo "Detected runner architecture: $arch"
-          case "$arch" in
-            aarch64|arm64) ;;
-            *)
-              echo "This e2e workflow must run on ARM64, got: $arch" >&2
-              exit 1
-              ;;
-          esac
-
-          if ! sudo -n true; then
-            echo "::error::Passwordless sudo is required for the self-hosted runner user." >&2
-            echo "Prepare passwordless sudo for the runner service user before retrying this workflow." >&2
-            exit 1
-          fi
-
-          if ! sudo -n test -r /dev/kvm; then
-            echo "::error::The runner user cannot read /dev/kvm, or /dev/kvm is missing." >&2
-            echo "Prepare KVM access on the self-hosted runner before retrying this workflow." >&2
-            exit 1
-          fi
-
-          if ! sudo -n test -w /dev/kvm; then
-            echo "::error::The runner user cannot write /dev/kvm." >&2
-            echo "Prepare KVM write access on the self-hosted runner before retrying this workflow." >&2
-            exit 1
-          fi
-
-          read -r -a required_commands <<< "$CONCH_RUNNER_REQUIRED_COMMANDS"
-          check_required_commands "${required_commands[@]}" "$CONCH_E2E_VMM_NAME"
-
-          if ! require_file "$CONCH_KERNEL_PATH" "Conch kernel"; then
-            print_path_hint "$CONCH_KERNEL_PATH" "Conch kernel"
-            exit 1
-          fi
-          if ! require_file "$CONCH_INITRD_PATH" "Conch initrd"; then
-            print_path_hint "$CONCH_INITRD_PATH" "Conch initrd"
-            exit 1
-          fi
-
-          if ! sudo -n modprobe erofs; then
-            echo "::error::Failed to load the erofs kernel module." >&2
-            echo "Prepare host kernel EROFS support before retrying this workflow." >&2
-            exit 1
-          fi
-
-          if ! grep -qw erofs /proc/filesystems; then
-            echo "::error::The host kernel does not report erofs support in /proc/filesystems." >&2
-            echo "Prepare host kernel EROFS support before retrying this workflow." >&2
-            exit 1
-          fi
-
-          mkfs_erofs_help="$(mkfs.erofs --help 2>&1 || true)"
-          if ! grep -q -- "$CONCH_MKFS_EROFS_REQUIRED_FLAG" <<<"$mkfs_erofs_help"; then
-            echo "::error::mkfs.erofs does not support $CONCH_MKFS_EROFS_REQUIRED_FLAG; please upgrade $OPENEULER_EROFS_PACKAGES." >&2
-            echo "Prepare a newer $OPENEULER_EROFS_PACKAGES package on the self-hosted runner before retrying this workflow." >&2
-            exit 1
-          fi
-
-          protoc --version
-          "$CONCH_E2E_VMM_NAME" --version
+        uses: ./.github/actions/check-self-hosted-runtime-prerequisites
+        with:
+          required-commands: ${{ env.CONCH_RUNNER_REQUIRED_COMMANDS }}
+          vmm-name: ${{ env.CONCH_E2E_VMM_NAME }}
+          require-arm64: "true"
+          kernel-path: ${{ env.CONCH_KERNEL_PATH }}
+          kernel-name: Conch kernel
+          initrd-path: ${{ env.CONCH_INITRD_PATH }}
+          initrd-name: Conch initrd
+          require-erofs: "true"
+          mkfs-erofs-required-flag: ${{ env.CONCH_MKFS_EROFS_REQUIRED_FLAG }}
 
       - name: Fetch Conch source
         run: |

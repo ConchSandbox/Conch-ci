@@ -1,0 +1,399 @@
+name: Conch Agent Init E2E
+
+on:
+  workflow_dispatch:
+    inputs:
+      conch_repository:
+        description: Conch source repository URL
+        required: false
+        default: https://github.com/ConchSandbox/Conch.git
+      conch_ref:
+        description: Conch source ref to validate
+        required: false
+        default: dev-cri
+      kernel_path:
+        description: Linux kernel image path on the self-hosted runner
+        required: false
+        default: /opt/conch/bzImage
+      alpine_version:
+        description: Alpine minirootfs version used for the initramfs
+        required: false
+        default: 3.20.3
+      alpine_mirror:
+        description: Alpine Linux mirror base URL
+        required: false
+        default: https://dl-cdn.alpinelinux.org/alpine
+
+permissions:
+  contents: read
+
+concurrency:
+  group: conch-agent-init-e2e-${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  CONCH_REPOSITORY: ${{ github.event.inputs.conch_repository || vars.CONCH_REPOSITORY || 'https://github.com/ConchSandbox/Conch.git' }}
+  CONCH_REF: ${{ github.event.inputs.conch_ref || vars.CONCH_REF || 'dev-cri' }}
+  CONCH_KERNEL_PATH: ${{ github.event.inputs.kernel_path || vars.CONCH_AGENT_E2E_KERNEL_PATH || '/opt/conch/bzImage' }}
+  ALPINE_VERSION: ${{ github.event.inputs.alpine_version || vars.CONCH_AGENT_E2E_ALPINE_VERSION || '3.20.3' }}
+  ALPINE_MIRROR: ${{ github.event.inputs.alpine_mirror || vars.CONCH_AGENT_E2E_ALPINE_MIRROR || 'https://dl-cdn.alpinelinux.org/alpine' }}
+  CONCH_E2E_VMM_NAME: cloud-hypervisor
+  CONCH_AGENT_GRPC_PORT: "4064"
+  CONCH_AGENT_VSOCK_PORT: "4065"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  agent-init:
+    name: Agent Init Mode
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout CI repository
+        uses: actions/checkout@v4
+
+      - name: Check self-hosted runtime prerequisites
+        uses: ./.github/actions/check-self-hosted-runtime-prerequisites
+        with:
+          required-commands: curl git tar gzip cpio file ip
+          vmm-name: ${{ env.CONCH_E2E_VMM_NAME }}
+          kernel-path: ${{ env.CONCH_KERNEL_PATH }}
+          kernel-name: Linux kernel image
+
+      - name: Fetch Conch source
+        run: |
+          set -euo pipefail
+          rm -rf conch-src
+          git init conch-src
+          cd conch-src
+          git remote add origin "$CONCH_REPOSITORY"
+          git fetch --depth 1 origin "$CONCH_REF"
+          git checkout --detach FETCH_HEAD
+          git log --oneline -1
+          git status --short --branch
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 1.26.x
+          cache-dependency-path: conch-src/go.sum
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Prepare e2e workspace
+        run: |
+          set -euo pipefail
+
+          workdir="${RUNNER_TEMP:-/tmp}/conch-agent-init-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          sudo rm -rf "$workdir"
+          mkdir -p "$workdir"
+
+          suffix="$(printf '%s' "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" | sha256sum | cut -c1-8)"
+          subnet_octet="$(( (16#${suffix:0:2} % 100) + 100 ))"
+          tap_name="ca${suffix}"
+
+          {
+            echo "CONCH_AGENT_E2E_WORKDIR=$workdir"
+            echo "CONCH_AGENT_ROOTFS=$workdir/rootfs"
+            echo "CONCH_AGENT_INITRAMFS=$workdir/conch-agent-initramfs.cpio.gz"
+            echo "CONCH_AGENT_CONSOLE_LOG=$workdir/console.log"
+            echo "CONCH_AGENT_VMM_LOG=$workdir/cloud-hypervisor.log"
+            echo "CONCH_AGENT_VMM_API=$workdir/cloud-hypervisor.sock"
+            echo "CONCH_AGENT_VSOCK_SOCKET=$workdir/conch-agent.vsock"
+            echo "CONCH_AGENT_VMM_PID_FILE=$workdir/cloud-hypervisor.pid"
+            echo "CONCH_AGENT_TAP_NAME=$tap_name"
+            echo "CONCH_AGENT_HOST_IP=192.168.${subnet_octet}.1"
+            echo "CONCH_AGENT_GUEST_IP=192.168.${subnet_octet}.2"
+            echo "CONCH_AGENT_NET_CIDR=192.168.${subnet_octet}.1/30"
+            echo "CONCH_AGENT_SANDBOX_ID=sandbox_agent_init_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+          } >> "$GITHUB_ENV"
+
+      - name: Build conch-agent
+        working-directory: conch-src
+        run: |
+          set -euo pipefail
+
+          case "$(uname -m)" in
+            x86_64) goarch=amd64 ;;
+            aarch64|arm64) goarch=arm64 ;;
+            *)
+              echo "::error::Unsupported runner architecture: $(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+
+          mkdir -p "$CONCH_AGENT_E2E_WORKDIR/bin"
+          CGO_ENABLED=0 GOOS=linux GOARCH="$goarch" \
+            go build -tags "netgo,osusergo" \
+              -ldflags '-s -w -extldflags "-static"' \
+              -o "$CONCH_AGENT_E2E_WORKDIR/bin/conch-agent" \
+              ./cmd/conch-agent
+
+          file "$CONCH_AGENT_E2E_WORKDIR/bin/conch-agent"
+
+      - name: Build Alpine initramfs
+        run: |
+          set -euo pipefail
+
+          case "$(uname -m)" in
+            x86_64) alpine_arch=x86_64 ;;
+            aarch64|arm64) alpine_arch=aarch64 ;;
+            *)
+              echo "::error::Unsupported runner architecture: $(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+
+          alpine_series="v${ALPINE_VERSION%.*}"
+          alpine_tar="alpine-minirootfs-${ALPINE_VERSION}-${alpine_arch}.tar.gz"
+          alpine_url="${ALPINE_MIRROR}/${alpine_series}/releases/${alpine_arch}/${alpine_tar}"
+
+          mkdir -p "$CONCH_AGENT_ROOTFS"
+          curl -fsSL "$alpine_url" -o "$CONCH_AGENT_E2E_WORKDIR/$alpine_tar"
+          tar -xzf "$CONCH_AGENT_E2E_WORKDIR/$alpine_tar" -C "$CONCH_AGENT_ROOTFS"
+
+          install -m 0755 "$CONCH_AGENT_E2E_WORKDIR/bin/conch-agent" "$CONCH_AGENT_ROOTFS/sbin/conch-agent"
+          mkdir -p "$CONCH_AGENT_ROOTFS"/{proc,sys,dev,run,tmp,var/log/conch-agent}
+
+          cat > "$CONCH_AGENT_ROOTFS/init" <<EOF
+          #!/bin/sh
+          set -eu
+
+          mount -t proc proc /proc || true
+          mount -t sysfs sysfs /sys || true
+          mount -t devtmpfs devtmpfs /dev || mount -t tmpfs dev /dev || true
+          mkdir -p /dev/pts /run /tmp /var/log/conch-agent
+          mount -t devpts devpts /dev/pts || true
+          mount -t tmpfs tmpfs /run || true
+
+          ip link set lo up || true
+          for _ in \$(seq 1 100); do
+            [ -d /sys/class/net/eth0 ] && break
+            sleep 0.1
+          done
+          ip addr add ${CONCH_AGENT_GUEST_IP}/30 dev eth0 || true
+          ip link set eth0 up || true
+
+          echo "CONCH_AGENT_INIT_BOOTED sandbox=${CONCH_AGENT_SANDBOX_ID} guest_ip=${CONCH_AGENT_GUEST_IP}" >/dev/hvc0
+          exec /sbin/conch-agent --init
+          EOF
+          chmod 0755 "$CONCH_AGENT_ROOTFS/init"
+
+          (
+            cd "$CONCH_AGENT_ROOTFS"
+            find . -print0 | cpio --null -o --format=newc | gzip -9
+          ) > "$CONCH_AGENT_INITRAMFS"
+
+          ls -lh "$CONCH_AGENT_INITRAMFS"
+
+      - name: Start cloud-hypervisor VM
+        run: |
+          set -euo pipefail
+
+          sudo ip link del "$CONCH_AGENT_TAP_NAME" >/dev/null 2>&1 || true
+          sudo ip tuntap add "$CONCH_AGENT_TAP_NAME" mode tap
+          sudo ip addr add "$CONCH_AGENT_NET_CIDR" dev "$CONCH_AGENT_TAP_NAME"
+          sudo ip link set "$CONCH_AGENT_TAP_NAME" up
+
+          sudo -n env PATH="$PATH" "$CONCH_E2E_VMM_NAME" \
+            --cpus boot=1,max=1 \
+            --memory size=512M \
+            --kernel "$CONCH_KERNEL_PATH" \
+            --initramfs "$CONCH_AGENT_INITRAMFS" \
+            --cmdline "console=hvc0 root=/dev/ram0 rw panic=-1 conch.sandbox_id=${CONCH_AGENT_SANDBOX_ID}" \
+            --api-socket "path=$CONCH_AGENT_VMM_API" \
+            --console "file=$CONCH_AGENT_CONSOLE_LOG" \
+            --serial null \
+            --net "tap=$CONCH_AGENT_TAP_NAME" \
+            --vsock "cid=4,socket=$CONCH_AGENT_VSOCK_SOCKET" \
+            --seccomp false \
+            > "$CONCH_AGENT_VMM_LOG" 2>&1 &
+          echo "$!" > "$CONCH_AGENT_VMM_PID_FILE"
+
+          for _ in $(seq 1 120); do
+            if [ -S "$CONCH_AGENT_VMM_API" ] && [ -S "$CONCH_AGENT_VSOCK_SOCKET" ]; then
+              exit 0
+            fi
+            if ! kill -0 "$(cat "$CONCH_AGENT_VMM_PID_FILE")" >/dev/null 2>&1; then
+              echo "::error::cloud-hypervisor exited before exposing sockets" >&2
+              sed -n '1,200p' "$CONCH_AGENT_VMM_LOG" >&2 || true
+              exit 1
+            fi
+            sleep 1
+          done
+
+          echo "::error::Timed out waiting for cloud-hypervisor sockets" >&2
+          sed -n '1,200p' "$CONCH_AGENT_VMM_LOG" >&2 || true
+          exit 1
+
+      - name: Wait for agent init boot log
+        run: |
+          set -euo pipefail
+
+          for _ in $(seq 1 120); do
+            if grep -q 'CONCH_AGENT_INIT_BOOTED' "$CONCH_AGENT_CONSOLE_LOG" 2>/dev/null; then
+              grep 'CONCH_AGENT_INIT_BOOTED' "$CONCH_AGENT_CONSOLE_LOG"
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "::error::Timed out waiting for conch-agent init boot marker" >&2
+          sed -n '1,240p' "$CONCH_AGENT_CONSOLE_LOG" >&2 || true
+          exit 1
+
+      - name: Verify vsock readiness signal
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          import os
+          import socket
+          import sys
+          import time
+
+          socket_path = os.environ["CONCH_AGENT_VSOCK_SOCKET"]
+          sandbox_id = os.environ["CONCH_AGENT_SANDBOX_ID"]
+          vsock_port = os.environ["CONCH_AGENT_VSOCK_PORT"]
+          connect = f"CONNECT {vsock_port}\n".encode()
+          payload = f"I AM SANDBOX_ID:{sandbox_id}\n".encode()
+          deadline = time.time() + 120
+          last_error = None
+
+          while time.time() < deadline:
+              try:
+                  with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+                      sock.settimeout(5)
+                      sock.connect(socket_path)
+                      sock.sendall(connect)
+                      proxy_response = sock.recv(1024).decode(errors="replace")
+                      if "OK" not in proxy_response:
+                          raise RuntimeError(f"unexpected VMM proxy response: {proxy_response!r}")
+                      sock.sendall(payload)
+                      response = sock.recv(1024).decode(errors="replace")
+                      print(response)
+                      if "OK" in response and "READY:" in response:
+                          sys.exit(0)
+                      last_error = RuntimeError(f"unexpected response: {response!r}")
+              except Exception as exc:
+                  last_error = exc
+              time.sleep(1)
+
+          raise SystemExit(f"timed out waiting for agent vsock READY response: {last_error}")
+          PY
+
+      - name: Verify agent gRPC API over tap network
+        working-directory: conch-src
+        run: |
+          set -euo pipefail
+
+          python -m pip install --upgrade pip
+          python -m pip install grpcio protobuf
+
+          python - <<'PY'
+          import os
+          import time
+
+          import grpc
+
+          from api.py_proto import agent_pb2, agent_pb2_grpc
+
+          target = f"{os.environ['CONCH_AGENT_GUEST_IP']}:{os.environ['CONCH_AGENT_GRPC_PORT']}"
+          expected = f"conch-agent-init:{os.environ['GITHUB_RUN_ID']}:{os.environ['GITHUB_RUN_ATTEMPT']}"
+          deadline = time.time() + 120
+          last_error = None
+
+          while time.time() < deadline:
+              try:
+                  channel = grpc.insecure_channel(target)
+                  grpc.channel_ready_future(channel).result(timeout=3)
+                  stub = agent_pb2_grpc.AgentServiceStub(channel)
+
+                  health = stub.HealthCheck(agent_pb2.Empty(), timeout=5)
+                  if health.message != "OK":
+                      raise RuntimeError(f"unexpected health reply: {health.message!r}")
+
+                  script = (
+                      f"printf '%s\\n' '{expected}'; "
+                      "tr '\\0' ' ' </proc/1/cmdline; "
+                      "printf '\\n'"
+                  )
+                  result = stub.StartProcess(
+                      agent_pb2.StartProcessRequest(
+                          cmd="sh",
+                          args=["-c", script],
+                          cwd="/tmp",
+                      ),
+                      timeout=10,
+                  )
+                  if result.exit_code != 0:
+                      raise RuntimeError(
+                          f"StartProcess failed: exit={result.exit_code} stdout={result.stdout!r} stderr={result.stderr!r} error={result.error!r}"
+                      )
+                  if expected not in result.stdout:
+                      raise RuntimeError(f"missing expected command marker in stdout: {result.stdout!r}")
+                  if "conch-agent" not in result.stdout or "--init" not in result.stdout:
+                      raise RuntimeError(f"PID 1 does not look like conch-agent --init: {result.stdout!r}")
+
+                  print(result.stdout)
+                  raise SystemExit(0)
+              except Exception as exc:
+                  last_error = exc
+                  time.sleep(1)
+
+          raise SystemExit(f"timed out waiting for agent gRPC API at {target}: {last_error}")
+          PY
+
+      - name: Dump VM logs on failure
+        if: failure()
+        run: |
+          set +e
+          echo "===== cloud-hypervisor log ====="
+          sed -n '1,240p' "$CONCH_AGENT_VMM_LOG"
+          echo "===== guest console log ====="
+          sed -n '1,300p' "$CONCH_AGENT_CONSOLE_LOG"
+
+      - name: Upload VM logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conch-agent-init-e2e-logs
+          path: |
+            ${{ env.CONCH_AGENT_VMM_LOG }}
+            ${{ env.CONCH_AGENT_CONSOLE_LOG }}
+          if-no-files-found: ignore
+
+      - name: Cleanup e2e resources
+        if: always()
+        run: |
+          set +e
+
+          if [ -n "${CONCH_AGENT_VMM_API:-}" ] && [ -S "$CONCH_AGENT_VMM_API" ]; then
+            curl --unix-socket "$CONCH_AGENT_VMM_API" -fsS -X PUT http://localhost/api/v1/vm.shutdown >/dev/null 2>&1 || true
+          fi
+
+          if [ -n "${CONCH_AGENT_VMM_PID_FILE:-}" ] && [ -f "$CONCH_AGENT_VMM_PID_FILE" ]; then
+            vmm_pid="$(cat "$CONCH_AGENT_VMM_PID_FILE")"
+            if kill -0 "$vmm_pid" >/dev/null 2>&1; then
+              sudo kill "$vmm_pid" >/dev/null 2>&1 || true
+              for _ in $(seq 1 30); do
+                kill -0 "$vmm_pid" >/dev/null 2>&1 || break
+                sleep 1
+              done
+              kill -0 "$vmm_pid" >/dev/null 2>&1 && sudo kill -9 "$vmm_pid" >/dev/null 2>&1 || true
+            fi
+          fi
+
+          if [ -n "${CONCH_AGENT_TAP_NAME:-}" ]; then
+            sudo ip link del "$CONCH_AGENT_TAP_NAME" >/dev/null 2>&1 || true
+          fi
+
+          if [ -n "${CONCH_AGENT_E2E_WORKDIR:-}" ]; then
+            sudo rm -rf "$CONCH_AGENT_E2E_WORKDIR"
+          fi
