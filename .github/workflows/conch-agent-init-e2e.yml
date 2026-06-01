@@ -130,6 +130,34 @@ jobs:
           tar --warning=no-unknown-keyword -xzf "$kernel_workdir/$kernel_apk" -C "$kernel_workdir" boot/vmlinuz-virt
 
           resolved_kernel="$kernel_workdir/boot/vmlinuz-virt"
+          if [ "$alpine_arch" = "aarch64" ]; then
+            zboot_kernel="$resolved_kernel"
+            raw_kernel="$kernel_workdir/boot/Image"
+            gz_log="$kernel_workdir/extract-vmlinuz.log"
+            extracted="false"
+
+            while IFS=: read -r offset _; do
+              set +e
+              tail -c +$((offset + 1)) "$zboot_kernel" | gzip -dc > "$raw_kernel.tmp" 2> "$gz_log"
+              gzip_status=$?
+              set -e
+
+              if [ "$gzip_status" -eq 0 ] || { [ "$gzip_status" -eq 2 ] && grep -q "decompression OK" "$gz_log"; }; then
+                if file "$raw_kernel.tmp" | grep -q "ARM64 boot executable Image"; then
+                  mv "$raw_kernel.tmp" "$raw_kernel"
+                  resolved_kernel="$raw_kernel"
+                  extracted="true"
+                  break
+                fi
+              fi
+            done < <(LC_ALL=C grep -abo $'\x1f\x8b\x08' "$zboot_kernel" || true)
+
+            if [ "$extracted" != "true" ]; then
+              echo "::error::Failed to extract raw ARM64 Image from $zboot_kernel." >&2
+              exit 1
+            fi
+          fi
+
           chmod 0644 "$resolved_kernel"
           echo "CONCH_KERNEL_PATH=$resolved_kernel" >> "$GITHUB_ENV"
           file "$resolved_kernel"
@@ -285,6 +313,9 @@ jobs:
           sudo ip tuntap add "$CONCH_AGENT_TAP_NAME" mode tap
           sudo ip addr add "$CONCH_AGENT_NET_CIDR" dev "$CONCH_AGENT_TAP_NAME"
           sudo ip link set "$CONCH_AGENT_TAP_NAME" up
+
+          touch "$CONCH_AGENT_CONSOLE_LOG"
+          chmod 0666 "$CONCH_AGENT_CONSOLE_LOG"
 
           sudo -n env PATH="$PATH" "$CONCH_E2E_VMM_NAME" \
             --cpus boot=1,max=1 \
