@@ -1,4 +1,4 @@
-name: Conch Build And Static Checks
+name: Conch Build & Static Check
 
 on:
   workflow_dispatch:
@@ -29,7 +29,7 @@ defaults:
 
 jobs:
   ci:
-    name: PR CI
+    name: Conch Build & Static Check
     runs-on: ubuntu-24.04
     timeout-minutes: 45
 
