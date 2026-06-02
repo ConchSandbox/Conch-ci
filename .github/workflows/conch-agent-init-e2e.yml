@@ -1,4 +1,4 @@
-name: Conch Agent Init E2E
+name: Conch-agent E2E
 
 on:
   workflow_dispatch:
