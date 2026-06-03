@@ -56,13 +56,19 @@ runs:
         rm -rf "$workdir"
         mkdir -p "$workdir" "$INSTALL_DIR"
 
-        if [ "$BUILDKIT_VERSION" = "latest" ]; then
-          url="https://github.com/moby/buildkit/releases/latest/download/buildkit-linux-${buildkit_arch}.tar.gz"
-        else
-          url="https://github.com/moby/buildkit/releases/download/${BUILDKIT_VERSION}/buildkit-linux-${buildkit_arch}.tar.gz"
+        release_version="$BUILDKIT_VERSION"
+        if [ "$release_version" = "latest" ]; then
+          latest_url="$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/moby/buildkit/releases/latest)"
+          release_version="${latest_url##*/}"
         fi
+        if [[ "$release_version" != v* ]]; then
+          release_version="v${release_version}"
+        fi
+        asset="buildkit-${release_version}.linux-${buildkit_arch}.tar.gz"
+        url="https://github.com/moby/buildkit/releases/download/${release_version}/${asset}"
 
         curl -fsSL "$url" -o "$workdir/buildkit.tar.gz"
+        gzip -t "$workdir/buildkit.tar.gz"
         tar -xzf "$workdir/buildkit.tar.gz" -C "$workdir"
         install -m 0755 "$workdir/bin/buildctl" "$INSTALL_DIR/buildctl"
         install -m 0755 "$workdir/bin/buildkitd" "$INSTALL_DIR/buildkitd"
