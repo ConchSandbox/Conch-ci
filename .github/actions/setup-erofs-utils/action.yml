@@ -43,6 +43,7 @@ runs:
               build-essential \
               ca-certificates \
               curl \
+              git \
               libdeflate-dev \
               liblz4-dev \
               liblzma-dev \
@@ -62,6 +63,7 @@ runs:
               curl \
               gcc \
               gcc-c++ \
+              git \
               libtool \
               libuuid-devel \
               lz4-devel \
@@ -81,6 +83,7 @@ runs:
               curl \
               gcc \
               gcc-c++ \
+              git \
               libtool \
               libuuid-devel \
               lz4-devel \
@@ -108,13 +111,25 @@ runs:
         workdir="${RUNNER_TEMP:-/tmp}/conch-erofs-utils"
         rm -rf "$workdir"
         mkdir -p "$workdir"
+        source_dir="$workdir/erofs-utils-${EROFS_UTILS_VERSION#v}"
+        version_tag="$EROFS_UTILS_VERSION"
+        if [[ "$version_tag" != v* ]]; then
+          version_tag="v${version_tag}"
+        fi
 
         curl -fsSL \
-          "https://git.kernel.org/pub/scm/linux/kernel/git/xiang/erofs-utils.git/snapshot/erofs-utils-${EROFS_UTILS_VERSION}.tar.gz" \
-          -o "$workdir/erofs-utils.tar.gz"
-        tar -xzf "$workdir/erofs-utils.tar.gz" -C "$workdir"
+          "https://git.kernel.org/pub/scm/linux/kernel/git/xiang/erofs-utils.git/snapshot/erofs-utils-${EROFS_UTILS_VERSION#v}.tar.gz" \
+          -o "$workdir/erofs-utils.tar.gz" || true
+        if gzip -t "$workdir/erofs-utils.tar.gz" >/dev/null 2>&1; then
+          tar -xzf "$workdir/erofs-utils.tar.gz" -C "$workdir"
+        else
+          echo "::warning::erofs-utils snapshot download was not a gzip archive; cloning $version_tag instead."
+          git clone --depth 1 --branch "$version_tag" \
+            https://kernel.googlesource.com/pub/scm/linux/kernel/git/xiang/erofs-utils.git \
+            "$source_dir"
+        fi
 
-        cd "$workdir/erofs-utils-${EROFS_UTILS_VERSION}"
+        cd "$source_dir"
         ./autogen.sh
         configure_opts=(--prefix=/usr/local --with-libzstd)
         if pkg-config --exists libdeflate; then
