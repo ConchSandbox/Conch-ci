@@ -253,19 +253,30 @@ jobs:
           touch "$CONCH_AGENT_CONSOLE_LOG"
           chmod 0666 "$CONCH_AGENT_CONSOLE_LOG"
 
-          sudo -n env PATH="$PATH" "$CONCH_E2E_VMM_NAME" \
-            --cpus boot=1,max=1 \
-            --memory size=512M \
-            --kernel "$CONCH_KERNEL_PATH" \
-            --initramfs "$CONCH_AGENT_INITRAMFS" \
-            --cmdline "console=hvc0 root=/dev/ram0 rw panic=-1 conch.sandbox_id=${CONCH_AGENT_SANDBOX_ID}" \
-            --api-socket "path=$CONCH_AGENT_VMM_API" \
-            --console "file=$CONCH_AGENT_CONSOLE_LOG" \
-            --serial null \
-            --net "tap=$CONCH_AGENT_TAP_NAME" \
-            --vsock "cid=4,socket=$CONCH_AGENT_VSOCK_SOCKET" \
-            --seccomp false \
-            > "$CONCH_AGENT_VMM_LOG" 2>&1 &
+          sudo -n env \
+            PATH="$PATH" \
+            CONCH_E2E_VMM_NAME="$CONCH_E2E_VMM_NAME" \
+            CONCH_KERNEL_PATH="$CONCH_KERNEL_PATH" \
+            CONCH_AGENT_INITRAMFS="$CONCH_AGENT_INITRAMFS" \
+            CONCH_AGENT_SANDBOX_ID="$CONCH_AGENT_SANDBOX_ID" \
+            CONCH_AGENT_VMM_API="$CONCH_AGENT_VMM_API" \
+            CONCH_AGENT_CONSOLE_LOG="$CONCH_AGENT_CONSOLE_LOG" \
+            CONCH_AGENT_TAP_NAME="$CONCH_AGENT_TAP_NAME" \
+            CONCH_AGENT_VSOCK_SOCKET="$CONCH_AGENT_VSOCK_SOCKET" \
+            CONCH_AGENT_VMM_LOG="$CONCH_AGENT_VMM_LOG" \
+            sh -c 'exec "$CONCH_E2E_VMM_NAME" \
+              --cpus boot=1,max=1 \
+              --memory size=512M \
+              --kernel "$CONCH_KERNEL_PATH" \
+              --initramfs "$CONCH_AGENT_INITRAMFS" \
+              --cmdline "console=hvc0 root=/dev/ram0 rw panic=-1 conch.sandbox_id=${CONCH_AGENT_SANDBOX_ID}" \
+              --api-socket "path=$CONCH_AGENT_VMM_API" \
+              --console "file=$CONCH_AGENT_CONSOLE_LOG" \
+              --serial null \
+              --net "tap=$CONCH_AGENT_TAP_NAME" \
+              --vsock "cid=4,socket=$CONCH_AGENT_VSOCK_SOCKET" \
+              --seccomp false \
+              > "$CONCH_AGENT_VMM_LOG" 2>&1' &
           echo "$!" > "$CONCH_AGENT_VMM_PID_FILE"
 
           for _ in $(seq 1 120); do

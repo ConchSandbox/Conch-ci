@@ -1,0 +1,134 @@
+name: Set up erofs-utils
+description: Install mkfs.erofs on self-hosted runners when the required version is not already available.
+
+inputs:
+  version:
+    description: erofs-utils release version.
+    required: false
+    default: 1.9.1
+  required-flag:
+    description: mkfs.erofs help flag required by the workflow.
+    required: false
+    default: --fsalignblks
+
+outputs:
+  mkfs-erofs-path:
+    description: Absolute path to mkfs.erofs.
+    value: ${{ steps.install.outputs.mkfs-erofs-path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install erofs-utils
+      id: install
+      shell: bash
+      env:
+        EROFS_UTILS_VERSION: ${{ inputs.version }}
+        REQUIRED_FLAG: ${{ inputs.required-flag }}
+      run: |
+        set -euo pipefail
+
+        has_required_mkfs_erofs() {
+          command -v mkfs.erofs >/dev/null 2>&1 || return 1
+          mkfs_erofs_help="$(mkfs.erofs --help 2>&1 || true)"
+          grep -q -- "$REQUIRED_FLAG" <<<"$mkfs_erofs_help"
+        }
+
+        install_build_deps() {
+          if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends \
+              autoconf \
+              automake \
+              build-essential \
+              ca-certificates \
+              curl \
+              libdeflate-dev \
+              liblz4-dev \
+              liblzma-dev \
+              libtool \
+              libzstd-dev \
+              pkg-config \
+              uuid-dev \
+              zlib1g-dev
+            return
+          fi
+
+          if command -v dnf >/dev/null 2>&1; then
+            sudo dnf install -y --setopt=install_weak_deps=False \
+              autoconf \
+              automake \
+              ca-certificates \
+              curl \
+              gcc \
+              gcc-c++ \
+              libdeflate-devel \
+              libtool \
+              libuuid-devel \
+              lz4-devel \
+              make \
+              pkgconf-pkg-config \
+              xz-devel \
+              zlib-devel \
+              zstd-devel
+            return
+          fi
+
+          if command -v yum >/dev/null 2>&1; then
+            sudo yum install -y \
+              autoconf \
+              automake \
+              ca-certificates \
+              curl \
+              gcc \
+              gcc-c++ \
+              libdeflate-devel \
+              libtool \
+              libuuid-devel \
+              lz4-devel \
+              make \
+              pkgconf-pkg-config \
+              xz-devel \
+              zlib-devel \
+              zstd-devel
+            return
+          fi
+
+          echo "::error::No supported package manager found for erofs-utils build dependencies." >&2
+          exit 1
+        }
+
+        if has_required_mkfs_erofs; then
+          echo "Using existing mkfs.erofs: $(command -v mkfs.erofs)"
+          echo "mkfs-erofs-path=$(command -v mkfs.erofs)" >> "$GITHUB_OUTPUT"
+          mkfs.erofs --version
+          exit 0
+        fi
+
+        install_build_deps
+
+        workdir="${RUNNER_TEMP:-/tmp}/conch-erofs-utils"
+        rm -rf "$workdir"
+        mkdir -p "$workdir"
+
+        curl -fsSL \
+          "https://git.kernel.org/pub/scm/linux/kernel/git/xiang/erofs-utils.git/snapshot/erofs-utils-${EROFS_UTILS_VERSION}.tar.gz" \
+          -o "$workdir/erofs-utils.tar.gz"
+        tar -xzf "$workdir/erofs-utils.tar.gz" -C "$workdir"
+
+        cd "$workdir/erofs-utils-${EROFS_UTILS_VERSION}"
+        ./autogen.sh
+        ./configure --prefix=/usr/local --with-libdeflate --with-libzstd
+        make -j"$(nproc)"
+        sudo make install
+
+        echo "/usr/local/bin" >> "$GITHUB_PATH"
+        hash -r
+
+        if ! has_required_mkfs_erofs; then
+          echo "::error::Installed mkfs.erofs does not support $REQUIRED_FLAG." >&2
+          exit 1
+        fi
+
+        echo "mkfs-erofs-path=$(command -v mkfs.erofs)" >> "$GITHUB_OUTPUT"
+        mkfs.erofs --version

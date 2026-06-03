@@ -1,0 +1,75 @@
+name: Set up buildctl
+description: Install buildctl and buildkitd on self-hosted runners when they are not already available.
+
+inputs:
+  version:
+    description: BuildKit release version, or latest.
+    required: false
+    default: latest
+  install-dir:
+    description: Directory where buildctl and buildkitd should be installed.
+    required: false
+    default: ""
+
+outputs:
+  buildctl-path:
+    description: Absolute path to buildctl.
+    value: ${{ steps.install.outputs.buildctl-path }}
+  buildkitd-path:
+    description: Absolute path to buildkitd.
+    value: ${{ steps.install.outputs.buildkitd-path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install buildctl
+      id: install
+      shell: bash
+      env:
+        BUILDKIT_VERSION: ${{ inputs.version }}
+        INSTALL_DIR: ${{ inputs.install-dir }}
+      run: |
+        set -euo pipefail
+
+        if command -v buildctl >/dev/null 2>&1 && command -v buildkitd >/dev/null 2>&1; then
+          echo "Using existing buildctl: $(command -v buildctl)"
+          echo "Using existing buildkitd: $(command -v buildkitd)"
+          echo "buildctl-path=$(command -v buildctl)" >> "$GITHUB_OUTPUT"
+          echo "buildkitd-path=$(command -v buildkitd)" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        case "$(uname -m)" in
+          x86_64) buildkit_arch=amd64 ;;
+          aarch64|arm64) buildkit_arch=arm64 ;;
+          *)
+            echo "::error::Unsupported runner architecture for BuildKit: $(uname -m)" >&2
+            exit 1
+            ;;
+        esac
+
+        if [ -z "$INSTALL_DIR" ]; then
+          INSTALL_DIR="${RUNNER_TEMP:-/tmp}/conch-buildkit/bin"
+        fi
+
+        workdir="${RUNNER_TEMP:-/tmp}/conch-buildkit-download"
+        rm -rf "$workdir"
+        mkdir -p "$workdir" "$INSTALL_DIR"
+
+        if [ "$BUILDKIT_VERSION" = "latest" ]; then
+          url="https://github.com/moby/buildkit/releases/latest/download/buildkit-linux-${buildkit_arch}.tar.gz"
+        else
+          url="https://github.com/moby/buildkit/releases/download/${BUILDKIT_VERSION}/buildkit-linux-${buildkit_arch}.tar.gz"
+        fi
+
+        curl -fsSL "$url" -o "$workdir/buildkit.tar.gz"
+        tar -xzf "$workdir/buildkit.tar.gz" -C "$workdir"
+        install -m 0755 "$workdir/bin/buildctl" "$INSTALL_DIR/buildctl"
+        install -m 0755 "$workdir/bin/buildkitd" "$INSTALL_DIR/buildkitd"
+
+        echo "$INSTALL_DIR" >> "$GITHUB_PATH"
+        echo "buildctl-path=$INSTALL_DIR/buildctl" >> "$GITHUB_OUTPUT"
+        echo "buildkitd-path=$INSTALL_DIR/buildkitd" >> "$GITHUB_OUTPUT"
+
+        "$INSTALL_DIR/buildctl" --version
+        "$INSTALL_DIR/buildkitd" --version

@@ -65,11 +65,19 @@ jobs:
       - name: Checkout CI repository
         uses: actions/checkout@v4
 
+      - name: Set up erofs-utils
+        uses: ./.github/actions/setup-erofs-utils
+        with:
+          required-flag: ${{ env.CONCH_MKFS_EROFS_REQUIRED_FLAG }}
+
+      - name: Set up buildctl
+        uses: ./.github/actions/setup-buildctl
+
       - name: Check self-hosted image build prerequisites
         uses: ./.github/actions/check-self-hosted-runtime-prerequisites
         with:
           required-commands: ${{ env.CONCH_RUNNER_REQUIRED_COMMANDS }}
-          vmm-name: buildctl
+          vmm-name: buildkitd
           require-kvm: "false"
           kernel-path: ${{ env.CONCH_KERNEL_PATH }}
           kernel-name: Conch kernel
