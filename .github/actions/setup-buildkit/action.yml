@@ -1,0 +1,109 @@
+name: Set up BuildKit
+description: Ensure a BuildKit daemon is reachable for buildctl on self-hosted runners.
+
+inputs:
+  work-dir:
+    description: Directory used for BuildKit daemon state and logs when this action starts buildkitd.
+    required: false
+    default: ""
+
+outputs:
+  buildkit-addr:
+    description: buildctl/buildkitd address.
+    value: ${{ steps.setup.outputs.buildkit-addr }}
+  log-path:
+    description: BuildKit daemon log path when this action starts buildkitd.
+    value: ${{ steps.setup.outputs.log-path }}
+  pid-file:
+    description: BuildKit daemon PID file when this action starts buildkitd.
+    value: ${{ steps.setup.outputs.pid-file }}
+  started:
+    description: Whether this action started a new buildkitd process.
+    value: ${{ steps.setup.outputs.started }}
+
+runs:
+  using: composite
+  steps:
+    - name: Ensure BuildKit daemon
+      id: setup
+      shell: bash
+      env:
+        WORK_DIR: ${{ inputs.work-dir }}
+      run: |
+        set -euo pipefail
+
+        buildkit_addr="unix:///run/buildkit/buildkitd.sock"
+        buildkit_socket="${buildkit_addr#unix://}"
+
+        if [ -z "$WORK_DIR" ] && [ -n "${CONCH_E2B_WORKDIR:-}" ]; then
+          WORK_DIR="$CONCH_E2B_WORKDIR/buildkit"
+        fi
+
+        if [ -z "$WORK_DIR" ]; then
+          WORK_DIR="${RUNNER_TEMP:-/tmp}/conch-buildkit-${GITHUB_RUN_ID:-manual}-${GITHUB_RUN_ATTEMPT:-1}"
+        fi
+
+        log_path="$WORK_DIR/buildkitd.log"
+        pid_file="$WORK_DIR/buildkitd.pid"
+
+        mkdir -p "$WORK_DIR"
+
+        if sudo -n test -S "$buildkit_socket"; then
+          echo "Using existing BuildKit socket: $buildkit_socket"
+          {
+            echo "buildkit-addr=$buildkit_addr"
+            echo "log-path=$log_path"
+            echo "pid-file=$pid_file"
+            echo "started=false"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "CONCH_BUILDKIT_ADDR=$buildkit_addr"
+            echo "CONCH_BUILDKITD_LOG=$log_path"
+            echo "CONCH_BUILDKITD_PID_FILE=$pid_file"
+            echo "CONCH_BUILDKIT_STARTED=false"
+          } >> "$GITHUB_ENV"
+          exit 0
+        fi
+
+        if ! command -v buildkitd >/dev/null 2>&1; then
+          echo "::error::BuildKit socket is missing and buildkitd is not installed: $buildkit_socket" >&2
+          exit 1
+        fi
+
+        sudo -n mkdir -p "$(dirname "$buildkit_socket")"
+        sudo -n sh -c 'exec env PATH="$1" buildkitd --addr "$2" --root "$3" > "$4" 2>&1' \
+          sh \
+          "$PATH" \
+          "$buildkit_addr" \
+          "$WORK_DIR/root" \
+          "$log_path" &
+        echo "$!" > "$pid_file"
+
+        for _ in $(seq 1 60); do
+          if sudo -n test -S "$buildkit_socket"; then
+            echo "BuildKit is ready at $buildkit_socket"
+            {
+              echo "buildkit-addr=$buildkit_addr"
+              echo "log-path=$log_path"
+              echo "pid-file=$pid_file"
+              echo "started=true"
+            } >> "$GITHUB_OUTPUT"
+            {
+              echo "CONCH_BUILDKIT_ADDR=$buildkit_addr"
+              echo "CONCH_BUILDKITD_LOG=$log_path"
+              echo "CONCH_BUILDKITD_PID_FILE=$pid_file"
+              echo "CONCH_BUILDKIT_STARTED=true"
+            } >> "$GITHUB_ENV"
+            exit 0
+          fi
+          if ! kill -0 "$(cat "$pid_file")" >/dev/null 2>&1; then
+            echo "::error::buildkitd exited before becoming ready" >&2
+            sed -n '1,240p' "$log_path" >&2 || true
+            exit 1
+          fi
+          sleep 1
+        done
+
+        echo "::error::timed out waiting for buildkitd" >&2
+        sed -n '1,240p' "$log_path" >&2 || true
+        exit 1

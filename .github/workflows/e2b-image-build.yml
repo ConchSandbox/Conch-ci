@@ -1,0 +1,377 @@
+name: Conch E2B Image Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      conch_repository:
+        description: Conch source repository URL
+        required: false
+        default: https://github.com/ConchSandbox/Conch.git
+      conch_ref:
+        description: Conch source ref that contains examples/e2b-rootfs/Dockerfile
+        required: false
+        default: dev-cri
+      rootfs_platform:
+        description: BuildKit target platform for the E2B rootfs image
+        required: false
+        default: linux/amd64
+      kernel_path:
+        description: Official Conch kernel path on the self-hosted runner
+        required: false
+        default: /opt/conch/bzImage
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: conch-e2b-image-build-${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  CONCH_REPOSITORY: ${{ github.event.inputs.conch_repository || vars.CONCH_REPOSITORY || 'https://github.com/ConchSandbox/Conch.git' }}
+  CONCH_REF: ${{ github.event.inputs.conch_ref || vars.CONCH_REF || 'dev-cri' }}
+  CONCH_E2B_ROOTFS_PLATFORM: ${{ github.event.inputs.rootfs_platform || vars.CONCH_E2B_ROOTFS_PLATFORM || 'linux/amd64' }}
+  CONCH_E2B_REGISTRY: ${{ vars.CONCH_E2B_REGISTRY || 'localhost:5000' }}
+  CONCH_KERNEL_PATH: ${{ github.event.inputs.kernel_path || vars.CONCH_E2E_KERNEL_PATH || '/opt/conch/bzImage' }}
+  ALPINE_VERSION: ${{ vars.CONCH_AGENT_E2E_ALPINE_VERSION || '3.20.3' }}
+  ALPINE_MIRROR: ${{ vars.CONCH_AGENT_E2E_ALPINE_MIRROR || 'https://dl-cdn.alpinelinux.org/alpine' }}
+  CONCH_E2B_LOCAL_BOOT_IMAGE_PREFIX: localhost/conch/e2b
+  CONCH_E2B_VMM_NAME: cloud-hypervisor
+  CONCH_MKFS_EROFS_REQUIRED_FLAG: --fsalignblks
+
+  CONCH_RUNNER_REQUIRED_COMMANDS: git protoc mkfs.erofs curl ip iptables buildctl tar gzip cpio file
+  OPENEULER_GIT_PACKAGES: git
+  OPENEULER_PROTOC_PACKAGES: protobuf protobuf-compiler
+  OPENEULER_EROFS_PACKAGES: erofs-utils
+  OPENEULER_IPROUTE_PACKAGES: iproute
+  OPENEULER_IPTABLES_PACKAGES: iptables
+  OPENEULER_CURL_PACKAGES: curl
+
+  CONCH_API_TIMEOUT: 15m
+  GO_TAGS: exclude_graphdriver_btrfs
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Build and Convert E2B Image
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout CI repository
+        uses: actions/checkout@v4
+
+      - name: Check self-hosted image build prerequisites
+        uses: ./.github/actions/check-self-hosted-runtime-prerequisites
+        with:
+          required-commands: ${{ env.CONCH_RUNNER_REQUIRED_COMMANDS }}
+          vmm-name: buildctl
+          require-kvm: "false"
+          kernel-path: ${{ env.CONCH_KERNEL_PATH }}
+          kernel-name: Conch kernel
+          require-erofs: "true"
+          mkfs-erofs-required-flag: ${{ env.CONCH_MKFS_EROFS_REQUIRED_FLAG }}
+
+      - name: Fetch Conch source
+        run: |
+          set -euo pipefail
+          rm -rf conch-src
+          git init conch-src
+          cd conch-src
+          git remote add origin "$CONCH_REPOSITORY"
+          git fetch --depth 1 origin "$CONCH_REF"
+          git checkout --detach FETCH_HEAD
+          git log --oneline -1
+          git status --short --branch
+          test -f examples/e2b-rootfs/Dockerfile
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 1.26.x
+          cache-dependency-path: conch-src/go.sum
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: conch-src/sdk/pyproject.toml
+
+      - name: Build Conch binaries
+        working-directory: conch-src
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install grpcio-tools
+          make gen-proto
+          make build
+          test -x ./bin/conch
+          test -x ./bin/conchd
+          test -x ./bin/conch-agent
+
+      - name: Prepare image build names
+        run: |
+          set -euo pipefail
+
+          tag="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          workdir="${RUNNER_TEMP:-/tmp}/conch-e2b-image-build-${tag}"
+          namespace="conch-e2b-image-build-${tag}"
+          validation_namespace="conch-e2b-image-validate-${tag}"
+          rootfs_image="${CONCH_E2B_REGISTRY}/conch/e2b-rootfs:${tag}"
+          local_boot_image="${CONCH_E2B_LOCAL_BOOT_IMAGE_PREFIX}:${tag}"
+          remote_boot_image="${CONCH_E2B_REGISTRY}/conch/e2b:${tag}"
+
+          sudo rm -rf "$workdir"
+          mkdir -p "$workdir"
+
+          {
+            echo "CONCH_E2B_IMAGE_TAG=$tag"
+            echo "CONCH_E2B_WORKDIR=$workdir"
+            echo "CONCH_NAMESPACE=$namespace"
+            echo "CONCH_VALIDATION_NAMESPACE=$validation_namespace"
+            echo "CONCH_E2B_ROOTFS_IMAGE=$rootfs_image"
+            echo "CONCH_E2B_LOCAL_BOOT_IMAGE=$local_boot_image"
+            echo "CONCH_E2B_REMOTE_BOOT_IMAGE=$remote_boot_image"
+            echo "CONCHD_LOG=$workdir/conchd.log"
+            echo "CONCHD_PID_FILE=$workdir/conchd.pid"
+            echo "CONCHD_SERVICE_PID_FILE=$workdir/conchd-service.pid"
+            echo "CONCH_INITRD_PATH=$workdir/conch-agent-initramfs.cpio.gz"
+            echo "CONCH_AGENT_ROOTFS=$workdir/initramfs-rootfs"
+          } >> "$GITHUB_ENV"
+
+      - name: Check local registry
+        run: |
+          set -euo pipefail
+          registry_host="${CONCH_E2B_REGISTRY%%/*}"
+          curl -fsS "http://${registry_host}/v2/" >/dev/null
+
+      - name: Set up BuildKit
+        id: buildkit
+        uses: ./.github/actions/setup-buildkit
+
+      - name: Build E2B rootfs image with Conch example Dockerfile
+        run: |
+          set -euo pipefail
+          sudo -n env PATH="$PATH" buildctl --addr "$CONCH_BUILDKIT_ADDR" build \
+            --frontend dockerfile.v0 \
+            --local context=conch-src/examples/e2b-rootfs \
+            --local dockerfile=conch-src/examples/e2b-rootfs \
+            --opt "platform=$CONCH_E2B_ROOTFS_PLATFORM" \
+            --output "type=image,name=$CONCH_E2B_ROOTFS_IMAGE,push=true,registry.insecure=true"
+
+      - name: Build Conch agent initramfs
+        working-directory: conch-src
+        run: |
+          set -euo pipefail
+          OUTPUT="$CONCH_INITRD_PATH" \
+            WORK_DIR="$CONCH_E2B_WORKDIR/initramfs-work" \
+            ROOTFS_DIR="$CONCH_AGENT_ROOTFS" \
+            ALPINE_VERSION="$ALPINE_VERSION" \
+            ALPINE_MIRROR="$ALPINE_MIRROR" \
+            make build-agent-initramfs
+          file "$CONCH_INITRD_PATH"
+
+      - name: Prepare isolated Conch image configuration
+        run: |
+          set -euo pipefail
+
+          port="$(python - <<'PY'
+          import socket
+
+          with socket.socket() as sock:
+              sock.bind(("127.0.0.1", 0))
+              print(sock.getsockname()[1])
+          PY
+          )"
+
+          {
+            echo "CONCH_PORT=$port"
+            echo "CONCH_API_URL=http://127.0.0.1:$port"
+            echo "CONCH_CONFIG=$CONCH_E2B_WORKDIR/config.yaml"
+          } >> "$GITHUB_ENV"
+
+          cat > "$CONCH_E2B_WORKDIR/config.yaml" <<YAML
+          app:
+            name: conch-e2b-image-build
+
+          log:
+            level: debug
+            output: stdout
+
+          server:
+            unix_socket: ""
+            pid_file: "$CONCHD_SERVICE_PID_FILE"
+            work_dir: "$CONCH_E2B_WORKDIR/work"
+            host: 127.0.0.1
+            port: $port
+
+          network:
+            pool_size: 1
+            dynamic_reservation: false
+            bridge_count: 1
+            tap_ip: 192.168.101.2
+            tap_mask: 24
+
+          containerd:
+            root_dir: "$CONCH_E2B_WORKDIR/containerd-root"
+            state_dir: "$CONCH_E2B_WORKDIR/containerd-state"
+            default_namespace: "$CONCH_NAMESPACE"
+
+          image:
+            default_kernel_image: ""
+
+          sandbox:
+            vsock_signal_retry: 10ms
+            vsock_signal_timeout: 90s
+            request_timeout: 120s
+          YAML
+
+      - name: Start conchd
+        working-directory: conch-src
+        run: |
+          set -euo pipefail
+
+          sudo -n sh -c 'exec env PATH="$1" HOME="$2" CONCH_API_TIMEOUT="$3" ./bin/conchd -config "$4" > "$5" 2>&1' \
+            sh \
+            "$PATH" \
+            "$HOME" \
+            "$CONCH_API_TIMEOUT" \
+            "$CONCH_CONFIG" \
+            "$CONCHD_LOG" &
+          echo "$!" > "$CONCHD_PID_FILE"
+
+          for _ in $(seq 1 120); do
+            if curl -fsS "$CONCH_API_URL/api/snapshot/list" >/dev/null 2>&1; then
+              echo "conchd is ready at $CONCH_API_URL"
+              exit 0
+            fi
+            if ! kill -0 "$(cat "$CONCHD_PID_FILE")" >/dev/null 2>&1; then
+              echo "::error::conchd exited before becoming ready" >&2
+              sed -n '1,240p' "$CONCHD_LOG" >&2 || true
+              exit 1
+            fi
+            sleep 1
+          done
+
+          echo "::error::timed out waiting for conchd" >&2
+          sed -n '1,240p' "$CONCHD_LOG" >&2 || true
+          exit 1
+
+      - name: Convert and validate E2B image in Conch
+        working-directory: conch-src
+        run: |
+          set -euo pipefail
+
+          ./bin/conch convert \
+            --config "$CONCH_CONFIG" \
+            -n "$CONCH_NAMESPACE" \
+            --plain-http \
+            --source "$CONCH_E2B_ROOTFS_IMAGE" \
+            --kernel "$CONCH_KERNEL_PATH" \
+            --initrd "$CONCH_INITRD_PATH" \
+            -t "$CONCH_E2B_LOCAL_BOOT_IMAGE"
+
+          ./bin/conch unpack \
+            --config "$CONCH_CONFIG" \
+            -n "$CONCH_NAMESPACE" \
+            "$CONCH_E2B_LOCAL_BOOT_IMAGE"
+
+          ./bin/conch push \
+            --config "$CONCH_CONFIG" \
+            -n "$CONCH_NAMESPACE" \
+            --plain-http \
+            "$CONCH_E2B_LOCAL_BOOT_IMAGE" \
+            "$CONCH_E2B_REMOTE_BOOT_IMAGE"
+
+          ./bin/conch pull \
+            --config "$CONCH_CONFIG" \
+            -n "$CONCH_VALIDATION_NAMESPACE" \
+            --plain-http \
+            "$CONCH_E2B_REMOTE_BOOT_IMAGE"
+
+      - name: Write image metadata artifact
+        run: |
+          set -euo pipefail
+          rm -rf image-metadata
+          mkdir -p image-metadata
+          cat > image-metadata/image.env <<ENV
+          CONCH_REPOSITORY=$CONCH_REPOSITORY
+          CONCH_REF=$CONCH_REF
+          CONCH_E2B_ROOTFS_PLATFORM=$CONCH_E2B_ROOTFS_PLATFORM
+          CONCH_E2B_REGISTRY=$CONCH_E2B_REGISTRY
+          CONCH_E2B_REGISTRY_PLAIN_HTTP=true
+          CONCH_E2B_ROOTFS_IMAGE=$CONCH_E2B_ROOTFS_IMAGE
+          CONCH_E2B_BOOT_IMAGE=$CONCH_E2B_REMOTE_BOOT_IMAGE
+          CONCH_E2B_IMAGE_TAG=$CONCH_E2B_IMAGE_TAG
+          CONCH_KERNEL_PATH=$CONCH_KERNEL_PATH
+          ENV
+          cat image-metadata/image.env
+
+      - name: Upload image metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: conch-e2b-image-metadata
+          path: image-metadata/image.env
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Dump service logs on failure
+        if: failure()
+        run: |
+          set -euo pipefail
+          if [ -n "${CONCHD_LOG:-}" ] && [ -f "$CONCHD_LOG" ]; then
+            sed -n '1,400p' "$CONCHD_LOG"
+          fi
+          if [ -n "${CONCH_BUILDKITD_LOG:-}" ] && [ -f "$CONCH_BUILDKITD_LOG" ]; then
+            sed -n '1,400p' "$CONCH_BUILDKITD_LOG"
+          fi
+
+      - name: Cleanup image build resources
+        if: always()
+        run: |
+          set +e
+
+          if [ -n "${CONCHD_PID_FILE:-}" ] && [ -f "$CONCHD_PID_FILE" ]; then
+            conchd_pid="$(cat "$CONCHD_PID_FILE")"
+            if kill -0 "$conchd_pid" >/dev/null 2>&1; then
+              sudo kill "$conchd_pid" >/dev/null 2>&1 || true
+              for _ in $(seq 1 30); do
+                kill -0 "$conchd_pid" >/dev/null 2>&1 || break
+                sleep 1
+              done
+              kill -0 "$conchd_pid" >/dev/null 2>&1 && sudo kill -9 "$conchd_pid" >/dev/null 2>&1 || true
+            fi
+          fi
+
+          if [ -n "${CONCHD_SERVICE_PID_FILE:-}" ] && [ -f "$CONCHD_SERVICE_PID_FILE" ]; then
+            service_pid="$(cat "$CONCHD_SERVICE_PID_FILE")"
+            if sudo kill -0 "$service_pid" >/dev/null 2>&1; then
+              sudo kill "$service_pid" >/dev/null 2>&1 || true
+              for _ in $(seq 1 30); do
+                sudo kill -0 "$service_pid" >/dev/null 2>&1 || break
+                sleep 1
+              done
+              sudo kill -0 "$service_pid" >/dev/null 2>&1 && sudo kill -9 "$service_pid" >/dev/null 2>&1 || true
+            fi
+          fi
+
+          if [ "${CONCH_BUILDKIT_STARTED:-false}" = "true" ] && [ -n "${CONCH_BUILDKITD_PID_FILE:-}" ] && [ -f "$CONCH_BUILDKITD_PID_FILE" ]; then
+            buildkitd_pid="$(cat "$CONCH_BUILDKITD_PID_FILE")"
+            if kill -0 "$buildkitd_pid" >/dev/null 2>&1; then
+              sudo kill "$buildkitd_pid" >/dev/null 2>&1 || true
+              for _ in $(seq 1 30); do
+                kill -0 "$buildkitd_pid" >/dev/null 2>&1 || break
+                sleep 1
+              done
+              kill -0 "$buildkitd_pid" >/dev/null 2>&1 && sudo kill -9 "$buildkitd_pid" >/dev/null 2>&1 || true
+            fi
+          fi
+
+          if [ -n "${CONCH_E2B_WORKDIR:-}" ]; then
+            sudo rm -rf "$CONCH_E2B_WORKDIR"
+          fi
