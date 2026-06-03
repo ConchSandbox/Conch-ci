@@ -226,66 +226,20 @@ jobs:
             echo "CONCH_AGENT_SANDBOX_ID=sandbox_agent_init_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
           } >> "$GITHUB_ENV"
 
-      - name: Build conch-agent
+      - name: Build conch-agent initramfs
         working-directory: conch-src
         run: |
           set -euo pipefail
 
-          case "$(uname -m)" in
-            x86_64) goarch=amd64 ;;
-            aarch64|arm64) goarch=arm64 ;;
-            *)
-              echo "::error::Unsupported runner architecture: $(uname -m)" >&2
-              exit 1
-              ;;
-          esac
-
-          mkdir -p "$CONCH_AGENT_E2E_WORKDIR/bin"
-          make gen-proto
-          CGO_ENABLED=0 GOOS=linux GOARCH="$goarch" \
-            go build -tags "netgo,osusergo" \
-              -ldflags '-s -w -extldflags "-static"' \
-              -o "$CONCH_AGENT_E2E_WORKDIR/bin/conch-agent" \
-              ./cmd/conch-agent
-
-          file "$CONCH_AGENT_E2E_WORKDIR/bin/conch-agent"
-
-      - name: Build Alpine initramfs
-        run: |
-          set -euo pipefail
-
-          case "$(uname -m)" in
-            x86_64) alpine_arch=x86_64 ;;
-            aarch64|arm64) alpine_arch=aarch64 ;;
-            *)
-              echo "::error::Unsupported runner architecture: $(uname -m)" >&2
-              exit 1
-              ;;
-          esac
-
-          alpine_series="v${ALPINE_VERSION%.*}"
-          alpine_tar="alpine-minirootfs-${ALPINE_VERSION}-${alpine_arch}.tar.gz"
-          alpine_url="${ALPINE_MIRROR}/${alpine_series}/releases/${alpine_arch}/${alpine_tar}"
-
-          mkdir -p "$CONCH_AGENT_ROOTFS"
-          curl -fsSL "$alpine_url" -o "$CONCH_AGENT_E2E_WORKDIR/$alpine_tar"
-          tar -xzf "$CONCH_AGENT_E2E_WORKDIR/$alpine_tar" -C "$CONCH_AGENT_ROOTFS"
-
-          install -m 0755 "$CONCH_AGENT_E2E_WORKDIR/bin/conch-agent" "$CONCH_AGENT_ROOTFS/sbin/conch-agent"
-          mkdir -p "$CONCH_AGENT_ROOTFS"/{proc,sys,dev,run,tmp,var/log/conch-agent}
-          if [ -n "${CONCH_AGENT_KERNEL_MODULES:-}" ] && [ -d "$CONCH_AGENT_KERNEL_MODULES" ]; then
-            mkdir -p "$CONCH_AGENT_ROOTFS/lib/modules"
-            cp -a "$CONCH_AGENT_KERNEL_MODULES"/. "$CONCH_AGENT_ROOTFS/lib/modules"/
-          fi
-
-          ln -sf sbin/conch-agent "$CONCH_AGENT_ROOTFS/init"
-
-          (
-            cd "$CONCH_AGENT_ROOTFS"
-            find . -print0 | cpio --null -o --format=newc | gzip -9
-          ) > "$CONCH_AGENT_INITRAMFS"
-
-          ls -lh "$CONCH_AGENT_INITRAMFS"
+          make gen-proto-py
+          OUTPUT="$CONCH_AGENT_INITRAMFS" \
+            WORK_DIR="$CONCH_AGENT_E2E_WORKDIR/initramfs-work" \
+            ROOTFS_DIR="$CONCH_AGENT_ROOTFS" \
+            MODULES_DIR="${CONCH_AGENT_KERNEL_MODULES:-}" \
+            ALPINE_VERSION="$ALPINE_VERSION" \
+            ALPINE_MIRROR="$ALPINE_MIRROR" \
+            make build-agent-initramfs
+          file "$CONCH_AGENT_INITRAMFS"
 
       - name: Start cloud-hypervisor VM
         run: |
