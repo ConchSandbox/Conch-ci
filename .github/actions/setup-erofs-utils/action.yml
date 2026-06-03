@@ -62,7 +62,6 @@ runs:
               curl \
               gcc \
               gcc-c++ \
-              libdeflate-devel \
               libtool \
               libuuid-devel \
               lz4-devel \
@@ -82,7 +81,6 @@ runs:
               curl \
               gcc \
               gcc-c++ \
-              libdeflate-devel \
               libtool \
               libuuid-devel \
               lz4-devel \
@@ -118,7 +116,11 @@ runs:
 
         cd "$workdir/erofs-utils-${EROFS_UTILS_VERSION}"
         ./autogen.sh
-        ./configure --prefix=/usr/local --with-libdeflate --with-libzstd
+        configure_opts=(--prefix=/usr/local --with-libzstd)
+        if pkg-config --exists libdeflate; then
+          configure_opts+=(--with-libdeflate)
+        fi
+        ./configure "${configure_opts[@]}"
         make -j"$(nproc)"
         sudo make install
 
