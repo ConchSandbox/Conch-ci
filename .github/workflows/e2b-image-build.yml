@@ -16,9 +16,9 @@ on:
         required: false
         default: linux/amd64
       kernel_path:
-        description: Official Conch kernel path on the self-hosted runner
+        description: Optional Linux kernel image path on the self-hosted runner
         required: false
-        default: /opt/conch/bzImage
+        default: ""
 
 permissions:
   contents: read
@@ -33,7 +33,7 @@ env:
   CONCH_REF: ${{ github.event.inputs.conch_ref || vars.CONCH_REF || 'dev-cri' }}
   CONCH_E2B_ROOTFS_PLATFORM: ${{ github.event.inputs.rootfs_platform || vars.CONCH_E2B_ROOTFS_PLATFORM || 'linux/amd64' }}
   CONCH_E2B_REGISTRY: ${{ vars.CONCH_E2B_REGISTRY || 'localhost:5000' }}
-  CONCH_KERNEL_PATH: ${{ github.event.inputs.kernel_path || vars.CONCH_E2E_KERNEL_PATH || '/opt/conch/bzImage' }}
+  CONCH_KERNEL_PATH: ${{ github.event.inputs.kernel_path || vars.CONCH_E2E_KERNEL_PATH || '' }}
   ALPINE_VERSION: ${{ vars.CONCH_AGENT_E2E_ALPINE_VERSION || '3.20.3' }}
   ALPINE_MIRROR: ${{ vars.CONCH_AGENT_E2E_ALPINE_MIRROR || 'https://dl-cdn.alpinelinux.org/alpine' }}
   CONCH_E2B_LOCAL_BOOT_IMAGE_PREFIX: localhost/conch/e2b
@@ -72,6 +72,100 @@ jobs:
 
       - name: Set up buildctl
         uses: ./.github/actions/setup-buildctl
+
+      - name: Resolve Linux kernel image
+        run: |
+          set -euo pipefail
+
+          if [ -n "$CONCH_KERNEL_PATH" ] && [ -f "$CONCH_KERNEL_PATH" ]; then
+            echo "Using existing kernel image: $CONCH_KERNEL_PATH"
+            file "$CONCH_KERNEL_PATH"
+            exit 0
+          fi
+
+          case "$(uname -m)" in
+            x86_64) alpine_arch=x86_64 ;;
+            aarch64|arm64) alpine_arch=aarch64 ;;
+            *)
+              echo "::error::Unsupported runner architecture: $(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+
+          alpine_series="v${ALPINE_VERSION%.*}"
+          kernel_package="linux-virt"
+          kernel_workdir="${RUNNER_TEMP:-/tmp}/conch-e2b-image-kernel"
+          apk_index_archive="$kernel_workdir/APKINDEX.tar.gz"
+          apk_index="$kernel_workdir/APKINDEX"
+
+          rm -rf "$kernel_workdir"
+          mkdir -p "$kernel_workdir"
+
+          curl -fsSL "${ALPINE_MIRROR}/${alpine_series}/main/${alpine_arch}/APKINDEX.tar.gz" -o "$apk_index_archive"
+          tar -xzf "$apk_index_archive" -C "$kernel_workdir" APKINDEX
+
+          kernel_version="$(
+            awk -v pkg="$kernel_package" '
+              BEGIN { RS = ""; FS = "\n" }
+              {
+                found = 0
+                version = ""
+                for (i = 1; i <= NF; i++) {
+                  if ($i == "P:" pkg) {
+                    found = 1
+                  } else if ($i ~ /^V:/) {
+                    version = substr($i, 3)
+                  }
+                }
+                if (found && version != "") {
+                  print version
+                  exit
+                }
+              }
+            ' "$apk_index"
+          )"
+          if [ -z "$kernel_version" ]; then
+            echo "::error::Failed to resolve $kernel_package from Alpine APKINDEX." >&2
+            exit 1
+          fi
+
+          kernel_apk="${kernel_package}-${kernel_version}.apk"
+          kernel_url="${ALPINE_MIRROR}/${alpine_series}/main/${alpine_arch}/${kernel_apk}"
+          curl -fsSL "$kernel_url" -o "$kernel_workdir/$kernel_apk"
+          tar --warning=no-unknown-keyword -xzf "$kernel_workdir/$kernel_apk" -C "$kernel_workdir" boot/vmlinuz-virt
+
+          resolved_kernel="$kernel_workdir/boot/vmlinuz-virt"
+          if [ "$alpine_arch" = "aarch64" ]; then
+            zboot_kernel="$resolved_kernel"
+            raw_kernel="$kernel_workdir/boot/Image"
+            gz_log="$kernel_workdir/extract-vmlinuz.log"
+            extracted="false"
+
+            while IFS=: read -r offset _; do
+              set +e
+              tail -c +$((offset + 1)) "$zboot_kernel" | gzip -dc > "$raw_kernel.tmp" 2> "$gz_log"
+              gzip_status=$?
+              set -e
+
+              if [ "$gzip_status" -eq 0 ] || { [ "$gzip_status" -eq 2 ] && grep -q "decompression OK" "$gz_log"; }; then
+                if file "$raw_kernel.tmp" | grep -q "ARM64 boot executable Image"; then
+                  mv "$raw_kernel.tmp" "$raw_kernel"
+                  resolved_kernel="$raw_kernel"
+                  extracted="true"
+                  break
+                fi
+              fi
+            done < <(LC_ALL=C grep -abo $'\x1f\x8b\x08' "$zboot_kernel" || true)
+
+            if [ "$extracted" != "true" ]; then
+              echo "::error::Failed to extract raw ARM64 Image from $zboot_kernel." >&2
+              exit 1
+            fi
+          fi
+
+          chmod 0644 "$resolved_kernel"
+          echo "CONCH_KERNEL_PATH=$resolved_kernel" >> "$GITHUB_ENV"
+          file "$resolved_kernel"
 
       - name: Check self-hosted image build prerequisites
         uses: ./.github/actions/check-self-hosted-runtime-prerequisites
