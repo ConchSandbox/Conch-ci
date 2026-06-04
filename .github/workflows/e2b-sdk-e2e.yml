@@ -427,6 +427,17 @@ jobs:
               raise RuntimeError(f"timed out waiting for {url}: {last_error}")
 
 
+          def wait_conch_health(sandbox, timeout=180):
+              deadline = time.monotonic() + timeout
+              last_health = None
+              while time.monotonic() < deadline:
+                  last_health = sandbox.health_check()
+                  if last_health.get("status") == "OK":
+                      return last_health
+                  time.sleep(2)
+              raise RuntimeError(f"timed out waiting for Conch health check: {last_health}")
+
+
           def new_code_interpreter_sandbox(envd_url, sandbox_ip):
               config = ConnectionConfig(debug=True, sandbox_url=envd_url)
               sandbox = CodeInterpreterSandbox(
@@ -452,9 +463,7 @@ jobs:
                   vcpu_num=2,
                   ram_mb=2048,
               )
-              health = conch_sandbox.health_check()
-              if health.get("status") != "OK":
-                  raise RuntimeError(f"unexpected Conch health check response: {health}")
+              wait_conch_health(conch_sandbox)
 
               sandbox_ip = conch_sandbox.ip
               envd_url = f"http://{sandbox_ip}:49983"
