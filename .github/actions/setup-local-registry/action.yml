@@ -1,0 +1,101 @@
+name: Set up local registry
+description: Ensure a local OCI registry is reachable on the self-hosted runner.
+
+inputs:
+  registry:
+    description: Local registry host and port.
+    required: false
+    default: localhost:5000
+  image:
+    description: Registry container image.
+    required: false
+    default: distribution/distribution:latest
+  container-name:
+    description: Name used for the local registry container.
+    required: false
+    default: conch-local-registry
+
+outputs:
+  started:
+    description: Whether this action started the registry container.
+    value: ${{ steps.setup.outputs.started }}
+  runtime:
+    description: Container runtime used to start the registry.
+    value: ${{ steps.setup.outputs.runtime }}
+
+runs:
+  using: composite
+  steps:
+    - name: Ensure local registry
+      id: setup
+      shell: bash
+      env:
+        REGISTRY: ${{ inputs.registry }}
+        REGISTRY_IMAGE: ${{ inputs.image }}
+        CONTAINER_NAME: ${{ inputs.container-name }}
+      run: |
+        set -euo pipefail
+
+        registry_host="${REGISTRY%%/*}"
+        registry_name="${registry_host%%:*}"
+        registry_port="${registry_host##*:}"
+        if [ "$registry_port" = "$registry_host" ]; then
+          registry_port=5000
+        fi
+
+        case "$registry_name" in
+          localhost|127.0.0.1)
+            ;;
+          *)
+            echo "::error::setup-local-registry only manages localhost registries, got: $registry_host" >&2
+            exit 1
+            ;;
+        esac
+
+        registry_url="http://${registry_host}/v2/"
+        if curl -fsS "$registry_url" >/dev/null; then
+          echo "Using existing local registry: $registry_url"
+          {
+            echo "started=false"
+            echo "runtime="
+          } >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        runtime=""
+        if command -v docker >/dev/null 2>&1; then
+          runtime=docker
+        elif command -v podman >/dev/null 2>&1; then
+          runtime=podman
+        else
+          echo "::error::No container runtime found for local registry. Install docker or podman on the self-hosted runner." >&2
+          exit 1
+        fi
+
+        sudo -n "$runtime" rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+        sudo -n "$runtime" pull "$REGISTRY_IMAGE"
+        sudo -n "$runtime" run -d \
+          --name "$CONTAINER_NAME" \
+          -p "127.0.0.1:${registry_port}:5000" \
+          "$REGISTRY_IMAGE" >/dev/null
+
+        for _ in $(seq 1 60); do
+          if curl -fsS "$registry_url" >/dev/null; then
+            echo "Local registry is ready: $registry_url"
+            {
+              echo "started=true"
+              echo "runtime=$runtime"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! sudo -n "$runtime" ps --format '{{.Names}}' | grep -Fxq "$CONTAINER_NAME"; then
+            echo "::error::local registry container exited before becoming ready" >&2
+            sudo -n "$runtime" logs "$CONTAINER_NAME" >&2 || true
+            exit 1
+          fi
+          sleep 1
+        done
+
+        echo "::error::timed out waiting for local registry: $registry_url" >&2
+        sudo -n "$runtime" logs "$CONTAINER_NAME" >&2 || true
+        exit 1

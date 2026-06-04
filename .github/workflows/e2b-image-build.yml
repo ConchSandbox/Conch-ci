@@ -154,11 +154,10 @@ jobs:
             echo "CONCH_AGENT_ROOTFS=$workdir/initramfs-rootfs"
           } >> "$GITHUB_ENV"
 
-      - name: Check local registry
-        run: |
-          set -euo pipefail
-          registry_host="${CONCH_E2B_REGISTRY%%/*}"
-          curl -fsS "http://${registry_host}/v2/" >/dev/null
+      - name: Set up local registry
+        uses: ./.github/actions/setup-local-registry
+        with:
+          registry: ${{ env.CONCH_E2B_REGISTRY }}
 
       - name: Set up BuildKit
         id: buildkit
