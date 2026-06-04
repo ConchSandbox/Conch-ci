@@ -42,7 +42,7 @@ env:
   CONCH_CLOUD_HYPERVISOR_ARM64_ASSET_REF: cloud-hypervisor-static-aarch64
   CONCH_MKFS_EROFS_REQUIRED_FLAG: --fsalignblks
 
-  CONCH_RUNNER_REQUIRED_COMMANDS: git protoc mkfs.erofs curl ip iptables python3
+  CONCH_RUNNER_REQUIRED_COMMANDS: git protoc mkfs.erofs curl ip iptables python3 timeout
   OPENEULER_GIT_PACKAGES: git
   OPENEULER_PROTOC_PACKAGES: protobuf protobuf-compiler
   OPENEULER_EROFS_PACKAGES: erofs-utils
@@ -349,7 +349,8 @@ jobs:
           container_home="$CONCH_E2B_WORKDIR/home"
           mkdir -p "$container_home"
 
-          sudo -n "$CONCH_E2B_SDK_RUNNER_RUNTIME" run --rm -i \
+          echo "[e2b-sdk-e2e] starting SDK runner container at $(date -Iseconds)"
+          timeout --foreground --kill-after=30s 12m sudo -n "$CONCH_E2B_SDK_RUNNER_RUNTIME" run --rm -i \
             --network host \
             --user "$runner_uid:$runner_gid" \
             -v "$conch_src:$conch_src" \
@@ -366,8 +367,10 @@ jobs:
             "$CONCH_E2B_SDK_RUNNER_IMAGE" sh <<'SH'
           set -eu
           python --version
+          echo "[e2b-sdk-e2e] creating Python virtualenv"
           python -m venv --system-site-packages "$CONCH_E2B_WORKDIR/e2b-sdk-venv"
           . "$CONCH_E2B_WORKDIR/e2b-sdk-venv/bin/activate"
+          echo "[e2b-sdk-e2e] installing local Conch SDK"
           python -m pip install --no-deps --progress-bar off './sdk'
           python -u - <<'PY'
           import os
