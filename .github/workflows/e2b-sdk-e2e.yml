@@ -371,11 +371,13 @@ jobs:
           python -m pip install --no-deps --progress-bar off './sdk'
           python -u - <<'PY'
           import os
+          import grpc
           import requests
           import time
           import urllib.request
           from urllib.parse import urlparse
 
+          from api.py_proto import agent_pb2
           from conch import Sandbox as ConchSandbox
           from e2b.connection_config import ConnectionConfig
           from e2b_code_interpreter import Sandbox as CodeInterpreterSandbox
@@ -422,9 +424,16 @@ jobs:
               deadline = time.monotonic() + timeout
               last_health = None
               while time.monotonic() < deadline:
-                  last_health = sandbox.health_check()
-                  if last_health.get("status") == "OK":
+                  try:
+                      response = sandbox.client.stub.HealthCheck(agent_pb2.Empty(), timeout=5)
+                      last_health = {"status": "OK", "message": response.message}
                       return last_health
+                  except grpc.RpcError as exc:
+                      last_health = {
+                          "status": "ERROR",
+                          "code": str(exc.code()),
+                          "message": exc.details(),
+                      }
                   time.sleep(2)
               raise RuntimeError(f"timed out waiting for Conch health check: {last_health}")
 
