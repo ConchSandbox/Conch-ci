@@ -9,4 +9,7 @@ RUN python -m pip install \
         --progress-bar off \
         'e2b-code-interpreter==2.5.0' \
         grpcio-tools \
-        packaging
+        packaging \
+        PyYAML \
+        requests \
+        requests-unixsocket

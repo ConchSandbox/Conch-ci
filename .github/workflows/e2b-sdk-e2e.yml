@@ -368,7 +368,7 @@ jobs:
           python --version
           python -m venv --system-site-packages "$CONCH_E2B_WORKDIR/e2b-sdk-venv"
           . "$CONCH_E2B_WORKDIR/e2b-sdk-venv/bin/activate"
-          python -m pip install --progress-bar off './sdk[test]'
+          python -m pip install --no-deps --progress-bar off './sdk'
           python -u - <<'PY'
           import os
           import requests
@@ -560,7 +560,7 @@ jobs:
           set -eu
           python -m venv --system-site-packages "$CONCH_E2B_WORKDIR/e2b-sdk-cleanup-venv"
           . "$CONCH_E2B_WORKDIR/e2b-sdk-cleanup-venv/bin/activate"
-          python -m pip install './sdk[test]'
+          python -m pip install --no-deps --progress-bar off './sdk'
           python - <<'PY'
           import os
           import time
