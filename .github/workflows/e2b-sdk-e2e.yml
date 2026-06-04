@@ -165,80 +165,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          supported_python() {
-            "$1" - <<'PY'
+          python3 - <<'PY'
           import sys
           raise SystemExit(0 if sys.version_info >= (3, 10) else 1)
           PY
-          }
-
-          select_python() {
-            for candidate in python3.13 python3.12 python3.11 python3.10 python3; do
-              if command -v "$candidate" >/dev/null 2>&1 && supported_python "$candidate"; then
-                command -v "$candidate"
-                return 0
-              fi
-            done
-            return 1
-          }
-
-          install_standalone_python() {
-            version="3.12.13"
-            release="20260602"
-            case "$(uname -m)" in
-              x86_64|amd64)
-                python_arch="x86_64"
-                ;;
-              aarch64|arm64)
-                python_arch="aarch64"
-                ;;
-              *)
-                echo "::error::Unsupported runner architecture for standalone Python: $(uname -m)" >&2
-                return 1
-                ;;
-            esac
-
-            install_dir="${RUNNER_TEMP:-/tmp}/conch-python-${version}-${release}-${python_arch}"
-            python_path="$install_dir/bin/python3"
-            if [ ! -x "$python_path" ]; then
-              archive="${RUNNER_TEMP:-/tmp}/conch-python-${version}-${release}-${python_arch}.tar.gz"
-              url="https://github.com/astral-sh/python-build-standalone/releases/download/${release}/cpython-${version}%2B${release}-${python_arch}-unknown-linux-gnu-install_only_stripped.tar.gz"
-              rm -rf "$install_dir"
-              mkdir -p "$install_dir"
-              curl --retry 5 --retry-delay 2 --retry-all-errors -fsSL "$url" -o "$archive"
-              tar -C "$install_dir" -xzf "$archive" --strip-components=1
-              rm -f "$archive"
-            fi
-
-            echo "$python_path"
-          }
-
-          python_bin="$(select_python || true)"
-          if [ -z "$python_bin" ]; then
-            packages=(python3.12 python3.11 python3.10)
-            if command -v dnf >/dev/null 2>&1; then
-              for package in "${packages[@]}"; do
-                sudo -n dnf install -y --setopt=install_weak_deps=False "$package" && break || true
-              done
-            elif command -v yum >/dev/null 2>&1; then
-              for package in "${packages[@]}"; do
-                sudo -n yum install -y "$package" && break || true
-              done
-            fi
-            python_bin="$(select_python || true)"
-          fi
-
-          if [ -z "$python_bin" ]; then
-            python_bin="$(install_standalone_python)"
-          fi
-
-          if [ -z "$python_bin" ]; then
-            echo "::error::E2B SDK E2E requires Python >= 3.10 for e2b-code-interpreter==2.5.0" >&2
-            exit 1
-          fi
-
-          "$python_bin" --version
-          "$python_bin" -m venv "${RUNNER_TEMP:-/tmp}/conch-e2b-sdk-python"
+          python3 --version
+          python3 -m venv "${RUNNER_TEMP:-/tmp}/conch-e2b-sdk-python"
           echo "${RUNNER_TEMP:-/tmp}/conch-e2b-sdk-python/bin" >> "$GITHUB_PATH"
           "${RUNNER_TEMP:-/tmp}/conch-e2b-sdk-python/bin/python" -m pip install --upgrade pip
           "${RUNNER_TEMP:-/tmp}/conch-e2b-sdk-python/bin/python" --version
