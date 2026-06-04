@@ -344,6 +344,7 @@ jobs:
             -v "$CONCH_E2B_WORKDIR:$CONCH_E2B_WORKDIR" \
             -w "$conch_src" \
             -e CONCH_SDK_CONFIG \
+            -e CONCH_E2B_WORKDIR \
             -e CONCH_E2B_BOOT_IMAGE \
             -e CONCH_NAMESPACE \
             -e CONCH_SANDBOX_ID \
@@ -509,6 +510,7 @@ jobs:
                 -v "$CONCH_E2B_WORKDIR:$CONCH_E2B_WORKDIR" \
                 -w "$conch_src" \
                 -e CONCH_SDK_CONFIG \
+                -e CONCH_E2B_WORKDIR \
                 -e CONCH_NAMESPACE \
                 -e CONCH_SANDBOX_ID \
                 "$CONCH_E2B_SDK_RUNNER_IMAGE" sh <<'SH'
