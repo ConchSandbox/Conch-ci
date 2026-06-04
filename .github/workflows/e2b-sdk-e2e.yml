@@ -343,11 +343,11 @@ jobs:
             -v "$conch_src:$conch_src" \
             -v "$CONCH_E2B_WORKDIR:$CONCH_E2B_WORKDIR" \
             -w "$conch_src" \
-            -e CONCH_SDK_CONFIG \
-            -e CONCH_E2B_WORKDIR \
-            -e CONCH_E2B_BOOT_IMAGE \
-            -e CONCH_NAMESPACE \
-            -e CONCH_SANDBOX_ID \
+            -e "CONCH_SDK_CONFIG=$CONCH_SDK_CONFIG" \
+            -e "CONCH_E2B_WORKDIR=$CONCH_E2B_WORKDIR" \
+            -e "CONCH_E2B_BOOT_IMAGE=$CONCH_E2B_BOOT_IMAGE" \
+            -e "CONCH_NAMESPACE=$CONCH_NAMESPACE" \
+            -e "CONCH_SANDBOX_ID=$CONCH_SANDBOX_ID" \
             "$CONCH_E2B_SDK_RUNNER_IMAGE" sh <<'SH'
           set -eu
           python --version
@@ -509,10 +509,10 @@ jobs:
                 -v "$conch_src:$conch_src" \
                 -v "$CONCH_E2B_WORKDIR:$CONCH_E2B_WORKDIR" \
                 -w "$conch_src" \
-                -e CONCH_SDK_CONFIG \
-                -e CONCH_E2B_WORKDIR \
-                -e CONCH_NAMESPACE \
-                -e CONCH_SANDBOX_ID \
+                -e "CONCH_SDK_CONFIG=$CONCH_SDK_CONFIG" \
+                -e "CONCH_E2B_WORKDIR=$CONCH_E2B_WORKDIR" \
+                -e "CONCH_NAMESPACE=$CONCH_NAMESPACE" \
+                -e "CONCH_SANDBOX_ID=$CONCH_SANDBOX_ID" \
                 "$CONCH_E2B_SDK_RUNNER_IMAGE" sh <<'SH'
           set -eu
           python -m venv --system-site-packages "$CONCH_E2B_WORKDIR/e2b-sdk-cleanup-venv"
