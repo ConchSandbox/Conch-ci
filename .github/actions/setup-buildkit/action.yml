@@ -40,12 +40,13 @@ runs:
           WORK_DIR="${RUNNER_TEMP:-/tmp}/conch-buildkit-${GITHUB_RUN_ID:-manual}-${GITHUB_RUN_ATTEMPT:-1}"
         fi
 
-        buildkit_socket="$WORK_DIR/buildkitd.sock"
+        buildkit_socket="/tmp/conch-buildkit-${GITHUB_RUN_ID:-manual}-${GITHUB_RUN_ATTEMPT:-1}.sock"
         buildkit_addr="unix://$buildkit_socket"
         log_path="$WORK_DIR/buildkitd.log"
         pid_file="$WORK_DIR/buildkitd.pid"
 
         mkdir -p "$WORK_DIR"
+        sudo -n rm -f "$buildkit_socket"
 
         if ! command -v buildkitd >/dev/null 2>&1; then
           echo "::error::BuildKit socket is missing and buildkitd is not installed: $buildkit_socket" >&2
