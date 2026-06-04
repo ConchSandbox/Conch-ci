@@ -1,0 +1,44 @@
+name: Set up E2B SDK runner
+description: Build a local container image used to run the E2B SDK E2E client.
+
+inputs:
+  image-name:
+    description: Local image tag for the E2B SDK runner.
+    required: false
+    default: conch/e2b-sdk-runner:latest
+
+outputs:
+  image-name:
+    description: Local image tag built by this action.
+    value: ${{ steps.build.outputs.image-name }}
+  runtime:
+    description: Container runtime used to build and run the image.
+    value: ${{ steps.build.outputs.runtime }}
+
+runs:
+  using: composite
+  steps:
+    - name: Build E2B SDK runner image
+      id: build
+      shell: bash
+      env:
+        IMAGE_NAME: ${{ inputs.image-name }}
+      run: |
+        set -euo pipefail
+
+        runtime=""
+        if command -v docker >/dev/null 2>&1; then
+          runtime=docker
+        elif command -v podman >/dev/null 2>&1; then
+          runtime=podman
+        else
+          echo "::error::No container runtime found for E2B SDK runner. Install docker or podman on the self-hosted runner." >&2
+          exit 1
+        fi
+
+        sudo -n "$runtime" build -t "$IMAGE_NAME" "$GITHUB_ACTION_PATH"
+
+        {
+          echo "image-name=$IMAGE_NAME"
+          echo "runtime=$runtime"
+        } >> "$GITHUB_OUTPUT"

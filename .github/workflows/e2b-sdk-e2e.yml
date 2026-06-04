@@ -143,6 +143,20 @@ jobs:
           require-erofs: "true"
           mkfs-erofs-required-flag: ${{ env.CONCH_MKFS_EROFS_REQUIRED_FLAG }}
 
+      - name: Set up E2B SDK runner
+        id: e2b-sdk-runner
+        uses: ./.github/actions/setup-e2b-sdk-runner
+        with:
+          image-name: conch/e2b-sdk-runner:${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Export E2B SDK runner
+        run: |
+          set -euo pipefail
+          {
+            echo "CONCH_E2B_SDK_RUNNER_IMAGE=${{ steps.e2b-sdk-runner.outputs.image-name }}"
+            echo "CONCH_E2B_SDK_RUNNER_RUNTIME=${{ steps.e2b-sdk-runner.outputs.runtime }}"
+          } >> "$GITHUB_ENV"
+
       - name: Fetch Conch source
         run: |
           set -euo pipefail
@@ -164,31 +178,8 @@ jobs:
       - name: Set up Python
         run: |
           set -euo pipefail
-
-          supported_python() {
-            "$1" - <<'PY'
-          import sys
-          raise SystemExit(0 if sys.version_info >= (3, 10) else 1)
-          PY
-          }
-
-          selected_python=""
-          for candidate in python3.13 python3.12 python3.11 python3.10 python3; do
-            if command -v "$candidate" >/dev/null 2>&1; then
-              "$candidate" --version
-              if supported_python "$candidate"; then
-                selected_python="$(command -v "$candidate")"
-                break
-              fi
-            fi
-          done
-
-          if [ -z "$selected_python" ]; then
-            echo "::error::E2B SDK E2E requires an existing runner Python >= 3.10 for e2b-code-interpreter==2.5.0" >&2
-            exit 1
-          fi
-
-          "$selected_python" -m venv "${RUNNER_TEMP:-/tmp}/conch-e2b-sdk-python"
+          python3 --version
+          python3 -m venv "${RUNNER_TEMP:-/tmp}/conch-e2b-sdk-python"
           echo "${RUNNER_TEMP:-/tmp}/conch-e2b-sdk-python/bin" >> "$GITHUB_PATH"
           "${RUNNER_TEMP:-/tmp}/conch-e2b-sdk-python/bin/python" -m pip install --upgrade pip
           "${RUNNER_TEMP:-/tmp}/conch-e2b-sdk-python/bin/python" --version
@@ -198,10 +189,9 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          python -m pip install grpcio-tools 'e2b-code-interpreter==2.5.0' packaging
+          python -m pip install grpcio-tools
           make gen-proto
           make build
-          python -m pip install -e './sdk[test]'
           test -x ./bin/conch
           test -x ./bin/conchd
           test -x ./bin/conch-agent
@@ -343,10 +333,26 @@ jobs:
             "$CONCH_E2B_BOOT_IMAGE"
 
       - name: Boot sandbox and validate E2B SDK operations
-        working-directory: conch-src
         run: |
           set -euo pipefail
 
+          conch_src="$PWD/conch-src"
+
+          sudo -n "$CONCH_E2B_SDK_RUNNER_RUNTIME" run --rm -i \
+            --network host \
+            -v "$conch_src:$conch_src" \
+            -v "$CONCH_E2B_WORKDIR:$CONCH_E2B_WORKDIR" \
+            -w "$conch_src" \
+            -e CONCH_SDK_CONFIG \
+            -e CONCH_E2B_BOOT_IMAGE \
+            -e CONCH_NAMESPACE \
+            -e CONCH_SANDBOX_ID \
+            "$CONCH_E2B_SDK_RUNNER_IMAGE" sh <<'SH'
+          set -eu
+          python --version
+          python -m venv --system-site-packages "$CONCH_E2B_WORKDIR/e2b-sdk-venv"
+          . "$CONCH_E2B_WORKDIR/e2b-sdk-venv/bin/activate"
+          python -m pip install './sdk[test]'
           python - <<'PY'
           import os
           import time
@@ -463,6 +469,7 @@ jobs:
           finally:
               pass
           PY
+          SH
 
       - name: Dump conchd log on failure
         if: failure()
@@ -494,7 +501,22 @@ jobs:
           set +e
 
           if [ -n "${CONCH_SDK_CONFIG:-}" ] && [ -f "$CONCH_SDK_CONFIG" ]; then
-            python - <<'PY'
+            conch_src="$GITHUB_WORKSPACE/conch-src"
+            if [ -n "${CONCH_E2B_SDK_RUNNER_RUNTIME:-}" ] && [ -n "${CONCH_E2B_SDK_RUNNER_IMAGE:-}" ] && [ -d "$conch_src" ]; then
+              sudo -n "$CONCH_E2B_SDK_RUNNER_RUNTIME" run --rm -i \
+                --network host \
+                -v "$conch_src:$conch_src" \
+                -v "$CONCH_E2B_WORKDIR:$CONCH_E2B_WORKDIR" \
+                -w "$conch_src" \
+                -e CONCH_SDK_CONFIG \
+                -e CONCH_NAMESPACE \
+                -e CONCH_SANDBOX_ID \
+                "$CONCH_E2B_SDK_RUNNER_IMAGE" sh <<'SH'
+          set -eu
+          python -m venv --system-site-packages "$CONCH_E2B_WORKDIR/e2b-sdk-cleanup-venv"
+          . "$CONCH_E2B_WORKDIR/e2b-sdk-cleanup-venv/bin/activate"
+          python -m pip install './sdk[test]'
+          python - <<'PY'
           import os
           import time
           from conch import Sandbox
@@ -511,6 +533,8 @@ jobs:
               except Exception as exc:
                   print(f"warning: sandbox cleanup skipped or failed: {exc}")
           PY
+          SH
+            fi
           fi
 
           if [ -n "${CONCHD_PID_FILE:-}" ] && [ -f "$CONCHD_PID_FILE" ]; then
