@@ -352,6 +352,7 @@ jobs:
           echo "[e2b-sdk-e2e] starting SDK runner container at $(date -Iseconds)"
           timeout --foreground --kill-after=30s 12m sudo -n "$CONCH_E2B_SDK_RUNNER_RUNTIME" run --rm -i \
             --network host \
+            --security-opt seccomp=unconfined \
             --user "$runner_uid:$runner_gid" \
             -v "$conch_src:$conch_src" \
             -v "$CONCH_E2B_WORKDIR:$CONCH_E2B_WORKDIR" \
@@ -559,6 +560,7 @@ jobs:
               mkdir -p "$container_home"
               sudo -n "$CONCH_E2B_SDK_RUNNER_RUNTIME" run --rm -i \
                 --network host \
+                --security-opt seccomp=unconfined \
                 --user "$runner_uid:$runner_gid" \
                 -v "$conch_src:$conch_src" \
                 -v "$CONCH_E2B_WORKDIR:$CONCH_E2B_WORKDIR" \
