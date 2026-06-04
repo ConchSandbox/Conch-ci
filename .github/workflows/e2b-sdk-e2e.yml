@@ -145,8 +145,46 @@ jobs:
       - name: Set up Python
         run: |
           set -euo pipefail
-          python3 --version
-          python3 -m venv "${RUNNER_TEMP:-/tmp}/conch-e2b-sdk-python"
+
+          supported_python() {
+            "$1" - <<'PY'
+          import sys
+          raise SystemExit(0 if sys.version_info >= (3, 10) else 1)
+          PY
+          }
+
+          select_python() {
+            for candidate in python3.13 python3.12 python3.11 python3.10 python3; do
+              if command -v "$candidate" >/dev/null 2>&1 && supported_python "$candidate"; then
+                command -v "$candidate"
+                return 0
+              fi
+            done
+            return 1
+          }
+
+          python_bin="$(select_python || true)"
+          if [ -z "$python_bin" ]; then
+            packages=(python3.12 python3.11 python3.10)
+            if command -v dnf >/dev/null 2>&1; then
+              for package in "${packages[@]}"; do
+                sudo -n dnf install -y --setopt=install_weak_deps=False "$package" && break || true
+              done
+            elif command -v yum >/dev/null 2>&1; then
+              for package in "${packages[@]}"; do
+                sudo -n yum install -y "$package" && break || true
+              done
+            fi
+            python_bin="$(select_python || true)"
+          fi
+
+          if [ -z "$python_bin" ]; then
+            echo "::error::E2B SDK E2E requires Python >= 3.10 for e2b-code-interpreter==2.5.0" >&2
+            exit 1
+          fi
+
+          "$python_bin" --version
+          "$python_bin" -m venv "${RUNNER_TEMP:-/tmp}/conch-e2b-sdk-python"
           echo "${RUNNER_TEMP:-/tmp}/conch-e2b-sdk-python/bin" >> "$GITHUB_PATH"
           "${RUNNER_TEMP:-/tmp}/conch-e2b-sdk-python/bin/python" -m pip install --upgrade pip
           "${RUNNER_TEMP:-/tmp}/conch-e2b-sdk-python/bin/python" --version
