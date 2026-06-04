@@ -1,10 +1,14 @@
 import os
+import sys
 import time
 import urllib.request
 from urllib.parse import urlparse
 
 import grpc
 import requests
+
+sys.path.insert(0, os.getcwd())
+
 from api.py_proto import agent_pb2
 from conch import Sandbox as ConchSandbox
 from e2b.connection_config import ConnectionConfig
