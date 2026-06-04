@@ -149,6 +149,18 @@ jobs:
           require-erofs: "true"
           mkfs-erofs-required-flag: ${{ env.CONCH_MKFS_EROFS_REQUIRED_FLAG }}
 
+      - name: Clean stale Conch network state
+        run: |
+          set +e
+          for ns in $(sudo ip netns list | awk '/^ns-[0-9]+([[:space:]]|$)/ {print $1}'); do
+            echo "Deleting stale Conch netns: $ns"
+            sudo ip netns delete "$ns" || true
+          done
+          if sudo ip link show conch_bridge >/dev/null 2>&1; then
+            echo "Deleting stale Conch bridge: conch_bridge"
+            sudo ip link delete conch_bridge || true
+          fi
+
       - name: Set up E2B SDK runner
         id: e2b-sdk-runner
         uses: ./.github/actions/setup-e2b-sdk-runner
@@ -404,6 +416,14 @@ jobs:
           requests.sessions.Session.request = request_with_timeout
 
 
+          def expected_body_matches(body, expected_body):
+              if expected_body is None:
+                  return True
+              if isinstance(expected_body, (tuple, list, set)):
+                  return body.strip() in expected_body
+              return body.strip() == expected_body
+
+
           def wait_http(url, expected_body=None, timeout=180):
               log(f"waiting for HTTP health: {url}")
               deadline = time.monotonic() + timeout
@@ -414,7 +434,7 @@ jobs:
                           body = response.read().decode()
                           if response.status not in (200, 204):
                               raise RuntimeError(f"{url} returned {response.status}: {body!r}")
-                          if expected_body is not None and body.strip() != expected_body:
+                          if not expected_body_matches(body, expected_body):
                               raise RuntimeError(f"{url} body={body!r}, want {expected_body!r}")
                           return body
                   except Exception as exc:
@@ -457,6 +477,20 @@ jobs:
               return sandbox
 
 
+          def dump_guest_logs(e2b):
+              for path in (
+                  "/var/log/conch-agent/conch-agent.log",
+                  "/var/log/conch-agent/envd.log",
+                  "/var/log/conch-agent/code-interpreter.log",
+                  "/var/log/conch-agent/service.log",
+              ):
+                  try:
+                      log(f"guest log: {path}")
+                      print(e2b.files.read(path), flush=True)
+                  except Exception as exc:
+                      log(f"guest log unavailable: {path}: {exc}")
+
+
           conch_sandbox = None
           try:
               log("creating Conch sandbox")
@@ -475,10 +509,14 @@ jobs:
               envd_url = f"http://{sandbox_ip}:49983"
               code_interpreter_url = f"http://{sandbox_ip}:49999"
               wait_http(f"{envd_url}/health")
-              wait_http(f"{code_interpreter_url}/health", expected_body="OK")
+              e2b = new_code_interpreter_sandbox(envd_url, sandbox_ip)
+              try:
+                  wait_http(f"{code_interpreter_url}/health", expected_body=("OK", '"OK"'))
+              except Exception:
+                  dump_guest_logs(e2b)
+                  raise
 
               log("validating E2B SDK file and command operations")
-              e2b = new_code_interpreter_sandbox(envd_url, sandbox_ip)
               base = "/tmp/conch-e2b-sdk-test"
               e2b.files.make_dir(base)
               e2b.files.write(f"{base}/hello.txt", "hello-from-e2b")
@@ -622,5 +660,13 @@ jobs:
 
           if [ -n "${CONCH_E2B_WORKDIR:-}" ]; then
             sudo rm -rf "$CONCH_E2B_WORKDIR"
+          fi
+          for ns in $(sudo ip netns list | awk '/^ns-[0-9]+([[:space:]]|$)/ {print $1}'); do
+            echo "Deleting stale Conch netns: $ns"
+            sudo ip netns delete "$ns" || true
+          done
+          if sudo ip link show conch_bridge >/dev/null 2>&1; then
+            echo "Deleting stale Conch bridge: conch_bridge"
+            sudo ip link delete conch_bridge || true
           fi
           sudo rm -rf "$GITHUB_WORKSPACE/conch-src"
