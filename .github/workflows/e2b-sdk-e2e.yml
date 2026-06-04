@@ -66,6 +66,11 @@ jobs:
     timeout-minutes: 120
 
     steps:
+      - name: Clean self-hosted workspace leftovers
+        run: |
+          set +e
+          sudo rm -rf "$GITHUB_WORKSPACE/conch-src"
+
       - name: Checkout CI repository
         uses: actions/checkout@v4
 
@@ -339,9 +344,14 @@ jobs:
           set -euo pipefail
 
           conch_src="$PWD/conch-src"
+          runner_uid="$(id -u)"
+          runner_gid="$(id -g)"
+          container_home="$CONCH_E2B_WORKDIR/home"
+          mkdir -p "$container_home"
 
           sudo -n "$CONCH_E2B_SDK_RUNNER_RUNTIME" run --rm -i \
             --network host \
+            --user "$runner_uid:$runner_gid" \
             -v "$conch_src:$conch_src" \
             -v "$CONCH_E2B_WORKDIR:$CONCH_E2B_WORKDIR" \
             -w "$conch_src" \
@@ -351,6 +361,7 @@ jobs:
             -e "CONCH_E2B_SDK_HTTP_TIMEOUT=$CONCH_E2B_SDK_HTTP_TIMEOUT" \
             -e "CONCH_NAMESPACE=$CONCH_NAMESPACE" \
             -e "CONCH_SANDBOX_ID=$CONCH_SANDBOX_ID" \
+            -e "HOME=$container_home" \
             -e PYTHONUNBUFFERED=1 \
             "$CONCH_E2B_SDK_RUNNER_IMAGE" sh <<'SH'
           set -eu
@@ -530,8 +541,13 @@ jobs:
           if [ -n "${CONCH_SDK_CONFIG:-}" ] && [ -f "$CONCH_SDK_CONFIG" ]; then
             conch_src="$GITHUB_WORKSPACE/conch-src"
             if [ -n "${CONCH_E2B_SDK_RUNNER_RUNTIME:-}" ] && [ -n "${CONCH_E2B_SDK_RUNNER_IMAGE:-}" ] && [ -d "$conch_src" ]; then
+              runner_uid="$(id -u)"
+              runner_gid="$(id -g)"
+              container_home="$CONCH_E2B_WORKDIR/cleanup-home"
+              mkdir -p "$container_home"
               sudo -n "$CONCH_E2B_SDK_RUNNER_RUNTIME" run --rm -i \
                 --network host \
+                --user "$runner_uid:$runner_gid" \
                 -v "$conch_src:$conch_src" \
                 -v "$CONCH_E2B_WORKDIR:$CONCH_E2B_WORKDIR" \
                 -w "$conch_src" \
@@ -539,6 +555,7 @@ jobs:
                 -e "CONCH_E2B_WORKDIR=$CONCH_E2B_WORKDIR" \
                 -e "CONCH_NAMESPACE=$CONCH_NAMESPACE" \
                 -e "CONCH_SANDBOX_ID=$CONCH_SANDBOX_ID" \
+                -e "HOME=$container_home" \
                 "$CONCH_E2B_SDK_RUNNER_IMAGE" sh <<'SH'
           set -eu
           python -m venv --system-site-packages "$CONCH_E2B_WORKDIR/e2b-sdk-cleanup-venv"
@@ -592,3 +609,4 @@ jobs:
           if [ -n "${CONCH_E2B_WORKDIR:-}" ]; then
             sudo rm -rf "$CONCH_E2B_WORKDIR"
           fi
+          sudo rm -rf "$GITHUB_WORKSPACE/conch-src"
