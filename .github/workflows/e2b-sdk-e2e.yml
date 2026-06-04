@@ -165,12 +165,30 @@ jobs:
         run: |
           set -euo pipefail
 
-          python3 - <<'PY'
+          supported_python() {
+            "$1" - <<'PY'
           import sys
           raise SystemExit(0 if sys.version_info >= (3, 10) else 1)
           PY
-          python3 --version
-          python3 -m venv "${RUNNER_TEMP:-/tmp}/conch-e2b-sdk-python"
+          }
+
+          selected_python=""
+          for candidate in python3.13 python3.12 python3.11 python3.10 python3; do
+            if command -v "$candidate" >/dev/null 2>&1; then
+              "$candidate" --version
+              if supported_python "$candidate"; then
+                selected_python="$(command -v "$candidate")"
+                break
+              fi
+            fi
+          done
+
+          if [ -z "$selected_python" ]; then
+            echo "::error::E2B SDK E2E requires an existing runner Python >= 3.10 for e2b-code-interpreter==2.5.0" >&2
+            exit 1
+          fi
+
+          "$selected_python" -m venv "${RUNNER_TEMP:-/tmp}/conch-e2b-sdk-python"
           echo "${RUNNER_TEMP:-/tmp}/conch-e2b-sdk-python/bin" >> "$GITHUB_PATH"
           "${RUNNER_TEMP:-/tmp}/conch-e2b-sdk-python/bin/python" -m pip install --upgrade pip
           "${RUNNER_TEMP:-/tmp}/conch-e2b-sdk-python/bin/python" --version
