@@ -32,9 +32,6 @@ runs:
       run: |
         set -euo pipefail
 
-        buildkit_addr="unix:///run/buildkit/buildkitd.sock"
-        buildkit_socket="${buildkit_addr#unix://}"
-
         if [ -z "$WORK_DIR" ] && [ -n "${CONCH_E2B_WORKDIR:-}" ]; then
           WORK_DIR="$CONCH_E2B_WORKDIR/buildkit"
         fi
@@ -43,34 +40,18 @@ runs:
           WORK_DIR="${RUNNER_TEMP:-/tmp}/conch-buildkit-${GITHUB_RUN_ID:-manual}-${GITHUB_RUN_ATTEMPT:-1}"
         fi
 
+        buildkit_socket="$WORK_DIR/buildkitd.sock"
+        buildkit_addr="unix://$buildkit_socket"
         log_path="$WORK_DIR/buildkitd.log"
         pid_file="$WORK_DIR/buildkitd.pid"
 
         mkdir -p "$WORK_DIR"
-
-        if sudo -n test -S "$buildkit_socket"; then
-          echo "Using existing BuildKit socket: $buildkit_socket"
-          {
-            echo "buildkit-addr=$buildkit_addr"
-            echo "log-path=$log_path"
-            echo "pid-file=$pid_file"
-            echo "started=false"
-          } >> "$GITHUB_OUTPUT"
-          {
-            echo "CONCH_BUILDKIT_ADDR=$buildkit_addr"
-            echo "CONCH_BUILDKITD_LOG=$log_path"
-            echo "CONCH_BUILDKITD_PID_FILE=$pid_file"
-            echo "CONCH_BUILDKIT_STARTED=false"
-          } >> "$GITHUB_ENV"
-          exit 0
-        fi
 
         if ! command -v buildkitd >/dev/null 2>&1; then
           echo "::error::BuildKit socket is missing and buildkitd is not installed: $buildkit_socket" >&2
           exit 1
         fi
 
-        sudo -n mkdir -p "$(dirname "$buildkit_socket")"
         sudo -n sh -c 'exec env PATH="$1" buildkitd --addr "$2" --root "$3" > "$4" 2>&1' \
           sh \
           "$PATH" \
