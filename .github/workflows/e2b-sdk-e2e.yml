@@ -51,6 +51,7 @@ env:
   OPENEULER_CURL_PACKAGES: curl
 
   CONCH_API_TIMEOUT: 15m
+  CONCH_E2B_SDK_HTTP_TIMEOUT: 300
   GO_TAGS: exclude_graphdriver_btrfs
 
 defaults:
@@ -333,6 +334,7 @@ jobs:
             "$CONCH_E2B_BOOT_IMAGE"
 
       - name: Boot sandbox and validate E2B SDK operations
+        timeout-minutes: 20
         run: |
           set -euo pipefail
 
@@ -346,16 +348,19 @@ jobs:
             -e "CONCH_SDK_CONFIG=$CONCH_SDK_CONFIG" \
             -e "CONCH_E2B_WORKDIR=$CONCH_E2B_WORKDIR" \
             -e "CONCH_E2B_BOOT_IMAGE=$CONCH_E2B_BOOT_IMAGE" \
+            -e "CONCH_E2B_SDK_HTTP_TIMEOUT=$CONCH_E2B_SDK_HTTP_TIMEOUT" \
             -e "CONCH_NAMESPACE=$CONCH_NAMESPACE" \
             -e "CONCH_SANDBOX_ID=$CONCH_SANDBOX_ID" \
+            -e PYTHONUNBUFFERED=1 \
             "$CONCH_E2B_SDK_RUNNER_IMAGE" sh <<'SH'
           set -eu
           python --version
           python -m venv --system-site-packages "$CONCH_E2B_WORKDIR/e2b-sdk-venv"
           . "$CONCH_E2B_WORKDIR/e2b-sdk-venv/bin/activate"
-          python -m pip install './sdk[test]'
-          python - <<'PY'
+          python -m pip install --progress-bar off './sdk[test]'
+          python -u - <<'PY'
           import os
+          import requests
           import time
           import urllib.request
           from urllib.parse import urlparse
@@ -366,7 +371,24 @@ jobs:
           from packaging.version import Version
 
 
+          def log(message):
+              print(f"[e2b-sdk-e2e] {message}", flush=True)
+
+
+          REQUEST_TIMEOUT = int(os.environ.get("CONCH_E2B_SDK_HTTP_TIMEOUT", "300"))
+          _request = requests.sessions.Session.request
+
+
+          def request_with_timeout(self, method, url, **kwargs):
+              kwargs.setdefault("timeout", REQUEST_TIMEOUT)
+              return _request(self, method, url, **kwargs)
+
+
+          requests.sessions.Session.request = request_with_timeout
+
+
           def wait_http(url, expected_body=None, timeout=180):
+              log(f"waiting for HTTP health: {url}")
               deadline = time.monotonic() + timeout
               last_error = None
               while time.monotonic() < deadline:
@@ -385,6 +407,7 @@ jobs:
 
 
           def wait_conch_health(sandbox, timeout=180):
+              log(f"waiting for Conch agent health: sandbox_id={sandbox.sandbox_id} ip={sandbox.ip}")
               deadline = time.monotonic() + timeout
               last_health = None
               while time.monotonic() < deadline:
@@ -412,6 +435,7 @@ jobs:
 
           conch_sandbox = None
           try:
+              log("creating Conch sandbox")
               conch_sandbox = ConchSandbox.create(
                   config_path=os.environ["CONCH_SDK_CONFIG"],
                   image_name=os.environ["CONCH_E2B_BOOT_IMAGE"],
@@ -420,6 +444,7 @@ jobs:
                   vcpu_num=2,
                   ram_mb=2048,
               )
+              log(f"created Conch sandbox: sandbox_id={conch_sandbox.sandbox_id} ip={conch_sandbox.ip}")
               wait_conch_health(conch_sandbox)
 
               sandbox_ip = conch_sandbox.ip
@@ -428,6 +453,7 @@ jobs:
               wait_http(f"{envd_url}/health")
               wait_http(f"{code_interpreter_url}/health", expected_body="OK")
 
+              log("validating E2B SDK file and command operations")
               e2b = new_code_interpreter_sandbox(envd_url, sandbox_ip)
               base = "/tmp/conch-e2b-sdk-test"
               e2b.files.make_dir(base)
@@ -466,7 +492,7 @@ jobs:
               if "shared-through-envd" not in shared_text:
                   raise RuntimeError(f"code interpreter cannot read envd-written file: {shared_text!r}")
 
-              print("conch e2b sdk e2e ok")
+              log("conch e2b sdk e2e ok")
           finally:
               pass
           PY
