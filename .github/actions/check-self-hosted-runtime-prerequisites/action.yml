@@ -202,10 +202,14 @@ runs:
         require_file "$INITRD_PATH" "$INITRD_NAME"
 
         if is_true "$REQUIRE_EROFS"; then
-          if ! sudo -n modprobe erofs; then
-            echo "::error::Failed to load the erofs kernel module." >&2
-            echo "Prepare host kernel EROFS support before retrying this workflow." >&2
-            exit 1
+          if grep -qw erofs /proc/filesystems; then
+            echo "Host kernel reports erofs support."
+          else
+            if ! sudo -n modprobe erofs; then
+              echo "::error::Failed to load the erofs kernel module." >&2
+              echo "Prepare host kernel EROFS support before retrying this workflow." >&2
+              exit 1
+            fi
           fi
 
           if ! grep -qw erofs /proc/filesystems; then
