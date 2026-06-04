@@ -12,9 +12,8 @@ on:
         required: false
         default: dev-cri
       rootfs_platform:
-        description: BuildKit target platform for the E2B rootfs image
+        description: BuildKit target platform for the E2B rootfs image. Defaults to the runner architecture.
         required: false
-        default: linux/amd64
       kernel_path:
         description: Official Conch kernel path on the self-hosted runner
         required: false
@@ -31,7 +30,7 @@ concurrency:
 env:
   CONCH_REPOSITORY: ${{ github.event.inputs.conch_repository || vars.CONCH_REPOSITORY || 'https://github.com/ConchSandbox/Conch.git' }}
   CONCH_REF: ${{ github.event.inputs.conch_ref || vars.CONCH_REF || 'dev-cri' }}
-  CONCH_E2B_ROOTFS_PLATFORM: ${{ github.event.inputs.rootfs_platform || vars.CONCH_E2B_ROOTFS_PLATFORM || 'linux/amd64' }}
+  CONCH_E2B_ROOTFS_PLATFORM_INPUT: ${{ github.event.inputs.rootfs_platform || vars.CONCH_E2B_ROOTFS_PLATFORM }}
   CONCH_E2B_REGISTRY: ${{ vars.CONCH_E2B_REGISTRY || 'localhost:5000' }}
   CONCH_KERNEL_PATH: ${{ github.event.inputs.kernel_path || vars.CONCH_E2E_KERNEL_PATH || '/opt/conch/bzImage' }}
   ALPINE_VERSION: ${{ vars.CONCH_AGENT_E2E_ALPINE_VERSION || '3.20.3' }}
@@ -128,6 +127,23 @@ jobs:
         run: |
           set -euo pipefail
 
+          if [ -n "${CONCH_E2B_ROOTFS_PLATFORM_INPUT:-}" ]; then
+            rootfs_platform="$CONCH_E2B_ROOTFS_PLATFORM_INPUT"
+          else
+            case "${RUNNER_ARCH:-$(uname -m)}" in
+              X64|x64|x86_64|amd64)
+                rootfs_platform=linux/amd64
+                ;;
+              ARM64|arm64|aarch64)
+                rootfs_platform=linux/arm64
+                ;;
+              *)
+                echo "::error::Cannot derive E2B rootfs platform from RUNNER_ARCH=${RUNNER_ARCH:-unset}" >&2
+                exit 1
+                ;;
+            esac
+          fi
+
           tag="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           workdir="${RUNNER_TEMP:-/tmp}/conch-e2b-image-build-${tag}"
           namespace="conch-e2b-image-build-${tag}"
@@ -140,6 +156,7 @@ jobs:
           mkdir -p "$workdir"
 
           {
+            echo "CONCH_E2B_ROOTFS_PLATFORM=$rootfs_platform"
             echo "CONCH_E2B_IMAGE_TAG=$tag"
             echo "CONCH_E2B_WORKDIR=$workdir"
             echo "CONCH_NAMESPACE=$namespace"

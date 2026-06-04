@@ -97,11 +97,30 @@ jobs:
             exit 1
           fi
 
+          case "${RUNNER_ARCH:-$(uname -m)}" in
+            X64|x64|x86_64|amd64)
+              conch_e2b_runner_platform=linux/amd64
+              ;;
+            ARM64|arm64|aarch64)
+              conch_e2b_runner_platform=linux/arm64
+              ;;
+            *)
+              echo "::error::Cannot derive runner platform from RUNNER_ARCH=${RUNNER_ARCH:-unset}" >&2
+              exit 1
+              ;;
+          esac
+
+          if [ -n "${CONCH_E2B_ROOTFS_PLATFORM:-}" ] && [ "$CONCH_E2B_ROOTFS_PLATFORM" != "$conch_e2b_runner_platform" ]; then
+            echo "::error::E2B image platform $CONCH_E2B_ROOTFS_PLATFORM does not match runner platform $conch_e2b_runner_platform" >&2
+            exit 1
+          fi
+
           {
             echo "CONCH_REPOSITORY=${CONCH_REPOSITORY:-${{ github.event.inputs.conch_repository || vars.CONCH_REPOSITORY || 'https://github.com/ConchSandbox/Conch.git' }}}"
             echo "CONCH_REF=${CONCH_REF:-${{ github.event.inputs.conch_ref || vars.CONCH_REF || 'dev-cri' }}}"
             echo "CONCH_E2B_BOOT_IMAGE=$CONCH_E2B_BOOT_IMAGE"
             echo "CONCH_E2B_REGISTRY_PLAIN_HTTP=${CONCH_E2B_REGISTRY_PLAIN_HTTP:-true}"
+            echo "CONCH_E2B_ROOTFS_PLATFORM=${CONCH_E2B_ROOTFS_PLATFORM:-}"
           } >> "$GITHUB_ENV"
 
           echo "Using Conch source: ${CONCH_REPOSITORY:-unset} @ ${CONCH_REF:-unset}"
