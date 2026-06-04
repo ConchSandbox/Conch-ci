@@ -31,9 +31,10 @@ runs:
       run: |
         set -euo pipefail
 
-        if command -v buildctl >/dev/null 2>&1 && command -v buildkitd >/dev/null 2>&1; then
+        if command -v buildctl >/dev/null 2>&1 && command -v buildkitd >/dev/null 2>&1 && command -v buildkit-runc >/dev/null 2>&1; then
           echo "Using existing buildctl: $(command -v buildctl)"
           echo "Using existing buildkitd: $(command -v buildkitd)"
+          echo "Using existing buildkit-runc: $(command -v buildkit-runc)"
           echo "buildctl-path=$(command -v buildctl)" >> "$GITHUB_OUTPUT"
           echo "buildkitd-path=$(command -v buildkitd)" >> "$GITHUB_OUTPUT"
           exit 0
@@ -70,8 +71,11 @@ runs:
         curl -fsSL "$url" -o "$workdir/buildkit.tar.gz"
         gzip -t "$workdir/buildkit.tar.gz"
         tar -xzf "$workdir/buildkit.tar.gz" -C "$workdir"
-        install -m 0755 "$workdir/bin/buildctl" "$INSTALL_DIR/buildctl"
-        install -m 0755 "$workdir/bin/buildkitd" "$INSTALL_DIR/buildkitd"
+        for tool_path in "$workdir"/bin/*; do
+          if [ -f "$tool_path" ]; then
+            install -m 0755 "$tool_path" "$INSTALL_DIR/$(basename "$tool_path")"
+          fi
+        done
 
         echo "$INSTALL_DIR" >> "$GITHUB_PATH"
         echo "buildctl-path=$INSTALL_DIR/buildctl" >> "$GITHUB_OUTPUT"
