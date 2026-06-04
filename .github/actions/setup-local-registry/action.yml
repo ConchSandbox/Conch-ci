@@ -76,7 +76,8 @@ runs:
         sudo -n "$runtime" pull "$REGISTRY_IMAGE"
         sudo -n "$runtime" run -d \
           --name "$CONTAINER_NAME" \
-          -p "127.0.0.1:${registry_port}:5000" \
+          --network host \
+          -e "REGISTRY_HTTP_ADDR=127.0.0.1:${registry_port}" \
           "$REGISTRY_IMAGE" >/dev/null
 
         for _ in $(seq 1 60); do
