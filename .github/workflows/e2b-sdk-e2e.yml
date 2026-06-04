@@ -511,12 +511,7 @@ jobs:
 
               print("conch e2b sdk e2e ok")
           finally:
-              if conch_sandbox is not None:
-                  try:
-                      conch_sandbox.delete()
-                      time.sleep(5)
-                  except Exception as exc:
-                      print(f"warning: failed to delete sandbox during test cleanup: {exc}")
+              pass
           PY
 
       - name: Dump conchd log on failure
@@ -526,6 +521,22 @@ jobs:
           if [ -n "${CONCHD_LOG:-}" ] && [ -f "$CONCHD_LOG" ]; then
             sed -n '1,500p' "$CONCHD_LOG"
           fi
+
+      - name: Dump network diagnostics on failure
+        if: failure()
+        run: |
+          set +e
+          sudo ip addr show
+          sudo ip route show
+          sudo ip netns list
+          sudo iptables -t nat -S
+          sudo bridge link
+          for ns in $(sudo ip netns list | awk '{print $1}'); do
+            echo "===== netns: $ns ====="
+            sudo ip netns exec "$ns" ip addr show
+            sudo ip netns exec "$ns" ip route show
+            sudo ip netns exec "$ns" iptables -t nat -S
+          done
 
       - name: Cleanup E2B SDK E2E resources
         if: always()
