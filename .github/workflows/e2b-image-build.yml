@@ -171,6 +171,7 @@ jobs:
             --local context=conch-src/examples/e2b-rootfs \
             --local dockerfile=conch-src/examples/e2b-rootfs \
             --opt "platform=$CONCH_E2B_ROOTFS_PLATFORM" \
+            --opt "build-arg:GOPROXY=https://goproxy.cn|https://proxy.golang.org|direct" \
             --output "type=image,name=$CONCH_E2B_ROOTFS_IMAGE,push=true,registry.insecure=true"
 
       - name: Build Conch agent initramfs
