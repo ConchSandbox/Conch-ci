@@ -491,6 +491,10 @@ jobs:
                       log(f"guest log unavailable: {path}: {exc}")
 
 
+          def logs_stdout_text(result):
+              return "\n".join(getattr(line, "text", line) for line in result.logs.stdout)
+
+
           conch_sandbox = None
           try:
               log("creating Conch sandbox")
@@ -538,19 +542,19 @@ jobs:
                   "import os\nprint('code-ok')\nprint(os.getcwd())",
                   language="python",
               )
-              result_text = "\n".join(line.text for line in result.logs.stdout)
+              result_text = logs_stdout_text(result)
               if "code-ok" not in result_text:
                   raise RuntimeError(f"code interpreter stdout missing marker: {result_text!r}")
 
               e2b.run_code("stateful_value = 41", language="python")
               stateful = e2b.run_code("print(stateful_value + 1)", language="python")
-              stateful_text = "\n".join(line.text for line in stateful.logs.stdout)
+              stateful_text = logs_stdout_text(stateful)
               if "42" not in stateful_text:
                   raise RuntimeError(f"code interpreter did not preserve state: {stateful_text!r}")
 
               e2b.files.write(f"{base}/shared.txt", "shared-through-envd")
               shared = e2b.run_code(f"print(open('{base}/shared.txt').read())", language="python")
-              shared_text = "\n".join(line.text for line in shared.logs.stdout)
+              shared_text = logs_stdout_text(shared)
               if "shared-through-envd" not in shared_text:
                   raise RuntimeError(f"code interpreter cannot read envd-written file: {shared_text!r}")
 
