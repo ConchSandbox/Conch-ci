@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM m.daocloud.io/docker.io/python:3.12-slim
 
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1
 ENV PIP_NO_CACHE_DIR=1
