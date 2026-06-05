@@ -1,8 +1,12 @@
 name: Conch-agent E2E
+run-name: ${{ github.event.inputs.ci_marker || github.event.inputs.conch_ref || github.ref_name }}
 
 on:
   workflow_dispatch:
     inputs:
+      ci_marker:
+        description: External CI correlation marker
+        required: false
       conch_repository:
         description: Conch source repository URL
         required: false

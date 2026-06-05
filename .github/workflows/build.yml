@@ -1,8 +1,12 @@
 name: Conch Build & Static Check
+run-name: ${{ github.event.inputs.ci_marker || github.event.inputs.conch_ref || github.ref_name }}
 
 on:
   workflow_dispatch:
     inputs:
+      ci_marker:
+        description: External CI correlation marker
+        required: false
       conch_repository:
         description: Conch source repository URL
         required: false
@@ -16,7 +20,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: conch-pr-ci-${{ github.workflow }}-${{ github.ref }}
+  group: conch-pr-ci-${{ github.workflow }}-${{ github.event.inputs.ci_marker || github.event.inputs.conch_ref || github.ref }}
   cancel-in-progress: true
 
 env:
