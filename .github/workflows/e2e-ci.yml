@@ -1,4 +1,4 @@
-name: Conch E2B CI
+name: Conch End-to-End CI
 run-name: ${{ github.event.inputs.ci_marker || github.event.inputs.conch_ref || github.ref_name }}
 
 on:
