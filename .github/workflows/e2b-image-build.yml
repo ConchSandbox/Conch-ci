@@ -22,6 +22,11 @@ on:
         description: Official Conch kernel path on the self-hosted runner
         required: false
         default: /opt/conch/bzImage
+      run_sdk_e2e:
+        description: Run E2B SDK E2E after the image build succeeds
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -41,9 +46,14 @@ env:
   ALPINE_MIRROR: ${{ vars.CONCH_AGENT_E2E_ALPINE_MIRROR || 'https://dl-cdn.alpinelinux.org/alpine' }}
   CONCH_E2B_LOCAL_BOOT_IMAGE_PREFIX: localhost/conch/e2b
   CONCH_E2B_VMM_NAME: cloud-hypervisor
+  CONCH_CLOUD_HYPERVISOR_REPOSITORY_REF: github.com/ConchSandbox/cloud-hypervisor
+  CONCH_CLOUD_HYPERVISOR_RELEASE_REF: v52.0-conch
+  CONCH_CLOUD_HYPERVISOR_X86_64_ASSET_REF: cloud-hypervisor-static
+  CONCH_CLOUD_HYPERVISOR_ARM64_ASSET_REF: cloud-hypervisor-static-aarch64
   CONCH_MKFS_EROFS_REQUIRED_FLAG: --fsalignblks
 
-  CONCH_RUNNER_REQUIRED_COMMANDS: git protoc mkfs.erofs curl ip iptables buildctl tar gzip cpio file python3
+  CONCH_IMAGE_BUILD_REQUIRED_COMMANDS: git protoc mkfs.erofs curl ip iptables buildctl tar gzip cpio file python3
+  CONCH_SDK_E2E_REQUIRED_COMMANDS: git protoc mkfs.erofs curl ip iptables python3 timeout
   OPENEULER_GIT_PACKAGES: git
   OPENEULER_PROTOC_PACKAGES: protobuf protobuf-compiler
   OPENEULER_EROFS_PACKAGES: erofs-utils
@@ -52,6 +62,7 @@ env:
   OPENEULER_CURL_PACKAGES: curl
 
   CONCH_API_TIMEOUT: 15m
+  CONCH_E2B_SDK_HTTP_TIMEOUT: 300
   GO_TAGS: exclude_graphdriver_btrfs
 
 defaults:
@@ -79,7 +90,7 @@ jobs:
       - name: Check self-hosted image build prerequisites
         uses: ./.github/actions/check-self-hosted-runtime-prerequisites
         with:
-          required-commands: ${{ env.CONCH_RUNNER_REQUIRED_COMMANDS }}
+          required-commands: ${{ env.CONCH_IMAGE_BUILD_REQUIRED_COMMANDS }}
           vmm-name: buildkitd
           require-kvm: "false"
           kernel-path: ${{ env.CONCH_KERNEL_PATH }}
@@ -406,3 +417,438 @@ jobs:
           if [ -n "${CONCH_E2B_WORKDIR:-}" ]; then
             sudo rm -rf "$CONCH_E2B_WORKDIR"
           fi
+
+  e2b-sdk-e2e:
+    name: E2B SDK E2E
+    needs: build
+    if: ${{ github.event.inputs.run_sdk_e2e != 'false' }}
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 120
+
+    steps:
+      - name: Clean self-hosted workspace leftovers
+        run: |
+          set +e
+          sudo rm -rf "$GITHUB_WORKSPACE/conch-src"
+
+      - name: Checkout CI repository
+        uses: actions/checkout@v4
+
+      - name: Download image metadata
+        uses: actions/download-artifact@v4
+        with:
+          name: conch-e2b-image-metadata
+          path: image-metadata
+
+      - name: Resolve E2B image inputs
+        run: |
+          set -euo pipefail
+
+          test -f image-metadata/image.env
+          set -a
+          # shellcheck disable=SC1091
+          . image-metadata/image.env
+          set +a
+
+          if [ -z "${CONCH_E2B_BOOT_IMAGE:-}" ]; then
+            echo "::error::CONCH_E2B_BOOT_IMAGE is empty" >&2
+            exit 1
+          fi
+
+          case "${RUNNER_ARCH:-$(uname -m)}" in
+            X64|x64|x86_64|amd64)
+              conch_e2b_runner_platform=linux/amd64
+              ;;
+            ARM64|arm64|aarch64)
+              conch_e2b_runner_platform=linux/arm64
+              ;;
+            *)
+              echo "::error::Cannot derive runner platform from RUNNER_ARCH=${RUNNER_ARCH:-unset}" >&2
+              exit 1
+              ;;
+          esac
+
+          if [ -n "${CONCH_E2B_ROOTFS_PLATFORM:-}" ] && [ "$CONCH_E2B_ROOTFS_PLATFORM" != "$conch_e2b_runner_platform" ]; then
+            echo "::error::E2B image platform $CONCH_E2B_ROOTFS_PLATFORM does not match runner platform $conch_e2b_runner_platform" >&2
+            exit 1
+          fi
+
+          {
+            echo "CONCH_REPOSITORY=$CONCH_REPOSITORY"
+            echo "CONCH_REF=$CONCH_REF"
+            echo "CONCH_E2B_BOOT_IMAGE=$CONCH_E2B_BOOT_IMAGE"
+            echo "CONCH_E2B_REGISTRY_PLAIN_HTTP=${CONCH_E2B_REGISTRY_PLAIN_HTTP:-true}"
+            echo "CONCH_E2B_ROOTFS_PLATFORM=${CONCH_E2B_ROOTFS_PLATFORM:-}"
+          } >> "$GITHUB_ENV"
+
+          echo "Using Conch source: ${CONCH_REPOSITORY:-unset} @ ${CONCH_REF:-unset}"
+          echo "Using Conch E2B image: $CONCH_E2B_BOOT_IMAGE"
+
+      - name: Set up cloud-hypervisor
+        uses: ./.github/actions/setup-cloud-hypervisor
+        with:
+          repository-ref: ${{ env.CONCH_CLOUD_HYPERVISOR_REPOSITORY_REF }}
+          release-ref: ${{ env.CONCH_CLOUD_HYPERVISOR_RELEASE_REF }}
+          x86-64-asset-ref: ${{ env.CONCH_CLOUD_HYPERVISOR_X86_64_ASSET_REF }}
+          arm64-asset-ref: ${{ env.CONCH_CLOUD_HYPERVISOR_ARM64_ASSET_REF }}
+          binary-name: ${{ env.CONCH_E2B_VMM_NAME }}
+
+      - name: Check self-hosted runtime prerequisites
+        uses: ./.github/actions/check-self-hosted-runtime-prerequisites
+        with:
+          required-commands: ${{ env.CONCH_SDK_E2E_REQUIRED_COMMANDS }}
+          vmm-name: ${{ env.CONCH_E2B_VMM_NAME }}
+          require-erofs: "true"
+          mkfs-erofs-required-flag: ${{ env.CONCH_MKFS_EROFS_REQUIRED_FLAG }}
+
+      - name: Clean stale Conch network state
+        run: |
+          set +e
+          for ns in $(sudo ip netns list | awk '/^ns-[0-9]+([[:space:]]|$)/ {print $1}'); do
+            echo "Deleting stale Conch netns: $ns"
+            sudo ip netns delete "$ns" || true
+          done
+          if sudo ip link show conch_bridge >/dev/null 2>&1; then
+            echo "Deleting stale Conch bridge: conch_bridge"
+            sudo ip link delete conch_bridge || true
+          fi
+
+      - name: Set up E2B SDK runner
+        id: e2b-sdk-runner
+        uses: ./.github/actions/setup-e2b-sdk-runner
+        with:
+          image-name: conch/e2b-sdk-runner:${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Export E2B SDK runner
+        run: |
+          set -euo pipefail
+          {
+            echo "CONCH_E2B_SDK_RUNNER_IMAGE=${{ steps.e2b-sdk-runner.outputs.image-name }}"
+            echo "CONCH_E2B_SDK_RUNNER_RUNTIME=${{ steps.e2b-sdk-runner.outputs.runtime }}"
+          } >> "$GITHUB_ENV"
+
+      - name: Fetch Conch source
+        run: |
+          set -euo pipefail
+          rm -rf conch-src
+          git init conch-src
+          cd conch-src
+          git remote add origin "$CONCH_REPOSITORY"
+          git fetch --depth 1 origin "$CONCH_REF"
+          git checkout --detach FETCH_HEAD
+          git log --oneline -1
+          git status --short --branch
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 1.26.x
+          cache-dependency-path: conch-src/go.sum
+
+      - name: Set up Python
+        run: |
+          set -euo pipefail
+          python3 --version
+          python3 -m venv "${RUNNER_TEMP:-/tmp}/conch-e2b-sdk-python"
+          echo "${RUNNER_TEMP:-/tmp}/conch-e2b-sdk-python/bin" >> "$GITHUB_PATH"
+          "${RUNNER_TEMP:-/tmp}/conch-e2b-sdk-python/bin/python" -m pip install --upgrade pip
+          "${RUNNER_TEMP:-/tmp}/conch-e2b-sdk-python/bin/python" --version
+
+      - name: Build Conch binaries and SDK
+        working-directory: conch-src
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install grpcio-tools
+          make gen-proto
+          make build
+          test -x ./bin/conch
+          test -x ./bin/conchd
+          test -x ./bin/conch-agent
+
+      - name: Prepare isolated E2B SDK configuration
+        run: |
+          set -euo pipefail
+
+          port="$(python - <<'PY'
+          import socket
+
+          with socket.socket() as sock:
+              sock.bind(("127.0.0.1", 0))
+              print(sock.getsockname()[1])
+          PY
+          )"
+          workdir="${RUNNER_TEMP:-/tmp}/conch-e2b-sdk-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          sandbox_id="sandbox_e2b_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+          namespace="conch-e2b-sdk-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+          sudo rm -rf "$workdir"
+          mkdir -p "$workdir"
+
+          {
+            echo "CONCH_E2B_WORKDIR=$workdir"
+            echo "CONCH_PORT=$port"
+            echo "CONCH_API_URL=http://127.0.0.1:$port"
+            echo "CONCH_CONFIG=$workdir/config.yaml"
+            echo "CONCH_SDK_CONFIG=$workdir/sdk-config.yaml"
+            echo "CONCHD_LOG=$workdir/conchd.log"
+            echo "CONCHD_PID_FILE=$workdir/conchd.pid"
+            echo "CONCHD_SERVICE_PID_FILE=$workdir/conchd-service.pid"
+            echo "CONCH_NAMESPACE=$namespace"
+            echo "CONCH_SANDBOX_ID=$sandbox_id"
+          } >> "$GITHUB_ENV"
+
+          cat > "$workdir/config.yaml" <<YAML
+          app:
+            name: conch-e2b-sdk-e2e
+
+          log:
+            level: debug
+            output: stdout
+
+          server:
+            unix_socket: ""
+            pid_file: "$workdir/conchd-service.pid"
+            work_dir: "$workdir/work"
+            host: 127.0.0.1
+            port: $port
+
+          network:
+            pool_size: 1
+            dynamic_reservation: false
+            bridge_count: 1
+            tap_ip: 192.168.100.2
+            tap_mask: 24
+
+          containerd:
+            root_dir: "$workdir/containerd-root"
+            state_dir: "$workdir/containerd-state"
+            default_namespace: "$namespace"
+
+          image:
+            default_kernel_image: ""
+
+          sandbox:
+            vsock_signal_retry: 10ms
+            vsock_signal_timeout: 90s
+            request_timeout: 120s
+          YAML
+
+          cat > "$workdir/sdk-config.yaml" <<YAML
+          sandbox:
+            unix_socket: ""
+            api_url: "http://127.0.0.1:$port"
+            sandbox_id: "$sandbox_id"
+
+          snapshot:
+            snapshot_id: ""
+            vmm_name: "$CONCH_E2B_VMM_NAME"
+            vcpu_num: 2
+            vcpu_max: 2
+            ram_mb: 2048
+
+          image:
+            image_name: "$CONCH_E2B_BOOT_IMAGE"
+            use_snapshot: false
+            vmm_name: "$CONCH_E2B_VMM_NAME"
+            vcpu_num: 2
+            vcpu_max: 2
+            ram_mb: 2048
+          YAML
+
+      - name: Start conchd
+        working-directory: conch-src
+        run: |
+          set -euo pipefail
+
+          sudo -n sh -c 'exec env PATH="$1" HOME="$2" CONCH_API_TIMEOUT="$3" ./bin/conchd -config "$4" > "$5" 2>&1' \
+            sh \
+            "$PATH" \
+            "$HOME" \
+            "$CONCH_API_TIMEOUT" \
+            "$CONCH_CONFIG" \
+            "$CONCHD_LOG" &
+          echo "$!" > "$CONCHD_PID_FILE"
+
+          for _ in $(seq 1 120); do
+            if curl -fsS "$CONCH_API_URL/api/snapshot/list" >/dev/null 2>&1; then
+              echo "conchd is ready at $CONCH_API_URL"
+              exit 0
+            fi
+            if ! kill -0 "$(cat "$CONCHD_PID_FILE")" >/dev/null 2>&1; then
+              echo "::error::conchd exited before becoming ready" >&2
+              sed -n '1,240p' "$CONCHD_LOG" >&2 || true
+              exit 1
+            fi
+            sleep 1
+          done
+
+          echo "::error::timed out waiting for conchd" >&2
+          sed -n '1,240p' "$CONCHD_LOG" >&2 || true
+          exit 1
+
+      - name: Pull converted E2B image into Conch
+        working-directory: conch-src
+        run: |
+          set -euo pipefail
+          pull_flags=()
+          case "$CONCH_E2B_REGISTRY_PLAIN_HTTP" in
+            true|True|TRUE|1|yes|YES) pull_flags+=(--plain-http) ;;
+          esac
+
+          ./bin/conch pull \
+            --config "$CONCH_CONFIG" \
+            -n "$CONCH_NAMESPACE" \
+            "${pull_flags[@]}" \
+            "$CONCH_E2B_BOOT_IMAGE"
+
+      - name: Boot sandbox and validate E2B SDK operations
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+
+          conch_src="$PWD/conch-src"
+          ci_scripts="$PWD/.github/scripts"
+          runner_uid="$(id -u)"
+          runner_gid="$(id -g)"
+          container_home="$CONCH_E2B_WORKDIR/home"
+          mkdir -p "$container_home"
+
+          echo "[e2b-sdk-e2e] starting SDK runner container at $(date -Iseconds)"
+          timeout --foreground --kill-after=30s 12m sudo -n "$CONCH_E2B_SDK_RUNNER_RUNTIME" run --rm -i \
+            --network host \
+            --security-opt seccomp=unconfined \
+            --user "$runner_uid:$runner_gid" \
+            -v "$conch_src:$conch_src" \
+            -v "$ci_scripts:/ci-scripts:ro" \
+            -v "$CONCH_E2B_WORKDIR:$CONCH_E2B_WORKDIR" \
+            -w "$conch_src" \
+            -e "CONCH_SDK_CONFIG=$CONCH_SDK_CONFIG" \
+            -e "CONCH_E2B_WORKDIR=$CONCH_E2B_WORKDIR" \
+            -e "CONCH_E2B_BOOT_IMAGE=$CONCH_E2B_BOOT_IMAGE" \
+            -e "CONCH_E2B_SDK_HTTP_TIMEOUT=$CONCH_E2B_SDK_HTTP_TIMEOUT" \
+            -e "CONCH_NAMESPACE=$CONCH_NAMESPACE" \
+            -e "CONCH_SANDBOX_ID=$CONCH_SANDBOX_ID" \
+            -e "HOME=$container_home" \
+            -e PYTHONUNBUFFERED=1 \
+            "$CONCH_E2B_SDK_RUNNER_IMAGE" sh <<'SH'
+          set -eu
+          python --version
+          echo "[e2b-sdk-e2e] creating Python virtualenv"
+          python -m venv --system-site-packages "$CONCH_E2B_WORKDIR/e2b-sdk-venv"
+          . "$CONCH_E2B_WORKDIR/e2b-sdk-venv/bin/activate"
+          echo "[e2b-sdk-e2e] installing local Conch SDK"
+          python -m pip install --no-deps --progress-bar off './sdk'
+          python -u /ci-scripts/e2b_sdk_e2e.py
+          SH
+
+      - name: Dump conchd log on failure
+        if: failure()
+        run: |
+          set -euo pipefail
+          if [ -n "${CONCHD_LOG:-}" ] && [ -f "$CONCHD_LOG" ]; then
+            sed -n '1,500p' "$CONCHD_LOG"
+          fi
+
+      - name: Dump network diagnostics on failure
+        if: failure()
+        run: |
+          set +e
+          sudo ip addr show
+          sudo ip route show
+          sudo ip netns list
+          sudo iptables -t nat -S
+          sudo bridge link
+          for ns in $(sudo ip netns list | awk '{print $1}'); do
+            echo "===== netns: $ns ====="
+            sudo ip netns exec "$ns" ip addr show
+            sudo ip netns exec "$ns" ip route show
+            sudo ip netns exec "$ns" iptables -t nat -S
+          done
+
+      - name: Cleanup E2B SDK E2E resources
+        if: always()
+        run: |
+          set +e
+
+          if [ -n "${CONCH_SDK_CONFIG:-}" ] && [ -f "$CONCH_SDK_CONFIG" ]; then
+            conch_src="$GITHUB_WORKSPACE/conch-src"
+            if [ -n "${CONCH_E2B_SDK_RUNNER_RUNTIME:-}" ] && [ -n "${CONCH_E2B_SDK_RUNNER_IMAGE:-}" ] && [ -d "$conch_src" ]; then
+              runner_uid="$(id -u)"
+              runner_gid="$(id -g)"
+              container_home="$CONCH_E2B_WORKDIR/cleanup-home"
+              mkdir -p "$container_home"
+              sudo -n "$CONCH_E2B_SDK_RUNNER_RUNTIME" run --rm -i \
+                --network host \
+                --security-opt seccomp=unconfined \
+                --user "$runner_uid:$runner_gid" \
+                -v "$conch_src:$conch_src" \
+                -v "$CONCH_E2B_WORKDIR:$CONCH_E2B_WORKDIR" \
+                -w "$conch_src" \
+                -e "CONCH_SDK_CONFIG=$CONCH_SDK_CONFIG" \
+                -e "CONCH_E2B_WORKDIR=$CONCH_E2B_WORKDIR" \
+                -e "CONCH_NAMESPACE=$CONCH_NAMESPACE" \
+                -e "CONCH_SANDBOX_ID=$CONCH_SANDBOX_ID" \
+                -e "HOME=$container_home" \
+                "$CONCH_E2B_SDK_RUNNER_IMAGE" sh <<'SH'
+          set -eu
+          python -m venv --system-site-packages "$CONCH_E2B_WORKDIR/e2b-sdk-cleanup-venv"
+          . "$CONCH_E2B_WORKDIR/e2b-sdk-cleanup-venv/bin/activate"
+          python -m pip install --no-deps --progress-bar off './sdk'
+          python - <<'PY'
+          import os
+          import time
+          from conch import Sandbox
+
+          sandbox_id = os.environ.get("CONCH_SANDBOX_ID", "")
+          if sandbox_id:
+              try:
+                  Sandbox.delete_sandbox(
+                      sandbox_id,
+                      config_path=os.environ["CONCH_SDK_CONFIG"],
+                      namespace=os.environ.get("CONCH_NAMESPACE") or None,
+                  )
+                  time.sleep(5)
+              except Exception as exc:
+                  print(f"warning: sandbox cleanup skipped or failed: {exc}")
+          PY
+          SH
+            fi
+          fi
+
+          if [ -n "${CONCHD_PID_FILE:-}" ] && [ -f "$CONCHD_PID_FILE" ]; then
+            conchd_pid="$(cat "$CONCHD_PID_FILE")"
+            if kill -0 "$conchd_pid" >/dev/null 2>&1; then
+              sudo kill "$conchd_pid" >/dev/null 2>&1 || true
+              for _ in $(seq 1 30); do
+                kill -0 "$conchd_pid" >/dev/null 2>&1 || break
+                sleep 1
+              done
+              kill -0 "$conchd_pid" >/dev/null 2>&1 && sudo kill -9 "$conchd_pid" >/dev/null 2>&1 || true
+            fi
+          fi
+
+          if [ -n "${CONCHD_SERVICE_PID_FILE:-}" ] && [ -f "$CONCHD_SERVICE_PID_FILE" ]; then
+            service_pid="$(cat "$CONCHD_SERVICE_PID_FILE")"
+            if sudo kill -0 "$service_pid" >/dev/null 2>&1; then
+              sudo kill "$service_pid" >/dev/null 2>&1 || true
+              for _ in $(seq 1 30); do
+                sudo kill -0 "$service_pid" >/dev/null 2>&1 || break
+                sleep 1
+              done
+              sudo kill -0 "$service_pid" >/dev/null 2>&1 && sudo kill -9 "$service_pid" >/dev/null 2>&1 || true
+            fi
+          fi
+
+          if [ -n "${CONCH_E2B_WORKDIR:-}" ]; then
+            sudo rm -rf "$CONCH_E2B_WORKDIR"
+          fi
+          for ns in $(sudo ip netns list | awk '/^ns-[0-9]+([[:space:]]|$)/ {print $1}'); do
+            echo "Deleting stale Conch netns: $ns"
+            sudo ip netns delete "$ns" || true
+          done
+          if sudo ip link show conch_bridge >/dev/null 2>&1; then
+            echo "Deleting stale Conch bridge: conch_bridge"
+            sudo ip link delete conch_bridge || true
+          fi
+          sudo rm -rf "$GITHUB_WORKSPACE/conch-src"
