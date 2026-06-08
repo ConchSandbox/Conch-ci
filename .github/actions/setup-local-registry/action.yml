@@ -14,6 +14,10 @@ inputs:
     description: Name used for the local registry container.
     required: false
     default: conch-local-registry
+  storage-path:
+    description: Host path used to persist registry storage.
+    required: false
+    default: /opt/conch/registry
 
 outputs:
   started:
@@ -33,6 +37,7 @@ runs:
         REGISTRY: ${{ inputs.registry }}
         REGISTRY_IMAGE: ${{ inputs.image }}
         CONTAINER_NAME: ${{ inputs.container-name }}
+        STORAGE_PATH: ${{ inputs.storage-path }}
       run: |
         set -euo pipefail
 
@@ -74,9 +79,16 @@ runs:
 
         sudo -n "$runtime" rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
         sudo -n "$runtime" pull "$REGISTRY_IMAGE"
+        if [ -n "$STORAGE_PATH" ]; then
+          sudo -n mkdir -p "$STORAGE_PATH"
+          storage_args=(-v "$STORAGE_PATH:/var/lib/registry")
+        else
+          storage_args=()
+        fi
         sudo -n "$runtime" run -d \
           --name "$CONTAINER_NAME" \
           --network host \
+          "${storage_args[@]}" \
           -e "REGISTRY_HTTP_ADDR=127.0.0.1:${registry_port}" \
           "$REGISTRY_IMAGE" >/dev/null
 

@@ -18,6 +18,14 @@ on:
       rootfs_platform:
         description: BuildKit target platform for the E2B rootfs image. Defaults to the runner architecture.
         required: false
+      rootfs_image:
+        description: Prebuilt E2B rootfs image ref in the local registry. Empty uses CONCH_E2B_ROOTFS_IMAGE_<ARCH>.
+        required: false
+      build_rootfs:
+        description: Build the E2B rootfs image during this run instead of using the weekly local image.
+        required: false
+        type: boolean
+        default: false
       kernel_path:
         description: Official Conch kernel path on the self-hosted runner
         required: false
@@ -40,6 +48,10 @@ env:
   CONCH_REPOSITORY: ${{ github.event.inputs.conch_repository || vars.CONCH_REPOSITORY || 'https://github.com/ConchSandbox/Conch.git' }}
   CONCH_REF: ${{ github.event.inputs.conch_ref || vars.CONCH_REF || 'dev-cri' }}
   CONCH_E2B_ROOTFS_PLATFORM_INPUT: ${{ github.event.inputs.rootfs_platform || vars.CONCH_E2B_ROOTFS_PLATFORM }}
+  CONCH_E2B_ROOTFS_IMAGE_INPUT: ${{ github.event.inputs.rootfs_image }}
+  CONCH_E2B_BUILD_ROOTFS_INPUT: ${{ github.event.inputs.build_rootfs || 'false' }}
+  CONCH_E2B_ROOTFS_IMAGE_AMD64: ${{ vars.CONCH_E2B_ROOTFS_IMAGE_AMD64 }}
+  CONCH_E2B_ROOTFS_IMAGE_ARM64: ${{ vars.CONCH_E2B_ROOTFS_IMAGE_ARM64 }}
   CONCH_E2B_REGISTRY: ${{ vars.CONCH_E2B_REGISTRY || 'localhost:5000' }}
   CONCH_KERNEL_PATH: ${{ github.event.inputs.kernel_path || vars.CONCH_E2E_KERNEL_PATH || '/opt/conch/bzImage' }}
   ALPINE_VERSION: ${{ vars.CONCH_AGENT_E2E_ALPINE_VERSION || '3.20.3' }}
@@ -98,6 +110,21 @@ jobs:
           require-erofs: "true"
           mkfs-erofs-required-flag: ${{ env.CONCH_MKFS_EROFS_REQUIRED_FLAG }}
 
+      - name: Clean stale Conch network state
+        run: |
+          set +e
+          for ns in $(sudo ip netns list | awk '/^ns-[0-9]+([[:space:]]|$)/ {print $1}'); do
+            echo "Deleting stale Conch netns: $ns"
+            sudo ip netns delete "$ns" || true
+          done
+          sudo rm -rf /var/lib/cni/networks/conch-bridge /var/lib/cni/results/conch-bridge
+          for bridge in cni-conch0 conch_bridge; do
+            if sudo ip link show "$bridge" >/dev/null 2>&1; then
+              echo "Deleting stale Conch bridge: $bridge"
+              sudo ip link delete "$bridge" || true
+            fi
+          done
+
       - name: Fetch Conch source
         run: |
           set -euo pipefail
@@ -109,7 +136,11 @@ jobs:
           git checkout --detach FETCH_HEAD
           git log --oneline -1
           git status --short --branch
-          test -f examples/e2b-rootfs/Dockerfile
+
+      - name: Set up Conch CNI
+        uses: ./.github/actions/setup-conch-cni
+        with:
+          source-conf-dir: conch-src/config/cni/net.d
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -121,6 +152,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 --version
+          rm -rf "${RUNNER_TEMP:-/tmp}/conch-e2b-image-python"
           python3 -m venv "${RUNNER_TEMP:-/tmp}/conch-e2b-image-python"
           echo "${RUNNER_TEMP:-/tmp}/conch-e2b-image-python/bin" >> "$GITHUB_PATH"
           "${RUNNER_TEMP:-/tmp}/conch-e2b-image-python/bin/python" -m pip install --upgrade pip
@@ -163,9 +195,53 @@ jobs:
           workdir="${RUNNER_TEMP:-/tmp}/conch-e2b-image-build-${tag}"
           namespace="conch-e2b-image-build-${tag}"
           validation_namespace="conch-e2b-image-validate-${tag}"
-          rootfs_image="${CONCH_E2B_REGISTRY}/conch/e2b-rootfs:${tag}"
+          local_rootfs_image="${CONCH_E2B_REGISTRY}/conch/e2b-rootfs:${tag}"
           local_boot_image="${CONCH_E2B_LOCAL_BOOT_IMAGE_PREFIX}:${tag}"
           remote_boot_image="${CONCH_E2B_REGISTRY}/conch/e2b:${tag}"
+
+          case "${CONCH_E2B_BUILD_ROOTFS_INPUT:-false}" in
+            true|True|TRUE|1|yes|YES)
+              build_rootfs=true
+              ;;
+            false|False|FALSE|0|no|NO|"")
+              build_rootfs=false
+              ;;
+            *)
+              echo "::error::Invalid build_rootfs value: $CONCH_E2B_BUILD_ROOTFS_INPUT" >&2
+              exit 1
+              ;;
+          esac
+
+          case "$rootfs_platform" in
+            linux/amd64)
+              default_rootfs_image="${CONCH_E2B_ROOTFS_IMAGE_AMD64:-}"
+              ;;
+            linux/arm64)
+              default_rootfs_image="${CONCH_E2B_ROOTFS_IMAGE_ARM64:-}"
+              ;;
+            *)
+              echo "::error::Unsupported E2B rootfs platform: $rootfs_platform" >&2
+              exit 1
+              ;;
+          esac
+
+          if [ "$build_rootfs" = "true" ]; then
+            rootfs_image="$local_rootfs_image"
+          else
+            rootfs_image="${CONCH_E2B_ROOTFS_IMAGE_INPUT:-$default_rootfs_image}"
+            if [ -z "$rootfs_image" ]; then
+              echo "::error::No prebuilt E2B rootfs image configured for $rootfs_platform. Run Weekly E2B Rootfs Image first, set CONCH_E2B_ROOTFS_IMAGE_<ARCH>, pass rootfs_image, or set build_rootfs=true." >&2
+              exit 1
+            fi
+            case "$rootfs_image" in
+              "${CONCH_E2B_REGISTRY}/"*)
+                ;;
+              *)
+                echo "::error::Prebuilt E2B rootfs image must live in local registry $CONCH_E2B_REGISTRY because this workflow uses --plain-http: $rootfs_image" >&2
+                exit 1
+                ;;
+            esac
+          fi
 
           sudo rm -rf "$workdir"
           mkdir -p "$workdir"
@@ -176,6 +252,8 @@ jobs:
             echo "CONCH_E2B_WORKDIR=$workdir"
             echo "CONCH_NAMESPACE=$namespace"
             echo "CONCH_VALIDATION_NAMESPACE=$validation_namespace"
+            echo "CONCH_E2B_BUILD_ROOTFS=$build_rootfs"
+            echo "CONCH_E2B_LOCAL_ROOTFS_IMAGE=$local_rootfs_image"
             echo "CONCH_E2B_ROOTFS_IMAGE=$rootfs_image"
             echo "CONCH_E2B_LOCAL_BOOT_IMAGE=$local_boot_image"
             echo "CONCH_E2B_REMOTE_BOOT_IMAGE=$remote_boot_image"
@@ -198,6 +276,11 @@ jobs:
       - name: Build E2B rootfs image with Conch example Dockerfile
         run: |
           set -euo pipefail
+          if [ "$CONCH_E2B_BUILD_ROOTFS" != "true" ]; then
+            echo "Using prebuilt E2B rootfs image: $CONCH_E2B_ROOTFS_IMAGE"
+            exit 0
+          fi
+          test -f conch-src/examples/e2b-rootfs/Dockerfile
           sudo -n env PATH="$PATH" buildctl --addr "$CONCH_BUILDKIT_ADDR" build \
             --frontend dockerfile.v0 \
             --local context=conch-src/examples/e2b-rootfs \
@@ -205,6 +288,34 @@ jobs:
             --opt "platform=$CONCH_E2B_ROOTFS_PLATFORM" \
             --opt "build-arg:GOPROXY=https://goproxy.cn|https://proxy.golang.org|direct" \
             --output "type=image,name=$CONCH_E2B_ROOTFS_IMAGE,push=true,registry.insecure=true"
+
+      - name: Validate prebuilt E2B rootfs image
+        run: |
+          set -euo pipefail
+          if [ "$CONCH_E2B_BUILD_ROOTFS" = "true" ]; then
+            exit 0
+          fi
+
+          image_without_registry="${CONCH_E2B_ROOTFS_IMAGE#${CONCH_E2B_REGISTRY}/}"
+          case "$image_without_registry" in
+            *@*)
+              repository="${image_without_registry%@*}"
+              reference="${image_without_registry#*@}"
+              ;;
+            *:*)
+              repository="${image_without_registry%:*}"
+              reference="${image_without_registry##*:}"
+              ;;
+            *)
+              echo "::error::Prebuilt E2B rootfs image must include a tag or digest: $CONCH_E2B_ROOTFS_IMAGE" >&2
+              exit 1
+              ;;
+          esac
+
+          curl -fsSI \
+            -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json" \
+            "http://${CONCH_E2B_REGISTRY}/v2/${repository}/manifests/${reference}" >/dev/null
+          echo "Prebuilt E2B rootfs image is available: $CONCH_E2B_ROOTFS_IMAGE"
 
       - name: Build Conch agent initramfs
         working-directory: conch-src
@@ -252,6 +363,9 @@ jobs:
             host: 127.0.0.1
             port: $port
 
+          state:
+            path: "$CONCH_E2B_WORKDIR/state.db"
+
           network:
             pool_size: 1
             dynamic_reservation: false
@@ -288,7 +402,9 @@ jobs:
           echo "$!" > "$CONCHD_PID_FILE"
 
           for _ in $(seq 1 120); do
-            if curl -fsS "$CONCH_API_URL/api/snapshot/list" >/dev/null 2>&1; then
+            if curl -fsS -X POST "$CONCH_API_URL/api/snapshot/list" \
+              -H 'Content-Type: application/json' \
+              -d "{\"namespace\":\"$CONCH_NAMESPACE\"}" >/dev/null 2>&1; then
               echo "conchd is ready at $CONCH_API_URL"
               exit 0
             fi
@@ -347,6 +463,7 @@ jobs:
           CONCH_E2B_ROOTFS_PLATFORM=$CONCH_E2B_ROOTFS_PLATFORM
           CONCH_E2B_REGISTRY=$CONCH_E2B_REGISTRY
           CONCH_E2B_REGISTRY_PLAIN_HTTP=true
+          CONCH_E2B_BUILD_ROOTFS=$CONCH_E2B_BUILD_ROOTFS
           CONCH_E2B_ROOTFS_IMAGE=$CONCH_E2B_ROOTFS_IMAGE
           CONCH_E2B_BOOT_IMAGE=$CONCH_E2B_REMOTE_BOOT_IMAGE
           CONCH_E2B_IMAGE_TAG=$CONCH_E2B_IMAGE_TAG
@@ -417,6 +534,17 @@ jobs:
           if [ -n "${CONCH_E2B_WORKDIR:-}" ]; then
             sudo rm -rf "$CONCH_E2B_WORKDIR"
           fi
+          sudo rm -rf /var/lib/cni/networks/conch-bridge /var/lib/cni/results/conch-bridge
+          for ns in $(sudo ip netns list | awk '/^ns-[0-9]+([[:space:]]|$)/ {print $1}'); do
+            echo "Deleting stale Conch netns: $ns"
+            sudo ip netns delete "$ns" || true
+          done
+          for bridge in cni-conch0 conch_bridge; do
+            if sudo ip link show "$bridge" >/dev/null 2>&1; then
+              echo "Deleting stale Conch bridge: $bridge"
+              sudo ip link delete "$bridge" || true
+            fi
+          done
 
   e2b-sdk-e2e:
     name: E2B SDK E2E
@@ -508,10 +636,13 @@ jobs:
             echo "Deleting stale Conch netns: $ns"
             sudo ip netns delete "$ns" || true
           done
-          if sudo ip link show conch_bridge >/dev/null 2>&1; then
-            echo "Deleting stale Conch bridge: conch_bridge"
-            sudo ip link delete conch_bridge || true
-          fi
+          sudo rm -rf /var/lib/cni/networks/conch-bridge /var/lib/cni/results/conch-bridge
+          for bridge in cni-conch0 conch_bridge; do
+            if sudo ip link show "$bridge" >/dev/null 2>&1; then
+              echo "Deleting stale Conch bridge: $bridge"
+              sudo ip link delete "$bridge" || true
+            fi
+          done
 
       - name: Set up E2B SDK runner
         id: e2b-sdk-runner
@@ -539,6 +670,11 @@ jobs:
           git log --oneline -1
           git status --short --branch
 
+      - name: Set up Conch CNI
+        uses: ./.github/actions/setup-conch-cni
+        with:
+          source-conf-dir: conch-src/config/cni/net.d
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
@@ -549,6 +685,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 --version
+          rm -rf "${RUNNER_TEMP:-/tmp}/conch-e2b-sdk-python"
           python3 -m venv "${RUNNER_TEMP:-/tmp}/conch-e2b-sdk-python"
           echo "${RUNNER_TEMP:-/tmp}/conch-e2b-sdk-python/bin" >> "$GITHUB_PATH"
           "${RUNNER_TEMP:-/tmp}/conch-e2b-sdk-python/bin/python" -m pip install --upgrade pip
@@ -613,6 +750,9 @@ jobs:
             host: 127.0.0.1
             port: $port
 
+          state:
+            path: "$workdir/state.db"
+
           network:
             pool_size: 1
             dynamic_reservation: false
@@ -671,7 +811,9 @@ jobs:
           echo "$!" > "$CONCHD_PID_FILE"
 
           for _ in $(seq 1 120); do
-            if curl -fsS "$CONCH_API_URL/api/snapshot/list" >/dev/null 2>&1; then
+            if curl -fsS -X POST "$CONCH_API_URL/api/snapshot/list" \
+              -H 'Content-Type: application/json' \
+              -d "{\"namespace\":\"$CONCH_NAMESPACE\"}" >/dev/null 2>&1; then
               echo "conchd is ready at $CONCH_API_URL"
               exit 0
             fi
@@ -847,8 +989,11 @@ jobs:
             echo "Deleting stale Conch netns: $ns"
             sudo ip netns delete "$ns" || true
           done
-          if sudo ip link show conch_bridge >/dev/null 2>&1; then
-            echo "Deleting stale Conch bridge: conch_bridge"
-            sudo ip link delete conch_bridge || true
-          fi
+          sudo rm -rf /var/lib/cni/networks/conch-bridge /var/lib/cni/results/conch-bridge
+          for bridge in cni-conch0 conch_bridge; do
+            if sudo ip link show "$bridge" >/dev/null 2>&1; then
+              echo "Deleting stale Conch bridge: $bridge"
+              sudo ip link delete "$bridge" || true
+            fi
+          done
           sudo rm -rf "$GITHUB_WORKSPACE/conch-src"

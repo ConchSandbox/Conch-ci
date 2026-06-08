@@ -1,0 +1,131 @@
+name: Set up Conch CNI
+description: Install CNI plugin binaries and Conch CNI configuration on self-hosted runners.
+
+inputs:
+  plugin-version:
+    description: containernetworking/plugins release tag to install when required plugins are missing.
+    required: false
+    default: v1.9.1
+  plugin-bin-dir:
+    description: Host directory for CNI plugin binaries.
+    required: false
+    default: /opt/cni/bin
+  plugin-conf-dir:
+    description: Host directory for Conch CNI configuration files.
+    required: false
+    default: /etc/conch/cni/net.d
+  source-conf-dir:
+    description: Repository directory containing Conch CNI .conf/.conflist files.
+    required: true
+  required-plugins:
+    description: Space-separated CNI plugin binaries required by the default Conch CNI config.
+    required: false
+    default: bridge host-local loopback
+  clear-conf-dir:
+    description: Remove existing .conf/.conflist files from plugin-conf-dir before installing source configs.
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: Install Conch CNI prerequisites
+      shell: bash
+      env:
+        PLUGIN_VERSION: ${{ inputs.plugin-version }}
+        PLUGIN_BIN_DIR: ${{ inputs.plugin-bin-dir }}
+        PLUGIN_CONF_DIR: ${{ inputs.plugin-conf-dir }}
+        SOURCE_CONF_DIR: ${{ inputs.source-conf-dir }}
+        REQUIRED_PLUGINS: ${{ inputs.required-plugins }}
+        CLEAR_CONF_DIR: ${{ inputs.clear-conf-dir }}
+      run: |
+        set -euo pipefail
+
+        require_command() {
+          local tool="$1"
+          if ! command -v "$tool" >/dev/null 2>&1; then
+            echo "::error::Required command not found for Conch CNI setup: $tool" >&2
+            exit 1
+          fi
+        }
+
+        require_command curl
+        require_command sha256sum
+        require_command tar
+
+        if [ ! -d "$SOURCE_CONF_DIR" ]; then
+          echo "::error::Conch CNI config source directory does not exist: $SOURCE_CONF_DIR" >&2
+          exit 1
+        fi
+
+        shopt -s nullglob
+        source_configs=("$SOURCE_CONF_DIR"/*.conf "$SOURCE_CONF_DIR"/*.conflist)
+        shopt -u nullglob
+        if [ "${#source_configs[@]}" -eq 0 ]; then
+          echo "::error::No Conch CNI .conf/.conflist files found in $SOURCE_CONF_DIR" >&2
+          exit 1
+        fi
+
+        read -r -a required_plugins <<< "$REQUIRED_PLUGINS"
+        missing_plugins=()
+        for plugin in "${required_plugins[@]}"; do
+          if [ ! -x "$PLUGIN_BIN_DIR/$plugin" ]; then
+            missing_plugins+=("$plugin")
+          fi
+        done
+
+        if [ "${#missing_plugins[@]}" -gt 0 ]; then
+          case "$(uname -m)" in
+            x86_64|amd64)
+              cni_arch=amd64
+              ;;
+            aarch64|arm64)
+              cni_arch=arm64
+              ;;
+            *)
+              echo "::error::Unsupported architecture for CNI plugins: $(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+
+          archive="cni-plugins-linux-${cni_arch}-${PLUGIN_VERSION}.tgz"
+          base_url="https://github.com/containernetworking/plugins/releases/download/${PLUGIN_VERSION}"
+          download_dir="${RUNNER_TEMP:-/tmp}/conch-cni-${PLUGIN_VERSION}-${cni_arch}"
+          rm -rf "$download_dir"
+          mkdir -p "$download_dir"
+
+          echo "Missing CNI plugins: ${missing_plugins[*]}"
+          echo "Installing CNI plugins from ${base_url}/${archive}"
+          curl -fsSL -o "$download_dir/$archive" "$base_url/$archive"
+          curl -fsSL -o "$download_dir/$archive.sha256" "$base_url/$archive.sha256"
+          (
+            cd "$download_dir"
+            sha256sum -c "$archive.sha256"
+          )
+
+          sudo -n mkdir -p "$PLUGIN_BIN_DIR"
+          sudo -n tar -xzf "$download_dir/$archive" -C "$PLUGIN_BIN_DIR"
+        else
+          echo "Required CNI plugins already exist in $PLUGIN_BIN_DIR: $REQUIRED_PLUGINS"
+        fi
+
+        for plugin in "${required_plugins[@]}"; do
+          if [ ! -x "$PLUGIN_BIN_DIR/$plugin" ]; then
+            echo "::error::CNI plugin is still missing or not executable after setup: $PLUGIN_BIN_DIR/$plugin" >&2
+            exit 1
+          fi
+        done
+
+        sudo -n mkdir -p "$PLUGIN_CONF_DIR"
+        case "$CLEAR_CONF_DIR" in
+          true|True|TRUE|1|yes|YES)
+            sudo -n find "$PLUGIN_CONF_DIR" -maxdepth 1 -type f \( -name '*.conf' -o -name '*.conflist' \) -delete
+            ;;
+        esac
+
+        for config in "${source_configs[@]}"; do
+          sudo -n cp "$config" "$PLUGIN_CONF_DIR/"
+        done
+
+        echo "Installed Conch CNI configs:"
+        sudo -n find "$PLUGIN_CONF_DIR" -maxdepth 1 -type f \( -name '*.conf' -o -name '*.conflist' \) -print | sort

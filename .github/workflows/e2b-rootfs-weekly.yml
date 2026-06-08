@@ -1,0 +1,257 @@
+name: Weekly E2B Rootfs Image
+run-name: weekly-e2b-rootfs-${{ github.event.inputs.conch_ref || vars.CONCH_E2B_ROOTFS_REF || vars.CONCH_REF || 'dev-cri' }}
+
+on:
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      conch_repository:
+        description: Conch source repository URL
+        required: false
+      conch_ref:
+        description: Conch source ref that contains examples/e2b-rootfs/Dockerfile
+        required: false
+      rootfs_platform:
+        description: BuildKit target platform for the E2B rootfs image. Defaults to the runner architecture.
+        required: false
+      update_repo_variable:
+        description: Update CONCH_E2B_ROOTFS_IMAGE_<ARCH> with the pushed digest
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: conch-e2b-rootfs-weekly-${{ github.event.inputs.rootfs_platform || vars.CONCH_E2B_ROOTFS_PLATFORM || 'runner' }}
+  cancel-in-progress: false
+
+env:
+  CONCH_REPOSITORY: ${{ github.event.inputs.conch_repository || vars.CONCH_E2B_ROOTFS_REPOSITORY || vars.CONCH_REPOSITORY || 'https://github.com/ConchSandbox/Conch.git' }}
+  CONCH_REF: ${{ github.event.inputs.conch_ref || vars.CONCH_E2B_ROOTFS_REF || vars.CONCH_REF || 'dev-cri' }}
+  CONCH_E2B_ROOTFS_PLATFORM_INPUT: ${{ github.event.inputs.rootfs_platform || vars.CONCH_E2B_ROOTFS_PLATFORM }}
+  CONCH_E2B_REGISTRY: ${{ vars.CONCH_E2B_REGISTRY || 'localhost:5000' }}
+  CONCH_E2B_UPDATE_ROOTFS_VARIABLE: ${{ github.event.inputs.update_repo_variable != 'false' }}
+  CONCH_ROOTFS_REQUIRED_COMMANDS: git curl buildctl
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build-rootfs:
+    name: Build Weekly E2B Rootfs
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout CI repository
+        uses: actions/checkout@v4
+
+      - name: Set up buildctl
+        uses: ./.github/actions/setup-buildctl
+
+      - name: Check self-hosted rootfs build prerequisites
+        uses: ./.github/actions/check-self-hosted-runtime-prerequisites
+        with:
+          required-commands: ${{ env.CONCH_ROOTFS_REQUIRED_COMMANDS }}
+          vmm-name: buildkitd
+          require-kvm: "false"
+          require-erofs: "false"
+
+      - name: Fetch Conch source
+        run: |
+          set -euo pipefail
+          rm -rf conch-src
+          git init conch-src
+          cd conch-src
+          git remote add origin "$CONCH_REPOSITORY"
+          git fetch --depth 1 origin "$CONCH_REF"
+          git checkout --detach FETCH_HEAD
+          git log --oneline -1
+          git status --short --branch
+          test -f examples/e2b-rootfs/Dockerfile
+
+      - name: Prepare rootfs image refs
+        run: |
+          set -euo pipefail
+
+          if [ -n "${CONCH_E2B_ROOTFS_PLATFORM_INPUT:-}" ]; then
+            rootfs_platform="$CONCH_E2B_ROOTFS_PLATFORM_INPUT"
+          else
+            case "${RUNNER_ARCH:-$(uname -m)}" in
+              X64|x64|x86_64|amd64)
+                rootfs_platform=linux/amd64
+                ;;
+              ARM64|arm64|aarch64)
+                rootfs_platform=linux/arm64
+                ;;
+              *)
+                echo "::error::Cannot derive E2B rootfs platform from RUNNER_ARCH=${RUNNER_ARCH:-unset}" >&2
+                exit 1
+                ;;
+            esac
+          fi
+
+          case "$rootfs_platform" in
+            linux/amd64)
+              platform_suffix=amd64
+              variable_name=CONCH_E2B_ROOTFS_IMAGE_AMD64
+              ;;
+            linux/arm64)
+              platform_suffix=arm64
+              variable_name=CONCH_E2B_ROOTFS_IMAGE_ARM64
+              ;;
+            *)
+              echo "::error::Unsupported E2B rootfs platform: $rootfs_platform" >&2
+              exit 1
+              ;;
+          esac
+
+          case "$CONCH_E2B_REGISTRY" in
+            localhost:*|127.0.0.1:*)
+              ;;
+            *)
+              echo "::error::Weekly local rootfs registry must be localhost or 127.0.0.1, got $CONCH_E2B_REGISTRY" >&2
+              exit 1
+              ;;
+          esac
+
+          build_date="$(date -u +%Y%m%d)"
+          image_repo="${CONCH_E2B_REGISTRY}/conch/e2b-rootfs"
+          version_tag="weekly-${build_date}-${platform_suffix}"
+          latest_tag="weekly-latest-${platform_suffix}"
+
+          {
+            echo "CONCH_E2B_ROOTFS_PLATFORM=$rootfs_platform"
+            echo "CONCH_E2B_ROOTFS_PLATFORM_SUFFIX=$platform_suffix"
+            echo "CONCH_E2B_ROOTFS_IMAGE_REPO=$image_repo"
+            echo "CONCH_E2B_ROOTFS_VERSION_TAG=$version_tag"
+            echo "CONCH_E2B_ROOTFS_LATEST_TAG=$latest_tag"
+            echo "CONCH_E2B_ROOTFS_VARIABLE_NAME=$variable_name"
+          } >> "$GITHUB_ENV"
+
+      - name: Set up local registry
+        uses: ./.github/actions/setup-local-registry
+        with:
+          registry: ${{ env.CONCH_E2B_REGISTRY }}
+
+      - name: Set up BuildKit
+        uses: ./.github/actions/setup-buildkit
+
+      - name: Build and push weekly rootfs image
+        run: |
+          set -euo pipefail
+          sudo -n env PATH="$PATH" buildctl --addr "$CONCH_BUILDKIT_ADDR" build \
+            --frontend dockerfile.v0 \
+            --local context=conch-src/examples/e2b-rootfs \
+            --local dockerfile=conch-src/examples/e2b-rootfs \
+            --opt "platform=$CONCH_E2B_ROOTFS_PLATFORM" \
+            --opt "build-arg:GOPROXY=https://goproxy.cn|https://proxy.golang.org|direct" \
+            --output "type=image,name=${CONCH_E2B_ROOTFS_IMAGE_REPO}:${CONCH_E2B_ROOTFS_VERSION_TAG},push=true,registry.insecure=true"
+
+      - name: Resolve rootfs digest and update latest tag
+        run: |
+          set -euo pipefail
+
+          accept_header="Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json"
+          manifest_url="http://${CONCH_E2B_REGISTRY}/v2/conch/e2b-rootfs/manifests/${CONCH_E2B_ROOTFS_VERSION_TAG}"
+          headers_file="${RUNNER_TEMP:-/tmp}/conch-rootfs-manifest.headers"
+          manifest_file="${RUNNER_TEMP:-/tmp}/conch-rootfs-manifest.json"
+
+          curl -fsSL -D "$headers_file" -H "$accept_header" -o "$manifest_file" "$manifest_url"
+          digest="$(awk 'BEGIN { IGNORECASE=1 } /^Docker-Content-Digest:/ { gsub("\r", "", $2); print $2; exit }' "$headers_file")"
+          content_type="$(awk 'BEGIN { IGNORECASE=1 } /^Content-Type:/ { sub("^[^:]*:[[:space:]]*", ""); gsub("\r", ""); print; exit }' "$headers_file")"
+
+          if [ -z "$digest" ]; then
+            echo "::error::Failed to resolve Docker-Content-Digest for ${CONCH_E2B_ROOTFS_IMAGE_REPO}:${CONCH_E2B_ROOTFS_VERSION_TAG}" >&2
+            cat "$headers_file" >&2
+            exit 1
+          fi
+          if [ -z "$content_type" ]; then
+            content_type=application/vnd.oci.image.manifest.v1+json
+          fi
+
+          curl -fsSL -X PUT \
+            -H "Content-Type: $content_type" \
+            --data-binary "@$manifest_file" \
+            "http://${CONCH_E2B_REGISTRY}/v2/conch/e2b-rootfs/manifests/${CONCH_E2B_ROOTFS_LATEST_TAG}" >/dev/null
+
+          rootfs_image="${CONCH_E2B_ROOTFS_IMAGE_REPO}@${digest}"
+          {
+            echo "CONCH_E2B_ROOTFS_DIGEST=$digest"
+            echo "CONCH_E2B_ROOTFS_IMAGE=$rootfs_image"
+          } >> "$GITHUB_ENV"
+
+          echo "Weekly rootfs image: $rootfs_image"
+          echo "Latest tag: ${CONCH_E2B_ROOTFS_IMAGE_REPO}:${CONCH_E2B_ROOTFS_LATEST_TAG}"
+
+      - name: Create GitHub App variables token
+        id: variables-token
+        if: ${{ env.CONCH_E2B_UPDATE_ROOTFS_VARIABLE == 'true' }}
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.CONCH_SYNC_APP_ID }}
+          private-key: ${{ secrets.CONCH_SYNC_APP_PRIVATE_KEY }}
+          owner: ConchSandbox
+          repositories: Conch-ci
+
+      - name: Update rootfs repository variable
+        if: ${{ env.CONCH_E2B_UPDATE_ROOTFS_VARIABLE == 'true' }}
+        env:
+          GH_TOKEN: ${{ steps.variables-token.outputs.token || github.token }}
+        run: |
+          set -euo pipefail
+
+          api_base="https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/variables"
+          payload="$(printf '{"name":"%s","value":"%s"}' "$CONCH_E2B_ROOTFS_VARIABLE_NAME" "$CONCH_E2B_ROOTFS_IMAGE")"
+          response_file="${RUNNER_TEMP:-/tmp}/conch-rootfs-variable-response.json"
+
+          status="$(curl -sS -o "$response_file" -w "%{http_code}" \
+            -X PATCH \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "$api_base/$CONCH_E2B_ROOTFS_VARIABLE_NAME" \
+            -d "$payload")"
+
+          if [ "$status" = "404" ]; then
+            status="$(curl -sS -o "$response_file" -w "%{http_code}" \
+              -X POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "$api_base" \
+              -d "$payload")"
+          fi
+
+          case "$status" in
+            201|204)
+              echo "Updated repository variable $CONCH_E2B_ROOTFS_VARIABLE_NAME=$CONCH_E2B_ROOTFS_IMAGE"
+              ;;
+            *)
+              echo "::error::Failed to update repository variable $CONCH_E2B_ROOTFS_VARIABLE_NAME, HTTP $status" >&2
+              cat "$response_file" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Cleanup weekly rootfs build resources
+        if: always()
+        run: |
+          set +e
+
+          if [ "${CONCH_BUILDKIT_STARTED:-false}" = "true" ] && [ -n "${CONCH_BUILDKITD_PID_FILE:-}" ] && [ -f "$CONCH_BUILDKITD_PID_FILE" ]; then
+            buildkitd_pid="$(cat "$CONCH_BUILDKITD_PID_FILE")"
+            if kill -0 "$buildkitd_pid" >/dev/null 2>&1; then
+              sudo kill "$buildkitd_pid" >/dev/null 2>&1 || true
+              for _ in $(seq 1 30); do
+                kill -0 "$buildkitd_pid" >/dev/null 2>&1 || break
+                sleep 1
+              done
+              kill -0 "$buildkitd_pid" >/dev/null 2>&1 && sudo kill -9 "$buildkitd_pid" >/dev/null 2>&1 || true
+            fi
+          fi

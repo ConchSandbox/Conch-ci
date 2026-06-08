@@ -13,9 +13,12 @@ repository/ref pair:
   checks.
 - `conch-agent-init-e2e.yml`: boots `conch-agent --init` in a real
   cloud-hypervisor VM on a self-hosted runner.
-- `e2e-ci.yml`: runs the Conch end-to-end CI entrypoint. It currently builds
-  and converts the E2B image, then runs the E2B SDK E2E job when `run_sdk_e2e`
-  is not disabled.
+- `e2b-rootfs-weekly.yml`: builds the E2B rootfs image into the self-hosted
+  runner's local registry and updates the matching repository variable with
+  the pushed digest.
+- `e2e-ci.yml`: runs the Conch end-to-end CI entrypoint. It converts a
+  prebuilt weekly E2B rootfs image by default, then runs the E2B SDK E2E job
+  when `run_sdk_e2e` is not disabled.
 
 Common dispatch inputs:
 
@@ -24,6 +27,43 @@ ci_marker=<external correlation marker>
 conch_repository=<Conch source repository URL>
 conch_ref=<Conch source ref to validate>
 ```
+
+## Weekly E2B rootfs images
+
+The `Weekly E2B Rootfs Image` workflow runs every Monday at 03:00 UTC. It
+builds `examples/e2b-rootfs/Dockerfile` from the selected Conch source ref and
+pushes it to the configured local registry:
+
+```text
+localhost:5000/conch/e2b-rootfs:weekly-<yyyymmdd>-<arch>
+localhost:5000/conch/e2b-rootfs:weekly-latest-<arch>
+```
+
+After pushing, the workflow resolves the manifest digest and updates one of
+these repository variables:
+
+```text
+CONCH_E2B_ROOTFS_IMAGE_AMD64=localhost:5000/conch/e2b-rootfs@sha256:<digest>
+CONCH_E2B_ROOTFS_IMAGE_ARM64=localhost:5000/conch/e2b-rootfs@sha256:<digest>
+```
+
+`e2e-ci.yml` uses the repository variable matching the requested
+`rootfs_platform`. A manual dispatch can override this with `rootfs_image`, or
+can set `build_rootfs=true` to rebuild the rootfs image inside that E2E run.
+The weekly source ref can be configured independently from the general CI ref
+with `CONCH_E2B_ROOTFS_REPOSITORY` and `CONCH_E2B_ROOTFS_REF`.
+
+The local registry is runner-local: `localhost:5000` in a workflow means the
+self-hosted runner executing that job. Weekly rootfs builds and E2E runs must
+therefore land on the same runner, or on runners that share the same registry
+endpoint. The local registry action persists new registry containers under
+`/opt/conch/registry` by default so digest variables survive registry container
+restarts.
+
+The end-to-end workflow also installs Conch's default CNI config from the
+selected source ref into `/etc/conch/cni/net.d` and ensures the required CNI
+plugins exist under `/opt/cni/bin`. The default plugin set is `bridge`,
+`host-local`, and `loopback`.
 
 ## AtomGit mirror sync
 
@@ -70,8 +110,8 @@ When CI is enabled, the workflow:
 4. Updates the GitHub mirror pull request body with the CI result and run link.
 
 `e2e-ci.yml` is named `Conch End-to-End CI` in the GitHub Actions UI. It
-currently runs the existing image build job and, by default, its dependent SDK
-E2E job in the same workflow run.
+currently converts the configured weekly rootfs image and, by default, its
+dependent SDK E2E job runs in the same workflow run.
 
 The CI section is kept only for the same AtomGit head SHA. If the AtomGit PR is
 updated, the next sync clears the old CI section until CI is run again for the
@@ -79,8 +119,9 @@ new head.
 
 ## Required secrets and permissions
 
-`CONCH_SYNC_APP_PRIVATE_KEY` is required for normal mirroring. The GitHub App
-must be installed on `ConchSandbox/Conch`.
+`CONCH_SYNC_APP_PRIVATE_KEY` is required for normal mirroring and weekly rootfs
+variable updates. The GitHub App must be installed on `ConchSandbox/Conch` and
+`ConchSandbox/Conch-ci`.
 
 The GitHub App installation must grant these repository permissions for
 `ConchSandbox/Conch`:
@@ -88,6 +129,15 @@ The GitHub App installation must grant these repository permissions for
 - `Contents: Read and write`
 - `Pull requests: Read and write`
 
+The GitHub App installation must grant this repository permission for
+`ConchSandbox/Conch-ci`:
+
+- `Variables: Read and write`
+
 When `atomgit_pr_number` is set, the sync workflow uses this repository's
 `GITHUB_TOKEN` with `Actions: write` permission to dispatch and watch the local
 CI workflows.
+
+The weekly rootfs workflow generates a GitHub App installation token from
+`CONCH_SYNC_APP_ID` and `CONCH_SYNC_APP_PRIVATE_KEY` to update
+`CONCH_E2B_ROOTFS_IMAGE_<ARCH>` after a successful local registry push.
