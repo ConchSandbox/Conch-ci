@@ -65,7 +65,11 @@ def wait_conch_health(sandbox, timeout=180):
     last_health = None
     while time.monotonic() < deadline:
         try:
-            response = sandbox.client.stub.HealthCheck(agent_pb2.Empty(), timeout=5)
+            response = sandbox.client.stub.HealthCheck(
+                agent_pb2.Empty(),
+                timeout=5,
+                metadata=sandbox.client._metadata(),
+            )
             last_health = {"status": "OK", "message": response.message}
             return last_health
         except grpc.RpcError as exc:

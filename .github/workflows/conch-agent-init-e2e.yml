@@ -146,6 +146,7 @@ jobs:
             echo "CONCH_AGENT_GUEST_IP=192.168.100.21"
             echo "CONCH_AGENT_NET_CIDR=192.168.100.2/24"
             echo "CONCH_AGENT_SANDBOX_ID=sandbox_agent_init_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+            echo "CONCH_AGENT_TOKEN=conch-agent-init-token-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           } >> "$GITHUB_ENV"
 
       - name: Build conch-agent initramfs
@@ -234,69 +235,6 @@ jobs:
           sed -n '1,240p' "$CONCH_AGENT_CONSOLE_LOG" >&2 || true
           exit 1
 
-      - name: Verify agent gRPC API over tap network
-        working-directory: conch-src
-        run: |
-          set -euo pipefail
-
-          python -m pip install --upgrade pip
-          python -m pip install grpcio protobuf
-
-          python - <<'PY'
-          import os
-          import time
-
-          import grpc
-
-          from api.py_proto import agent_pb2, agent_pb2_grpc
-
-          target = f"{os.environ['CONCH_AGENT_GUEST_IP']}:{os.environ['CONCH_AGENT_GRPC_PORT']}"
-          expected = f"conch-agent-init:{os.environ['GITHUB_RUN_ID']}:{os.environ['GITHUB_RUN_ATTEMPT']}"
-          deadline = time.time() + 120
-          last_error = None
-
-          while time.time() < deadline:
-              try:
-                  channel = grpc.insecure_channel(target)
-                  grpc.channel_ready_future(channel).result(timeout=3)
-                  stub = agent_pb2_grpc.AgentServiceStub(channel)
-
-                  health = stub.HealthCheck(agent_pb2.Empty(), timeout=5)
-                  if health.message != "OK":
-                      raise RuntimeError(f"unexpected health reply: {health.message!r}")
-
-                  script = (
-                      f"printf '%s\\n' '{expected}'; "
-                      "readlink /proc/1/exe; "
-                      "tr '\\0' ' ' </proc/1/cmdline; "
-                      "printf '\\n'"
-                  )
-                  result = stub.StartProcess(
-                      agent_pb2.StartProcessRequest(
-                          cmd="sh",
-                          args=["-c", script],
-                          cwd="/tmp",
-                      ),
-                      timeout=10,
-                  )
-                  if result.exit_code != 0:
-                      raise RuntimeError(
-                          f"StartProcess failed: exit={result.exit_code} stdout={result.stdout!r} stderr={result.stderr!r} error={result.error!r}"
-                      )
-                  if expected not in result.stdout:
-                      raise RuntimeError(f"missing expected command marker in stdout: {result.stdout!r}")
-                  if "conch-agent" not in result.stdout:
-                      raise RuntimeError(f"PID 1 does not look like conch-agent: {result.stdout!r}")
-
-                  print(result.stdout)
-                  raise SystemExit(0)
-              except Exception as exc:
-                  last_error = exc
-                  time.sleep(1)
-
-          raise SystemExit(f"timed out waiting for agent gRPC API at {target}: {last_error}")
-          PY
-
       - name: Verify vsock readiness signal
         run: |
           set -euo pipefail
@@ -309,9 +247,10 @@ jobs:
 
           socket_path = os.environ["CONCH_AGENT_VSOCK_SOCKET"]
           sandbox_id = os.environ["CONCH_AGENT_SANDBOX_ID"]
+          agent_token = os.environ["CONCH_AGENT_TOKEN"]
           vsock_port = os.environ["CONCH_AGENT_VSOCK_PORT"]
           connect = f"CONNECT {vsock_port}\n".encode()
-          payload = f"I AM SANDBOX_ID:{sandbox_id}\n".encode()
+          payload = f"I AM SANDBOX_ID:{sandbox_id}\nAGENT_TOKEN:{agent_token}\n".encode()
           deadline = time.time() + 120
           last_error = None
 
@@ -335,6 +274,71 @@ jobs:
               time.sleep(1)
 
           raise SystemExit(f"timed out waiting for agent vsock READY response: {last_error}")
+          PY
+
+      - name: Verify agent gRPC API over tap network
+        working-directory: conch-src
+        run: |
+          set -euo pipefail
+
+          python -m pip install --upgrade pip
+          python -m pip install grpcio protobuf
+
+          python - <<'PY'
+          import os
+          import time
+
+          import grpc
+
+          from api.py_proto import agent_pb2, agent_pb2_grpc
+
+          target = f"{os.environ['CONCH_AGENT_GUEST_IP']}:{os.environ['CONCH_AGENT_GRPC_PORT']}"
+          expected = f"conch-agent-init:{os.environ['GITHUB_RUN_ID']}:{os.environ['GITHUB_RUN_ATTEMPT']}"
+          metadata = (("x-conch-agent-token", os.environ["CONCH_AGENT_TOKEN"]),)
+          deadline = time.time() + 120
+          last_error = None
+
+          while time.time() < deadline:
+              try:
+                  channel = grpc.insecure_channel(target)
+                  grpc.channel_ready_future(channel).result(timeout=3)
+                  stub = agent_pb2_grpc.AgentServiceStub(channel)
+
+                  health = stub.HealthCheck(agent_pb2.Empty(), timeout=5, metadata=metadata)
+                  if health.message != "OK":
+                      raise RuntimeError(f"unexpected health reply: {health.message!r}")
+
+                  script = (
+                      f"printf '%s\\n' '{expected}'; "
+                      "readlink /proc/1/exe; "
+                      "tr '\\0' ' ' </proc/1/cmdline; "
+                      "printf '\\n'"
+                  )
+                  result = stub.StartProcess(
+                      agent_pb2.StartProcessRequest(
+                          cmd="sh",
+                          args=["-c", script],
+                          cwd="/tmp",
+                      ),
+                      timeout=10,
+                      metadata=metadata,
+                  )
+                  if result.exit_code != 0:
+                      raise RuntimeError(
+                          f"StartProcess failed: exit={result.exit_code} stdout={result.stdout!r} stderr={result.stderr!r} error={result.error!r}"
+                      )
+                  if expected not in result.stdout:
+                      raise RuntimeError(f"missing expected command marker in stdout: {result.stdout!r}")
+                  if "conch-agent" not in result.stdout:
+                      raise RuntimeError(f"PID 1 does not look like conch-agent: {result.stdout!r}")
+
+                  print(result.stdout)
+                  raise SystemExit(0)
+              except Exception as exc:
+                  last_error = exc
+                  time.sleep(1)
+
+          raise SystemExit(f"timed out waiting for agent gRPC API at {target}: {last_error}")
           PY
 
       - name: Dump VM logs on failure
