@@ -693,7 +693,7 @@ def mirror_branches(config: Config, atomgit_prs: list[dict[str, Any]]) -> set[in
 
 def find_existing_mirrors(config: Config) -> dict[int, dict[str, Any]]:
     mirrors: dict[int, dict[str, Any]] = {}
-    for gh_pr in list_github_pull_requests(config, state="all"):
+    for gh_pr in list_github_pull_requests(config, state="open"):
         marker = parse_marker(gh_pr.get("body"))
         if not marker:
             continue
@@ -701,26 +701,6 @@ def find_existing_mirrors(config: Config) -> dict[int, dict[str, Any]]:
         if owner == config.atomgit_owner and repo == config.atomgit_repo:
             mirrors[number] = gh_pr
     return mirrors
-
-
-def ensure_github_pr_open(config: Config, gh_pr: dict[str, Any], atomgit_number: int) -> None:
-    if gh_pr.get("state") == "open":
-        return
-
-    gh_number = gh_pr["number"]
-    if gh_pr.get("merged_at"):
-        raise RuntimeError(
-            f"GitHub mirror PR #{gh_number} for AtomGit PR #{atomgit_number} is already merged; "
-            "cannot reopen it for sync"
-        )
-
-    log(f"Reopening GitHub mirror PR #{gh_number} for AtomGit PR #{atomgit_number}")
-    github_request(
-        config,
-        "PATCH",
-        f"/repos/{config.github_owner}/{config.github_repo}/pulls/{gh_number}",
-        {"state": "open"},
-    )
 
 
 def upsert_github_prs(
@@ -744,7 +724,6 @@ def upsert_github_prs(
         }
         if existing:
             gh_number = existing["number"]
-            ensure_github_pr_open(config, existing, number)
             log(f"Updating GitHub mirror PR #{gh_number} for AtomGit PR #{number}")
             github_request(
                 config,
