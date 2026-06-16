@@ -24,6 +24,7 @@ on:
 permissions:
   contents: read
   actions: write
+  packages: write
 
 concurrency:
   group: conch-e2b-rootfs-weekly-${{ github.event.inputs.rootfs_platform || vars.CONCH_E2B_ROOTFS_PLATFORM || 'runner' }}
@@ -34,6 +35,7 @@ env:
   CONCH_REF: ${{ github.event.inputs.conch_ref || vars.CONCH_E2B_ROOTFS_REF || vars.CONCH_REF || 'dev-cri' }}
   CONCH_E2B_ROOTFS_PLATFORM_INPUT: ${{ github.event.inputs.rootfs_platform || vars.CONCH_E2B_ROOTFS_PLATFORM }}
   CONCH_E2B_REGISTRY: ${{ vars.CONCH_E2B_REGISTRY || 'localhost:5000' }}
+  CONCH_E2B_ROOTFS_GHCR_REPOSITORY: ${{ vars.CONCH_E2B_ROOTFS_GHCR_REPOSITORY }}
   CONCH_E2B_UPDATE_ROOTFS_VARIABLE: ${{ github.event.inputs.update_repo_variable != 'false' }}
   CONCH_ROOTFS_REQUIRED_COMMANDS: git curl buildctl
 
@@ -188,6 +190,55 @@ jobs:
 
           echo "Weekly rootfs image: $rootfs_image"
           echo "Latest tag: ${CONCH_E2B_ROOTFS_IMAGE_REPO}:${CONCH_E2B_ROOTFS_LATEST_TAG}"
+
+      - name: Push weekly rootfs image to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          runtime=""
+          if command -v docker >/dev/null 2>&1; then
+            runtime=docker
+          elif command -v podman >/dev/null 2>&1; then
+            runtime=podman
+          else
+            echo "::error::docker or podman is required to push the weekly rootfs image to GHCR." >&2
+            exit 1
+          fi
+
+          owner_lc="${GITHUB_REPOSITORY_OWNER,,}"
+          ghcr_repo="${CONCH_E2B_ROOTFS_GHCR_REPOSITORY:-ghcr.io/${owner_lc}/conch-e2b-rootfs}"
+          ghcr_repo="${ghcr_repo,,}"
+          local_image="${CONCH_E2B_ROOTFS_IMAGE_REPO}:${CONCH_E2B_ROOTFS_VERSION_TAG}"
+          ghcr_version="${ghcr_repo}:${CONCH_E2B_ROOTFS_VERSION_TAG}"
+          ghcr_latest="${ghcr_repo}:${CONCH_E2B_ROOTFS_LATEST_TAG}"
+          logged_in=false
+
+          cleanup() {
+            if [ "$logged_in" = true ]; then
+              sudo -n "$runtime" logout ghcr.io >/dev/null 2>&1 || true
+            fi
+          }
+          trap cleanup EXIT
+
+          printf '%s' "$GHCR_TOKEN" | sudo -n "$runtime" login ghcr.io \
+            -u "$GITHUB_ACTOR" --password-stdin
+          logged_in=true
+
+          sudo -n "$runtime" pull "$local_image"
+          sudo -n "$runtime" tag "$local_image" "$ghcr_version"
+          sudo -n "$runtime" tag "$local_image" "$ghcr_latest"
+          sudo -n "$runtime" push "$ghcr_version"
+          sudo -n "$runtime" push "$ghcr_latest"
+
+          {
+            echo "CONCH_E2B_ROOTFS_GHCR_IMAGE=$ghcr_version"
+            echo "CONCH_E2B_ROOTFS_GHCR_LATEST_IMAGE=$ghcr_latest"
+          } >> "$GITHUB_ENV"
+
+          echo "GHCR rootfs image: $ghcr_version"
+          echo "GHCR latest tag: $ghcr_latest"
 
       - name: Create GitHub App variables token
         id: variables-token
