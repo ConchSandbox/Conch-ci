@@ -34,6 +34,31 @@ outputs:
 runs:
   using: composite
   steps:
+    - name: Diagnose system before download
+      shell: bash
+      run: |
+        echo "========== System Diagnostics =========="
+        echo ""
+        echo "[Directory and Environment Variables]"
+        echo "  RUNNER_TEMP: ${RUNNER_TEMP:-not set}"
+        echo "  GITHUB_WORKSPACE: ${GITHUB_WORKSPACE:-not set}"
+        echo "  Current directory: $(pwd)"
+        echo "  HOME: ${HOME:-not set}"
+        echo ""
+        echo "[Disk Space]"
+        df -h
+        echo ""
+        echo "[Disk usage for main directories]"
+        du -sh /tmp 2>/dev/null || echo "  /tmp: unable to get info"
+        du -sh "${RUNNER_TEMP:-/tmp}" 2>/dev/null || echo "  RUNNER_TEMP: unable to get info"
+        du -sh "${GITHUB_WORKSPACE%/*}" 2>/dev/null || echo "  WORKSPACE parent: unable to get info"
+        echo ""
+        echo "[System Information]"
+        echo "  Architecture: $(uname -m)"
+        echo "  Kernel: $(uname -s)"
+        echo "  Available memory: $(free -h | awk 'NR==2 {print $7}')"
+        echo ""
+
     - name: Download cloud-hypervisor
       id: install
       shell: bash
@@ -69,16 +94,137 @@ runs:
           INSTALL_DIR="${RUNNER_TEMP:-/tmp}/conch-cloud-hypervisor/bin"
         fi
 
-        install -d -m 0755 "$INSTALL_DIR"
+        echo ""
+        echo "========== Pre-installation Diagnostics =========="
+        echo "[Installation Information]"
+        echo "  Install directory: $INSTALL_DIR"
+        echo "  Binary name: $BINARY_NAME"
+        echo "  Download URL: https://${REPOSITORY_REF}/releases/download/${RELEASE_REF}/${asset}"
+        echo ""
+
+        # Check parent directory
+        parent_dir="${INSTALL_DIR%/*}"
+        echo "[Checking parent directory: $parent_dir]"
+        if [ -d "$parent_dir" ]; then
+          echo "  Parent directory exists"
+          ls -ld "$parent_dir"
+          echo "  Available space: $(df -h "$parent_dir" | awk 'NR==2 {print $4}')"
+        else
+          echo "  Parent directory does not exist, will be created"
+        fi
+        echo ""
+
+        # Create directory and check result
+        echo "[Creating install directory]"
+        if mkdir -p "$INSTALL_DIR"; then
+          echo "  Successfully created directory"
+        else
+          echo "  Failed to create directory"
+          exit 1
+        fi
+
+        # Check directory permissions
+        echo "[Checking directory permissions]"
+        if [ -w "$INSTALL_DIR" ]; then
+          echo "  Directory is writable"
+          ls -ld "$INSTALL_DIR"
+        else
+          echo "  Directory is not writable"
+          ls -ld "$INSTALL_DIR"
+          exit 1
+        fi
+        echo ""
+
+        # Check disk space (need at least 500MB)
+        echo "[Checking disk space]"
+        available=$(df "$INSTALL_DIR" | awk 'NR==2 {print $4}')
+        available_mb=$((available / 1024))
+        echo "  Available space: ${available_mb}MB"
+        if [ "$available" -lt 512000 ]; then
+          echo "  WARNING: Disk space may be insufficient (need at least 500MB)"
+          echo "  Full disk information:"
+          df -h "$INSTALL_DIR"
+        else
+          echo "  Disk space is sufficient"
+        fi
+        echo ""
 
         url="https://${REPOSITORY_REF}/releases/download/${RELEASE_REF}/${asset}"
         binary_path="$INSTALL_DIR/$BINARY_NAME"
 
-        echo "Downloading cloud-hypervisor from $url"
-        curl -fsSL "$url" -o "$binary_path"
-        chmod 0755 "$binary_path"
+        echo "========== Starting Download =========="
+        echo "[Download Information]"
+        echo "  URL: $url"
+        echo "  Output file: $binary_path"
+        echo "  Start time: $(date)"
+        echo ""
 
+        # Download with verbose curl
+        if curl -fsSL \
+          --max-time 300 \
+          --show-error \
+          "$url" \
+          -o "$binary_path.tmp"; then
+
+          echo ""
+          echo "[Download completed successfully]"
+
+          # Verify downloaded file
+          if [ -f "$binary_path.tmp" ]; then
+            file_size=$(stat -f%z "$binary_path.tmp" 2>/dev/null || stat -c%s "$binary_path.tmp" 2>/dev/null || echo "unknown")
+            echo "  File size: $file_size bytes"
+
+            # Move to final location
+            mv "$binary_path.tmp" "$binary_path"
+            chmod 0755 "$binary_path"
+            echo "  File permissions set successfully"
+          else
+            echo "  File creation failed"
+            exit 1
+          fi
+        else
+          curl_exit=$?
+          echo ""
+          echo "[Download failed with exit code: $curl_exit]"
+          rm -f "$binary_path.tmp" "$binary_path"
+
+          # Show detailed error information
+          echo ""
+          echo "[Common curl error codes:]"
+          case $curl_exit in
+            6) echo "  6 = Could not resolve host name" ;;
+            7) echo "  7 = Failed to connect to host" ;;
+            23) echo "  23 = Write error to file (usually disk space or permission issue)" ;;
+            28) echo "  28 = Operation timeout" ;;
+            *) echo "  See curl manual for more details" ;;
+          esac
+
+          exit 1
+        fi
+
+        echo ""
+        echo "========== Verification =========="
+        echo "[Verifying binary file]"
+
+        if [ ! -f "$binary_path" ]; then
+          echo "  Binary file does not exist"
+          exit 1
+        fi
+
+        if [ ! -x "$binary_path" ]; then
+          echo "  Binary file is not executable"
+          exit 1
+        fi
+
+        echo "  Binary file is valid"
+        echo "  Path: $binary_path"
+        echo "  Size: $(stat -f%z "$binary_path" 2>/dev/null || stat -c%s "$binary_path" 2>/dev/null) bytes"
+        echo ""
+
+        echo "[Output version information]"
+        "$binary_path" --version
+
+        echo ""
+        echo "[Installation completed successfully]"
         echo "$INSTALL_DIR" >> "$GITHUB_PATH"
         echo "binary-path=$binary_path" >> "$GITHUB_OUTPUT"
-
-        "$binary_path" --version
