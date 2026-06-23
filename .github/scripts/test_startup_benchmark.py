@@ -15,18 +15,21 @@ class FakeExecution:
 class FakeSandbox:
     created = []
     deleted = []
+    executed = []
 
-    def __init__(self, sandbox_id, use_snapshot):
+    def __init__(self, sandbox_id, image_name, use_snapshot):
         self.sandbox_id = sandbox_id
+        self.image_name = image_name
         self.use_snapshot = use_snapshot
 
     @classmethod
     def create(cls, **kwargs):
-        sandbox = cls(kwargs["sandbox_id"], kwargs["use_snapshot"])
+        sandbox = cls(kwargs["sandbox_id"], kwargs["image_name"], kwargs["use_snapshot"])
         cls.created.append(sandbox)
         return sandbox
 
     def execute(self, **_kwargs):
+        self.executed.append(self.sandbox_id)
         return FakeExecution()
 
     def delete(self):
@@ -38,6 +41,7 @@ class StartupBenchmarkTest(unittest.TestCase):
     def setUp(self):
         FakeSandbox.created = []
         FakeSandbox.deleted = []
+        FakeSandbox.executed = []
 
     def test_parse_concurrency_accepts_positive_integer_up_to_limit(self):
         self.assertEqual(startup_benchmark.parse_concurrency("1"), 1)
@@ -97,7 +101,7 @@ class StartupBenchmarkTest(unittest.TestCase):
             iterations=1,
             use_snapshot=False,
             config_path="/tmp/sdk-config.yaml",
-            image_name="localhost:5000/conch/snapshot:v1",
+            image_name="localhost:5000/conch/boot:v1",
             namespace="test",
             vcpu_num=2,
             ram_mb=2048,
@@ -118,7 +122,37 @@ class StartupBenchmarkTest(unittest.TestCase):
         self.assertEqual([sample["use_snapshot"] for sample in snapshot], [True, True])
         self.assertIsNotNone(makespan)
         self.assertEqual(len(FakeSandbox.created), 3)
+        self.assertEqual(
+            [sandbox.image_name for sandbox in FakeSandbox.created],
+            [
+                "localhost:5000/conch/boot:v1",
+                "localhost:5000/conch/snapshot:v1",
+                "localhost:5000/conch/snapshot:v1",
+            ],
+        )
         self.assertEqual(len(FakeSandbox.deleted), 3)
+        self.assertEqual(len(FakeSandbox.executed), 3)
+
+    def test_skip_validation_counts_create_and_cleanup_success(self):
+        samples = startup_benchmark.run_single_scenario(
+            FakeSandbox,
+            scenario="cold_single",
+            iterations=1,
+            use_snapshot=False,
+            validate=False,
+            config_path="/tmp/sdk-config.yaml",
+            image_name="localhost:5000/conch/boot:v1",
+            namespace="test",
+            vcpu_num=2,
+            ram_mb=2048,
+        )
+
+        self.assertEqual(samples[0]["status"], "success")
+        self.assertEqual(samples[0]["validation"]["status"], "skipped")
+        self.assertEqual(samples[0]["validation"]["reason"], "post-create validation disabled")
+        self.assertEqual(len(FakeSandbox.created), 1)
+        self.assertEqual(len(FakeSandbox.deleted), 1)
+        self.assertEqual(FakeSandbox.executed, [])
 
     def test_write_outputs_leaves_github_step_summary_to_workflow(self):
         sample = {
@@ -167,6 +201,12 @@ class StartupBenchmarkTest(unittest.TestCase):
         repo_root = Path(__file__).resolve().parents[2]
         workflow = repo_root.joinpath(".github/workflows/startup-performance.yml").read_text()
 
+        self.assertIn("CONCH_REF: ${{ github.event.inputs.conch_ref || 'dev' }}", workflow)
+        self.assertIn("CONCH_SNAPSHOT_FORMAT_VERSION: dev-v1", workflow)
+        self.assertIn("default_vmm: \"$CONCH_E2B_VMM_NAME\"", workflow)
+        self.assertNotIn("./bin/conch convert", workflow)
+        self.assertIn('--image-name "$CONCH_BENCHMARK_BOOT_IMAGE"', workflow)
+        self.assertIn('--snapshot-image-name "$CONCH_BENCHMARK_SNAPSHOT_IMAGE"', workflow)
         self.assertIn("tap_ip: 192.168.100.2", workflow)
         self.assertIn("tap_mask: 24", workflow)
         self.assertIn(
@@ -175,6 +215,13 @@ class StartupBenchmarkTest(unittest.TestCase):
         )
         self.assertNotIn("|${initrd_digest}\"", workflow)
         self.assertNotIn("CONCH_STARTUP_VALIDATE_IN_NETNS", workflow)
+        self.assertIn("conch_cli() {", workflow)
+        self.assertIn('sudo -n env \\', workflow)
+        self.assertIn("conch_cli build \\", workflow)
+        self.assertIn("conch_cli snapshot export \\", workflow)
+        self.assertIn("sudo -n buildah unmount --all", workflow)
+        self.assertIn("xargs -r sudo -n buildah rmi -f", workflow)
+        self.assertIn("--skip-validation", workflow)
 
 
 if __name__ == "__main__":

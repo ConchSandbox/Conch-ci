@@ -8,6 +8,10 @@ on:
         description: Snapshot startup concurrency, from 1 to 1000
         required: false
         default: "100"
+      conch_ref:
+        description: Conch branch, tag, or commit to benchmark
+        required: false
+        default: dev
 
 permissions:
   contents: read
@@ -19,7 +23,7 @@ concurrency:
 
 env:
   CONCH_REPOSITORY: ${{ vars.CONCH_REPOSITORY || 'https://github.com/ConchSandbox/Conch.git' }}
-  CONCH_REF: ${{ vars.CONCH_REF || 'dev-cri' }}
+  CONCH_REF: ${{ github.event.inputs.conch_ref || 'dev' }}
   CONCH_E2B_ROOTFS_PLATFORM_INPUT: ${{ vars.CONCH_E2B_ROOTFS_PLATFORM }}
   CONCH_E2B_ROOTFS_IMAGE_AMD64: ${{ vars.CONCH_E2B_ROOTFS_IMAGE_AMD64 }}
   CONCH_E2B_ROOTFS_IMAGE_ARM64: ${{ vars.CONCH_E2B_ROOTFS_IMAGE_ARM64 }}
@@ -27,23 +31,26 @@ env:
   CONCH_KERNEL_PATH: ${{ vars.CONCH_E2E_KERNEL_PATH || '/opt/conch/bzImage' }}
   CONCH_STARTUP_CONCURRENCY_INPUT: ${{ github.event.inputs.concurrency || '100' }}
   CONCH_STARTUP_SINGLE_ITERATIONS: "5"
-  CONCH_SNAPSHOT_FORMAT_VERSION: v2
+  CONCH_SNAPSHOT_FORMAT_VERSION: dev-v1
   CONCH_E2B_VMM_NAME: cloud-hypervisor
   CONCH_CLOUD_HYPERVISOR_REPOSITORY_REF: github.com/ConchSandbox/cloud-hypervisor
   CONCH_CLOUD_HYPERVISOR_RELEASE_REF: v52.0-conch
   CONCH_CLOUD_HYPERVISOR_X86_64_ASSET_REF: cloud-hypervisor-static
   CONCH_CLOUD_HYPERVISOR_ARM64_ASSET_REF: cloud-hypervisor-static-aarch64
   CONCH_MKFS_EROFS_REQUIRED_FLAG: --fsalignblks
+  CONCH_CONTAINERD_VERSION: 2.2.1
   CONCH_API_TIMEOUT: 35m
   ALPINE_VERSION: ${{ vars.CONCH_AGENT_E2E_ALPINE_VERSION || '3.20.3' }}
   ALPINE_MIRROR: ${{ vars.CONCH_AGENT_E2E_ALPINE_MIRROR || 'https://dl-cdn.alpinelinux.org/alpine' }}
-  CONCH_STARTUP_REQUIRED_COMMANDS: git protoc mkfs.erofs curl ip iptables tar gzip cpio file python3 sha256sum
+  CONCH_STARTUP_REQUIRED_COMMANDS: git protoc mkfs.erofs curl ip iptables tar gzip cpio file python3 sha256sum buildah gcc pkg-config containerd ctr
   OPENEULER_GIT_PACKAGES: git
   OPENEULER_PROTOC_PACKAGES: protobuf protobuf-compiler
   OPENEULER_EROFS_PACKAGES: erofs-utils
   OPENEULER_IPROUTE_PACKAGES: iproute
   OPENEULER_IPTABLES_PACKAGES: iptables
   OPENEULER_CURL_PACKAGES: curl
+  OPENEULER_BUILDAH_PACKAGES: buildah
+  OPENEULER_CONCH_DEV_BUILD_PACKAGES: gcc pkgconf-pkg-config gpgme-devel
   GO_TAGS: exclude_graphdriver_btrfs
 
 defaults:
@@ -57,6 +64,19 @@ jobs:
     timeout-minutes: 240
 
     steps:
+      - name: Clean existing checkout workspace
+        run: |
+          set -euo pipefail
+          case "${GITHUB_WORKSPACE:-}" in
+            ""|"/")
+              echo "::error::Refusing to clean unsafe GITHUB_WORKSPACE=${GITHUB_WORKSPACE:-unset}" >&2
+              exit 1
+              ;;
+          esac
+          if [ -d "$GITHUB_WORKSPACE" ]; then
+            sudo find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+          fi
+
       - name: Checkout CI repository
         uses: actions/checkout@v4
 
@@ -73,6 +93,177 @@ jobs:
           x86-64-asset-ref: ${{ env.CONCH_CLOUD_HYPERVISOR_X86_64_ASSET_REF }}
           arm64-asset-ref: ${{ env.CONCH_CLOUD_HYPERVISOR_ARM64_ASSET_REF }}
           binary-name: ${{ env.CONCH_E2B_VMM_NAME }}
+
+      - name: Set up buildah
+        run: |
+          set -euo pipefail
+          install_openeuler_sp4_buildah_repo() {
+            sudo tee /etc/yum.repos.d/conch-openeuler-sp4-buildah.repo >/dev/null <<'REPO'
+          [conch-sp4-OS]
+          name=Conch openEuler 22.03 SP4 OS
+          baseurl=https://repo.openeuler.org/openEuler-22.03-LTS-SP4/OS/$basearch/
+          enabled=1
+          gpgcheck=0
+
+          [conch-sp4-everything]
+          name=Conch openEuler 22.03 SP4 everything
+          baseurl=https://repo.openeuler.org/openEuler-22.03-LTS-SP4/everything/$basearch/
+          enabled=1
+          gpgcheck=0
+
+          [conch-sp4-EPOL]
+          name=Conch openEuler 22.03 SP4 EPOL
+          baseurl=https://repo.openeuler.org/openEuler-22.03-LTS-SP4/EPOL/main/$basearch/
+          enabled=1
+          gpgcheck=0
+
+          [conch-sp4-EPOL-update]
+          name=Conch openEuler 22.03 SP4 EPOL update
+          baseurl=https://repo.openeuler.org/openEuler-22.03-LTS-SP4/EPOL/update/main/$basearch/
+          enabled=1
+          gpgcheck=0
+          REPO
+          }
+
+          install_buildah_with_dnf_like() {
+            local manager="$1"
+            if sudo "$manager" install -y --setopt=install_weak_deps=False buildah; then
+              return 0
+            fi
+            if [ -r /etc/os-release ] && grep -qi openeuler /etc/os-release; then
+              echo "::warning::buildah was not available in enabled repositories; adding openEuler 22.03 SP4 EPOL repositories."
+              install_openeuler_sp4_buildah_repo
+              sudo "$manager" clean all || true
+              sudo "$manager" makecache || true
+              sudo "$manager" install -y --setopt=install_weak_deps=False buildah
+              return
+            fi
+            return 1
+          }
+
+          if command -v buildah >/dev/null 2>&1; then
+            buildah --version
+            exit 0
+          fi
+
+          if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends buildah
+          elif command -v dnf >/dev/null 2>&1; then
+            install_buildah_with_dnf_like dnf
+          elif command -v yum >/dev/null 2>&1; then
+            install_buildah_with_dnf_like yum
+          else
+            echo "::error::No supported package manager found for buildah." >&2
+            exit 1
+          fi
+
+          buildah --version
+
+      - name: Set up Conch dev build dependencies
+        run: |
+          set -euo pipefail
+          install_openeuler_sp4_repo() {
+            sudo tee /etc/yum.repos.d/conch-openeuler-sp4-build-deps.repo >/dev/null <<'REPO'
+          [conch-build-deps-sp4-OS]
+          name=Conch openEuler 22.03 SP4 OS
+          baseurl=https://repo.openeuler.org/openEuler-22.03-LTS-SP4/OS/$basearch/
+          enabled=1
+          gpgcheck=0
+
+          [conch-build-deps-sp4-everything]
+          name=Conch openEuler 22.03 SP4 everything
+          baseurl=https://repo.openeuler.org/openEuler-22.03-LTS-SP4/everything/$basearch/
+          enabled=1
+          gpgcheck=0
+
+          [conch-build-deps-sp4-EPOL]
+          name=Conch openEuler 22.03 SP4 EPOL
+          baseurl=https://repo.openeuler.org/openEuler-22.03-LTS-SP4/EPOL/main/$basearch/
+          enabled=1
+          gpgcheck=0
+
+          [conch-build-deps-sp4-EPOL-update]
+          name=Conch openEuler 22.03 SP4 EPOL update
+          baseurl=https://repo.openeuler.org/openEuler-22.03-LTS-SP4/EPOL/update/main/$basearch/
+          enabled=1
+          gpgcheck=0
+          REPO
+          }
+
+          if command -v gcc >/dev/null 2>&1 && command -v pkg-config >/dev/null 2>&1 && pkg-config --exists gpgme; then
+            gcc --version | head -1
+            pkg-config --modversion gpgme
+            exit 0
+          fi
+
+          if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends gcc pkg-config libgpgme-dev
+          elif command -v dnf >/dev/null 2>&1; then
+            if ! sudo dnf install -y --setopt=install_weak_deps=False $OPENEULER_CONCH_DEV_BUILD_PACKAGES; then
+              if [ -r /etc/os-release ] && grep -qi openeuler /etc/os-release; then
+                install_openeuler_sp4_repo
+                sudo dnf clean all || true
+                sudo dnf makecache || true
+                sudo dnf install -y --setopt=install_weak_deps=False $OPENEULER_CONCH_DEV_BUILD_PACKAGES
+              else
+                exit 1
+              fi
+            fi
+          elif command -v yum >/dev/null 2>&1; then
+            if ! sudo yum install -y --setopt=install_weak_deps=False $OPENEULER_CONCH_DEV_BUILD_PACKAGES; then
+              if [ -r /etc/os-release ] && grep -qi openeuler /etc/os-release; then
+                install_openeuler_sp4_repo
+                sudo yum clean all || true
+                sudo yum makecache || true
+                sudo yum install -y --setopt=install_weak_deps=False $OPENEULER_CONCH_DEV_BUILD_PACKAGES
+              else
+                exit 1
+              fi
+            fi
+          else
+            echo "::error::No supported package manager found for Conch dev build dependencies." >&2
+            exit 1
+          fi
+
+          gcc --version | head -1
+          pkg-config --modversion gpgme
+
+      - name: Set up containerd
+        run: |
+          set -euo pipefail
+          install_containerd_release() {
+            case "$(uname -m)" in
+              x86_64|amd64)
+                containerd_arch=amd64
+                ;;
+              aarch64|arm64)
+                containerd_arch=arm64
+                ;;
+              *)
+                echo "::error::Unsupported architecture for containerd: $(uname -m)" >&2
+                exit 1
+                ;;
+            esac
+            archive="containerd-${CONCH_CONTAINERD_VERSION}-linux-${containerd_arch}.tar.gz"
+            url="https://github.com/containerd/containerd/releases/download/v${CONCH_CONTAINERD_VERSION}/${archive}"
+            download_dir="${RUNNER_TEMP:-/tmp}/conch-containerd-${CONCH_CONTAINERD_VERSION}-${containerd_arch}"
+            rm -rf "$download_dir"
+            mkdir -p "$download_dir"
+            curl -fsSL "$url" -o "$download_dir/$archive"
+            tar -zxf "$download_dir/$archive" -C "$download_dir"
+            sudo install -m 0755 "$download_dir/bin/containerd" /usr/local/bin/containerd
+            sudo install -m 0755 "$download_dir/bin/containerd-shim-runc-v2" /usr/local/bin/containerd-shim-runc-v2
+            sudo install -m 0755 "$download_dir/bin/ctr" /usr/local/bin/ctr
+          }
+
+          if ! command -v containerd >/dev/null 2>&1 || ! command -v ctr >/dev/null 2>&1; then
+            install_containerd_release
+          fi
+
+          containerd --version
+          ctr --help >/dev/null
 
       - name: Check self-hosted startup benchmark prerequisites
         uses: ./.github/actions/check-self-hosted-runtime-prerequisites
@@ -92,6 +283,18 @@ jobs:
             sudo ip netns delete "$ns" || true
           done
           sudo rm -rf /var/lib/cni/networks/conch-bridge /var/lib/cni/results/conch-bridge
+          sudo ip -o link show \
+            | awk -F': ' '{print $2}' \
+            | cut -d@ -f1 \
+            | awk '/^(cni-conch0|conch_bridge|conch_bridge_[0-9]+)$/ {print}' \
+            | sort -u \
+            | while read -r bridge; do
+              if [ -z "$bridge" ]; then
+                continue
+              fi
+              echo "Deleting stale Conch bridge: $bridge"
+              sudo ip link delete "$bridge" || true
+            done
           for bridge in cni-conch0 conch_bridge; do
             if sudo ip link show "$bridge" >/dev/null 2>&1; then
               echo "Deleting stale Conch bridge: $bridge"
@@ -102,6 +305,18 @@ jobs:
       - name: Clean stale startup benchmark disk state
         run: |
           set +e
+          for stale_workdir in /tmp/csp-*; do
+            if [ -d "$stale_workdir" ]; then
+              sudo findmnt -R -n -o TARGET "$stale_workdir" 2>/dev/null \
+                | sort -r \
+                | while read -r mountpoint; do
+                  if [ -n "$mountpoint" ]; then
+                    echo "Unmounting stale Conch mount: $mountpoint"
+                    sudo umount -lf "$mountpoint" || true
+                  fi
+                done
+            fi
+          done
           sudo rm -rf /tmp/csp-* "${RUNNER_TEMP:-/tmp}/conch-startup-performance-python"
 
           runtime=""
@@ -120,6 +335,19 @@ jobs:
             sudo -n "$runtime" images --format '{{.Repository}}:{{.Tag}}' \
               | awk '/^(conch\/startup-benchmark-runner|localhost\/conch\/e2b-startup-(boot|snapshot)):/ { print }' \
               | xargs -r sudo -n "$runtime" rmi -f || true
+          fi
+
+          if command -v buildah >/dev/null 2>&1; then
+            buildah unmount --all >/dev/null 2>&1 || true
+            buildah rm --all --force >/dev/null 2>&1 || true
+            buildah images --format '{{.Name}}:{{.Tag}}' 2>/dev/null \
+              | awk '/^(localhost\/conch\/e2b-startup-(boot|snapshot):|localhost\/conch-rootfs:|localhost\/conch\/pmem-rootfs:index-|localhost\/conch\/kernel:[0-9]+-[0-9]+$)/ { print }' \
+              | xargs -r buildah rmi -f >/dev/null 2>&1 || true
+            sudo -n buildah unmount --all >/dev/null 2>&1 || true
+            sudo -n buildah rm --all --force >/dev/null 2>&1 || true
+            sudo -n buildah images --format '{{.Name}}:{{.Tag}}' 2>/dev/null \
+              | awk '/^(localhost\/conch\/e2b-startup-(boot|snapshot):|localhost\/conch-rootfs:|localhost\/conch\/pmem-rootfs:index-|localhost\/conch\/kernel:[0-9]+-[0-9]+$)/ { print }' \
+              | xargs -r sudo -n buildah rmi -f >/dev/null 2>&1 || true
           fi
 
           df -h / /tmp "$GITHUB_WORKSPACE" /opt/conch/registry 2>/dev/null || true
@@ -208,11 +436,18 @@ jobs:
             echo "CONCH_BENCH_WORKDIR=$workdir"
             echo "CONCH_BENCH_RESULTS_DIR=$GITHUB_WORKSPACE/startup-benchmark-results"
             echo "CONCH_NAMESPACE=$namespace"
+            echo "CONCH_LOCAL_KERNEL_IMAGE=localhost/conch/kernel:${tag}"
             echo "CONCH_LOCAL_BOOT_IMAGE=localhost/conch/e2b-startup-boot:${tag}"
             echo "CONCH_LOCAL_SNAPSHOT_IMAGE=localhost/conch/e2b-startup-snapshot:${tag}"
+            echo "CONCH_DEV_BUILD_CONTEXT=$workdir/dev-image-context"
             echo "CONCH_PREP_SANDBOX_ID=sandbox_perf_prep_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
             echo "CONCH_INITRD_PATH=$workdir/conch-agent-initramfs.cpio.gz"
             echo "CONCH_AGENT_ROOTFS=$workdir/initramfs-rootfs"
+            echo "CONCH_CONTAINERD_SOCKET=$workdir/containerd/containerd.sock"
+            echo "CONCH_CONTAINERD_ROOT=$workdir/containerd-root"
+            echo "CONCH_CONTAINERD_STATE=$workdir/containerd-state"
+            echo "CONCH_CONTAINERD_LOG=$workdir/containerd.log"
+            echo "CONCH_CONTAINERD_PID_FILE=$workdir/containerd.pid"
             echo "CONCH_CONFIG=$workdir/config.yaml"
             echo "CONCH_SDK_CONFIG=$workdir/sdk-config.yaml"
             echo "CONCHD_LOG=$workdir/conchd.log"
@@ -232,10 +467,14 @@ jobs:
           git log --oneline -1
           git status --short --branch
 
-      - name: Set up Conch CNI
-        uses: ./.github/actions/setup-conch-cni
-        with:
-          source-conf-dir: conch-src/config/cni/net.d
+      - name: Verify Conch dev network mode
+        run: |
+          set -euo pipefail
+          if [ -d conch-src/config/cni/net.d ]; then
+            echo "::warning::Conch CNI config exists, but this dev benchmark uses Conch's built-in netlink bridge networking."
+          fi
+          test -d conch-src/internal/sandbox/network
+          grep -R -n -E 'bridgeNamePrefix|legacyBridgeName|initAllBridges' conch-src/internal/sandbox/network
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -260,16 +499,27 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install grpcio-tools
           make gen-proto
-          make build
+          mkdir -p bin
+          go build -tags "$GO_TAGS" -o ./bin/conch ./cmd/conch
+          go build -tags "$GO_TAGS" -o ./bin/conchd ./cmd/conchd
+          CGO_ENABLED=0 go build -o ./bin/conch-agent ./cmd/conch-agent
           test -x ./bin/conch
           test -x ./bin/conchd
           test -x ./bin/conch-agent
-          OUTPUT="$CONCH_INITRD_PATH" \
-            WORK_DIR="$CONCH_BENCH_WORKDIR/initramfs-work" \
-            ROOTFS_DIR="$CONCH_AGENT_ROOTFS" \
-            ALPINE_VERSION="$ALPINE_VERSION" \
-            ALPINE_MIRROR="$ALPINE_MIRROR" \
-            make build-agent-initramfs
+          rm -rf "$CONCH_AGENT_ROOTFS"
+          mkdir -p \
+            "$CONCH_AGENT_ROOTFS/dev" \
+            "$CONCH_AGENT_ROOTFS/proc" \
+            "$CONCH_AGENT_ROOTFS/sys" \
+            "$CONCH_AGENT_ROOTFS/run" \
+            "$CONCH_AGENT_ROOTFS/tmp" \
+            "$CONCH_AGENT_ROOTFS/var/log/conch-agent"
+          cp ./bin/conch-agent "$CONCH_AGENT_ROOTFS/init"
+          chmod 0755 "$CONCH_AGENT_ROOTFS/init"
+          (
+            cd "$CONCH_AGENT_ROOTFS"
+            find . -print0 | sort -z | cpio --null -ov --format=newc | gzip -n > "$CONCH_INITRD_PATH"
+          )
           file "$CONCH_INITRD_PATH"
 
       - name: Resolve snapshot cache key and write configs
@@ -316,7 +566,15 @@ jobs:
           cache_material="${CONCH_SNAPSHOT_FORMAT_VERSION}|${CONCH_E2B_ROOTFS_PLATFORM_SUFFIX}|${conch_commit}|${rootfs_digest}|${kernel_digest}|${ALPINE_VERSION}"
           cache_key="$(printf '%s' "$cache_material" | sha256sum | awk '{print $1}')"
           snapshot_tag="${CONCH_SNAPSHOT_FORMAT_VERSION}-${CONCH_E2B_ROOTFS_PLATFORM_SUFFIX}-${cache_key}"
+          boot_image="${CONCH_E2B_REGISTRY}/conch/e2b-startup-boot:${snapshot_tag}"
           snapshot_image="${CONCH_E2B_REGISTRY}/conch/e2b-startup-snapshot:${snapshot_tag}"
+
+          boot_cache_hit=false
+          if curl -fsSI -H "$accept_header" \
+            "http://${CONCH_E2B_REGISTRY}/v2/conch/e2b-startup-boot/manifests/${snapshot_tag}" \
+            >/dev/null 2>&1; then
+            boot_cache_hit=true
+          fi
 
           snapshot_cache_hit=false
           if curl -fsSI -H "$accept_header" \
@@ -340,7 +598,9 @@ jobs:
             echo "CONCH_KERNEL_DIGEST=$kernel_digest"
             echo "CONCH_INITRD_DIGEST=$initrd_digest"
             echo "CONCH_STARTUP_SNAPSHOT_CACHE_KEY=$cache_key"
+            echo "CONCH_STARTUP_BOOT_CACHE_HIT=$boot_cache_hit"
             echo "CONCH_STARTUP_SNAPSHOT_CACHE_HIT=$snapshot_cache_hit"
+            echo "CONCH_BENCHMARK_BOOT_IMAGE=$boot_image"
             echo "CONCH_BENCHMARK_SNAPSHOT_IMAGE=$snapshot_image"
             echo "CONCH_PORT=$port"
             echo "CONCH_API_URL=http://127.0.0.1:$port"
@@ -372,17 +632,17 @@ jobs:
             tap_mask: 24
 
           containerd:
-            root_dir: "$CONCH_BENCH_WORKDIR/containerd-root"
-            state_dir: "$CONCH_BENCH_WORKDIR/containerd-state"
+            socket: "$CONCH_CONTAINERD_SOCKET"
             default_namespace: "$CONCH_NAMESPACE"
 
           image:
-            default_kernel_image: ""
+            default_kernel_image: "$CONCH_LOCAL_KERNEL_IMAGE"
 
           sandbox:
             vsock_signal_retry: 10ms
             vsock_signal_timeout: 10m
             request_timeout: 30m
+            default_vmm: "$CONCH_E2B_VMM_NAME"
           YAML
 
           cat > "$CONCH_SDK_CONFIG" <<YAML
@@ -399,7 +659,7 @@ jobs:
             ram_mb: 2048
 
           image:
-            image_name: "$snapshot_image"
+            image_name: "$boot_image"
             use_snapshot: false
             vmm_name: "$CONCH_E2B_VMM_NAME"
             vcpu_num: 2
@@ -412,9 +672,44 @@ jobs:
             echo "Rootfs digest: $rootfs_digest"
             echo "Kernel digest: $kernel_digest"
             echo "Initrd digest: $initrd_digest"
+            echo "Boot image: $boot_image"
             echo "Snapshot image: $snapshot_image"
+            echo "Boot cache hit: $boot_cache_hit"
             echo "Snapshot cache hit: $snapshot_cache_hit"
           } | tee "$CONCH_BENCH_RESULTS_DIR/preparation.txt"
+
+      - name: Start benchmark containerd
+        run: |
+          set -euo pipefail
+          mkdir -p "$(dirname "$CONCH_CONTAINERD_SOCKET")" "$CONCH_CONTAINERD_ROOT" "$CONCH_CONTAINERD_STATE"
+          sudo -n sh -c 'exec env PATH="$1" containerd --address "$2" --root "$3" --state "$4" > "$5" 2>&1' \
+            sh \
+            "$PATH" \
+            "$CONCH_CONTAINERD_SOCKET" \
+            "$CONCH_CONTAINERD_ROOT" \
+            "$CONCH_CONTAINERD_STATE" \
+            "$CONCH_CONTAINERD_LOG" &
+          echo "$!" > "$CONCH_CONTAINERD_PID_FILE"
+
+          for _ in $(seq 1 60); do
+            if sudo -n ctr --address "$CONCH_CONTAINERD_SOCKET" version >/dev/null 2>&1; then
+              echo "containerd is ready at $CONCH_CONTAINERD_SOCKET"
+              exit 0
+            fi
+            if [ -f "$CONCH_CONTAINERD_PID_FILE" ]; then
+              containerd_pid="$(cat "$CONCH_CONTAINERD_PID_FILE")"
+              if ! sudo -n kill -0 "$containerd_pid" >/dev/null 2>&1; then
+                echo "::error::containerd exited before becoming ready" >&2
+                sed -n '1,240p' "$CONCH_CONTAINERD_LOG" >&2 || true
+                exit 1
+              fi
+            fi
+            sleep 1
+          done
+
+          echo "::error::timed out waiting for containerd" >&2
+          sed -n '1,240p' "$CONCH_CONTAINERD_LOG" >&2 || true
+          exit 1
 
       - name: Start conchd
         working-directory: conch-src
@@ -470,24 +765,61 @@ jobs:
               -d "$payload" >/dev/null 2>&1 || true
           }
 
+          conch_cli() {
+            sudo -n env \
+              PATH="$PATH" \
+              HOME="$HOME" \
+              BUILDAH_CONCH_API_URL="$CONCH_API_URL" \
+              CONCH_KERNEL_IMAGE_TAG="${CONCH_KERNEL_IMAGE_TAG:-}" \
+              ./bin/conch "$@"
+          }
+
+          build_and_push_boot_image() {
+            echo "Boot image cache miss; building Conch dev sandbox-image from weekly rootfs."
+            rm -rf "$CONCH_DEV_BUILD_CONTEXT"
+            mkdir -p "$CONCH_DEV_BUILD_CONTEXT"
+            ln -s "$CONCH_KERNEL_PATH" "$CONCH_DEV_BUILD_CONTEXT/bzImage"
+            ln -s "$CONCH_INITRD_PATH" "$CONCH_DEV_BUILD_CONTEXT/conch.initrd"
+            cat > "$CONCH_DEV_BUILD_CONTEXT/Dockerfile" <<DOCKERFILE
+          FROM $CONCH_E2B_ROOTFS_IMAGE
+          KERNEL bzImage conch.initrd
+          INDEX
+          DOCKERFILE
+
+            CONCH_KERNEL_IMAGE_TAG="$CONCH_LOCAL_KERNEL_IMAGE" \
+              conch_cli build \
+                --config "$CONCH_CONFIG" \
+                --tls-verify=false \
+                --network host \
+                -t "$CONCH_LOCAL_BOOT_IMAGE" \
+                "$CONCH_DEV_BUILD_CONTEXT"
+
+            conch_cli push \
+              --plain-http \
+              "$CONCH_LOCAL_BOOT_IMAGE" \
+              "$CONCH_BENCHMARK_BOOT_IMAGE"
+            {
+              echo "Benchmark boot image: $CONCH_BENCHMARK_BOOT_IMAGE"
+              echo "Boot cache write: true"
+            } >> "$CONCH_BENCH_RESULTS_DIR/preparation.txt"
+          }
+
+          if [ "$CONCH_STARTUP_BOOT_CACHE_HIT" = "true" ]; then
+            echo "Using cached boot image: $CONCH_BENCHMARK_BOOT_IMAGE"
+          else
+            build_and_push_boot_image
+          fi
+
+          conch_cli pull \
+            --config "$CONCH_CONFIG" \
+            -n "$CONCH_NAMESPACE" \
+            --plain-http \
+            "$CONCH_BENCHMARK_BOOT_IMAGE"
+
           if [ "$CONCH_STARTUP_SNAPSHOT_CACHE_HIT" = "true" ]; then
             echo "Using cached snapshot image: $CONCH_BENCHMARK_SNAPSHOT_IMAGE"
           else
-            echo "Snapshot cache miss; converting weekly rootfs image to a local boot image."
-            ./bin/conch convert \
-              --config "$CONCH_CONFIG" \
-              -n "$CONCH_NAMESPACE" \
-              --plain-http \
-              --source "$CONCH_E2B_ROOTFS_IMAGE" \
-              --kernel "$CONCH_KERNEL_PATH" \
-              --initrd "$CONCH_INITRD_PATH" \
-              -t "$CONCH_LOCAL_BOOT_IMAGE"
-
-            ./bin/conch unpack \
-              --config "$CONCH_CONFIG" \
-              -n "$CONCH_NAMESPACE" \
-              "$CONCH_LOCAL_BOOT_IMAGE"
-
+            echo "Snapshot cache miss; creating a preparation sandbox from the boot image."
             trap cleanup_prepare_sandbox EXIT
 
             conch_src="$PWD"
@@ -505,7 +837,7 @@ jobs:
               -v "$CONCH_BENCH_WORKDIR:$CONCH_BENCH_WORKDIR" \
               -w "$conch_src" \
               -e "CONCH_SDK_CONFIG=$CONCH_SDK_CONFIG" \
-              -e "CONCH_LOCAL_BOOT_IMAGE=$CONCH_LOCAL_BOOT_IMAGE" \
+              -e "CONCH_BENCHMARK_BOOT_IMAGE=$CONCH_BENCHMARK_BOOT_IMAGE" \
               -e "CONCH_NAMESPACE=$CONCH_NAMESPACE" \
               -e "CONCH_PREP_SANDBOX_ID=$CONCH_PREP_SANDBOX_ID" \
               -e "CONCH_BENCH_WORKDIR=$CONCH_BENCH_WORKDIR" \
@@ -525,7 +857,7 @@ jobs:
 
           sandbox = Sandbox.create(
               config_path=os.environ["CONCH_SDK_CONFIG"],
-              image_name=os.environ["CONCH_LOCAL_BOOT_IMAGE"],
+              image_name=os.environ["CONCH_BENCHMARK_BOOT_IMAGE"],
               namespace=os.environ["CONCH_NAMESPACE"],
               sandbox_id=os.environ["CONCH_PREP_SANDBOX_ID"],
               use_snapshot=False,
@@ -536,47 +868,29 @@ jobs:
           PY
           SH
 
-            ./bin/conch snapshot export \
+            conch_cli snapshot export \
               --config "$CONCH_CONFIG" \
-              -n "$CONCH_NAMESPACE" \
               --sandbox-id "$CONCH_PREP_SANDBOX_ID" \
               -t "$CONCH_LOCAL_SNAPSHOT_IMAGE"
 
             trap - EXIT
             cleanup_prepare_sandbox
 
-            if ./bin/conch push \
-              --config "$CONCH_CONFIG" \
-              -n "$CONCH_NAMESPACE" \
+            conch_cli push \
               --plain-http \
               "$CONCH_LOCAL_SNAPSHOT_IMAGE" \
-              "$CONCH_BENCHMARK_SNAPSHOT_IMAGE"; then
-              ./bin/conch pull \
-                --config "$CONCH_CONFIG" \
-                -n "$CONCH_NAMESPACE" \
-                --plain-http \
-                "$CONCH_BENCHMARK_SNAPSHOT_IMAGE"
-              {
-                echo "Benchmark snapshot image: $CONCH_BENCHMARK_SNAPSHOT_IMAGE"
-                echo "Snapshot cache write: true"
-              } >> "$CONCH_BENCH_RESULTS_DIR/preparation.txt"
-            else
-              echo "::warning::Failed to push startup snapshot cache; using local snapshot image for this run." >&2
-              echo "CONCH_BENCHMARK_SNAPSHOT_IMAGE=$CONCH_LOCAL_SNAPSHOT_IMAGE" >> "$GITHUB_ENV"
-              {
-                echo "Benchmark snapshot image: $CONCH_LOCAL_SNAPSHOT_IMAGE"
-                echo "Snapshot cache write: false"
-              } >> "$CONCH_BENCH_RESULTS_DIR/preparation.txt"
-            fi
+              "$CONCH_BENCHMARK_SNAPSHOT_IMAGE"
+            {
+              echo "Benchmark snapshot image: $CONCH_BENCHMARK_SNAPSHOT_IMAGE"
+              echo "Snapshot cache write: true"
+            } >> "$CONCH_BENCH_RESULTS_DIR/preparation.txt"
           fi
 
-          if [ "$CONCH_STARTUP_SNAPSHOT_CACHE_HIT" = "true" ]; then
-            ./bin/conch pull \
-              --config "$CONCH_CONFIG" \
-              -n "$CONCH_NAMESPACE" \
-              --plain-http \
-              "$CONCH_BENCHMARK_SNAPSHOT_IMAGE"
-          fi
+          conch_cli pull \
+            --config "$CONCH_CONFIG" \
+            -n "$CONCH_NAMESPACE" \
+            --plain-http \
+            "$CONCH_BENCHMARK_SNAPSHOT_IMAGE"
 
       - name: Run startup benchmark
         run: |
@@ -603,11 +917,13 @@ jobs:
           PYTHONUNBUFFERED=1 \
           python -u .github/scripts/startup_benchmark.py \
             --config-path "$CONCH_SDK_CONFIG" \
-            --image-name "$CONCH_BENCHMARK_SNAPSHOT_IMAGE" \
+            --image-name "$CONCH_BENCHMARK_BOOT_IMAGE" \
+            --snapshot-image-name "$CONCH_BENCHMARK_SNAPSHOT_IMAGE" \
             --namespace "$CONCH_NAMESPACE" \
             --results-dir "$CONCH_BENCH_RESULTS_DIR" \
             --concurrency "$CONCH_STARTUP_CONCURRENCY" \
-            --single-iterations "$CONCH_STARTUP_SINGLE_ITERATIONS"
+            --single-iterations "$CONCH_STARTUP_SINGLE_ITERATIONS" \
+            --skip-validation
 
       - name: Collect benchmark logs
         if: always()
@@ -616,6 +932,9 @@ jobs:
           mkdir -p startup-benchmark-results/logs
           if [ -n "${CONCHD_LOG:-}" ] && [ -f "$CONCHD_LOG" ]; then
             cp "$CONCHD_LOG" startup-benchmark-results/logs/conchd.log
+          fi
+          if [ -n "${CONCH_CONTAINERD_LOG:-}" ] && [ -f "$CONCH_CONTAINERD_LOG" ]; then
+            cp "$CONCH_CONTAINERD_LOG" startup-benchmark-results/logs/containerd.log
           fi
           if [ -n "${CONCH_CONFIG:-}" ] && [ -f "$CONCH_CONFIG" ]; then
             cp "$CONCH_CONFIG" startup-benchmark-results/logs/conchd-config.yaml
@@ -638,6 +957,9 @@ jobs:
           set -euo pipefail
           if [ -n "${CONCHD_LOG:-}" ] && [ -f "$CONCHD_LOG" ]; then
             sed -n '1,500p' "$CONCHD_LOG"
+          fi
+          if [ -n "${CONCH_CONTAINERD_LOG:-}" ] && [ -f "$CONCH_CONTAINERD_LOG" ]; then
+            sed -n '1,500p' "$CONCH_CONTAINERD_LOG"
           fi
 
       - name: Dump network diagnostics on failure
@@ -694,7 +1016,27 @@ jobs:
             fi
           fi
 
+          if [ -n "${CONCH_CONTAINERD_PID_FILE:-}" ] && [ -f "$CONCH_CONTAINERD_PID_FILE" ]; then
+            containerd_pid="$(cat "$CONCH_CONTAINERD_PID_FILE")"
+            if sudo kill -0 "$containerd_pid" >/dev/null 2>&1; then
+              sudo kill "$containerd_pid" >/dev/null 2>&1 || true
+              for _ in $(seq 1 30); do
+                sudo kill -0 "$containerd_pid" >/dev/null 2>&1 || break
+                sleep 1
+              done
+              sudo kill -0 "$containerd_pid" >/dev/null 2>&1 && sudo kill -9 "$containerd_pid" >/dev/null 2>&1 || true
+            fi
+          fi
+
           if [ -n "${CONCH_BENCH_WORKDIR:-}" ]; then
+            sudo findmnt -R -n -o TARGET "$CONCH_BENCH_WORKDIR" 2>/dev/null \
+              | sort -r \
+              | while read -r mountpoint; do
+                if [ -n "$mountpoint" ]; then
+                  echo "Unmounting Conch benchmark mount: $mountpoint"
+                  sudo umount -lf "$mountpoint" || true
+                fi
+              done
             sudo rm -rf "$CONCH_BENCH_WORKDIR"
           fi
           for ns in $(sudo ip netns list | awk '/^ns-[0-9]+([[:space:]]|$)/ {print $1}'); do
@@ -702,6 +1044,18 @@ jobs:
             sudo ip netns delete "$ns" || true
           done
           sudo rm -rf /var/lib/cni/networks/conch-bridge /var/lib/cni/results/conch-bridge
+          sudo ip -o link show \
+            | awk -F': ' '{print $2}' \
+            | cut -d@ -f1 \
+            | awk '/^(cni-conch0|conch_bridge|conch_bridge_[0-9]+)$/ {print}' \
+            | sort -u \
+            | while read -r bridge; do
+              if [ -z "$bridge" ]; then
+                continue
+              fi
+              echo "Deleting stale Conch bridge: $bridge"
+              sudo ip link delete "$bridge" || true
+            done
           for bridge in cni-conch0 conch_bridge; do
             if sudo ip link show "$bridge" >/dev/null 2>&1; then
               echo "Deleting stale Conch bridge: $bridge"
@@ -722,4 +1076,16 @@ jobs:
             sudo -n "$runtime" volume prune -f || true
             sudo -n "$runtime" builder prune -af || true
             sudo -n "$runtime" image prune -f || true
+          fi
+          if command -v buildah >/dev/null 2>&1; then
+            buildah unmount --all >/dev/null 2>&1 || true
+            buildah rm --all --force >/dev/null 2>&1 || true
+            buildah images --format '{{.Name}}:{{.Tag}}' 2>/dev/null \
+              | awk '/^(localhost\/conch\/e2b-startup-(boot|snapshot):|localhost\/conch-rootfs:|localhost\/conch\/pmem-rootfs:index-|localhost\/conch\/kernel:[0-9]+-[0-9]+$)/ { print }' \
+              | xargs -r buildah rmi -f >/dev/null 2>&1 || true
+            sudo -n buildah unmount --all >/dev/null 2>&1 || true
+            sudo -n buildah rm --all --force >/dev/null 2>&1 || true
+            sudo -n buildah images --format '{{.Name}}:{{.Tag}}' 2>/dev/null \
+              | awk '/^(localhost\/conch\/e2b-startup-(boot|snapshot):|localhost\/conch-rootfs:|localhost\/conch\/pmem-rootfs:index-|localhost\/conch\/kernel:[0-9]+-[0-9]+$)/ { print }' \
+              | xargs -r sudo -n buildah rmi -f >/dev/null 2>&1 || true
           fi

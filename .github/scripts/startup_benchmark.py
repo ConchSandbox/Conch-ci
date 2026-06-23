@@ -219,6 +219,13 @@ def validate_sandbox(sample: Dict[str, Any], sandbox) -> Dict[str, Any]:
     return sample
 
 
+def skip_validation(sample: Dict[str, Any], reason: str) -> Dict[str, Any]:
+    sample["validation"] = new_phase("skipped")
+    sample["validation"]["reason"] = reason
+    update_overall_status(sample)
+    return sample
+
+
 def cleanup_sandbox(sample: Dict[str, Any], sandbox) -> Dict[str, Any]:
     if sandbox is None:
         sample["cleanup"] = new_phase("skipped")
@@ -258,6 +265,7 @@ def run_single_scenario(
     scenario: str,
     iterations: int,
     use_snapshot: bool,
+    validate: bool = True,
     config_path: str,
     image_name: str,
     namespace: str,
@@ -278,7 +286,10 @@ def run_single_scenario(
             ram_mb=ram_mb,
         )
         if sandbox is not None:
-            validate_sandbox(sample, sandbox)
+            if validate:
+                validate_sandbox(sample, sandbox)
+            else:
+                skip_validation(sample, "post-create validation disabled")
             cleanup_sandbox(sample, sandbox)
         samples.append(sample)
     return samples
@@ -288,6 +299,7 @@ def run_snapshot_concurrent_scenario(
     sandbox_class,
     *,
     concurrency: int,
+    validate: bool = True,
     config_path: str,
     image_name: str,
     namespace: str,
@@ -334,15 +346,19 @@ def run_snapshot_concurrent_scenario(
     makespan = max(create_ends) - min(create_starts) if create_starts and create_ends else None
 
     post_workers = max(1, min(POST_CREATE_WORKERS, len(sandboxes)))
+    by_id = {sample["sandbox_id"]: sample for sample in samples}
     if sandboxes:
-        by_id = {sample["sandbox_id"]: sample for sample in samples}
-        with ThreadPoolExecutor(max_workers=post_workers) as executor:
-            futures = [
-                executor.submit(validate_sandbox, by_id[sandbox_id], sandbox)
-                for sandbox_id, sandbox in sandboxes.items()
-            ]
-            for future in as_completed(futures):
-                future.result()
+        if validate:
+            with ThreadPoolExecutor(max_workers=post_workers) as executor:
+                futures = [
+                    executor.submit(validate_sandbox, by_id[sandbox_id], sandbox)
+                    for sandbox_id, sandbox in sandboxes.items()
+                ]
+                for future in as_completed(futures):
+                    future.result()
+        else:
+            for sandbox_id in sandboxes:
+                skip_validation(by_id[sandbox_id], "post-create validation disabled")
 
         with ThreadPoolExecutor(max_workers=post_workers) as executor:
             futures = [
@@ -415,7 +431,9 @@ def env_metadata() -> Dict[str, str]:
         "CONCH_REF",
         "CONCH_COMMIT",
         "CONCH_E2B_ROOTFS_IMAGE",
+        "CONCH_BENCHMARK_BOOT_IMAGE",
         "CONCH_BENCHMARK_SNAPSHOT_IMAGE",
+        "CONCH_STARTUP_BOOT_CACHE_HIT",
         "CONCH_STARTUP_SNAPSHOT_CACHE_KEY",
         "CONCH_STARTUP_SNAPSHOT_CACHE_HIT",
         "CONCH_KERNEL_DIGEST",
@@ -438,9 +456,12 @@ def write_markdown_summary(summary: Dict[str, Any]) -> str:
         "",
         "Create latency is measured around `Sandbox.create(...)` only. Rootfs build, image conversion, image pull/unpack, conchd startup, validation, and cleanup are excluded from latency statistics.",
         "",
+        f"- Boot image: `{summary['metadata'].get('CONCH_BENCHMARK_BOOT_IMAGE', '')}`",
         f"- Snapshot image: `{summary['metadata'].get('CONCH_BENCHMARK_SNAPSHOT_IMAGE', '')}`",
+        f"- Boot cache hit: `{summary['metadata'].get('CONCH_STARTUP_BOOT_CACHE_HIT', '')}`",
         f"- Snapshot cache hit: `{summary['metadata'].get('CONCH_STARTUP_SNAPSHOT_CACHE_HIT', '')}`",
         f"- Concurrency: `{summary['parameters']['concurrency']}`",
+        f"- Post-create validation: `{'enabled' if summary['parameters'].get('validation_enabled') else 'disabled'}`",
         "",
         "| Scenario | Samples | Success | Failure | min | p50 | p90 | p95 | p99 | max | Makespan |",
         "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
@@ -462,10 +483,13 @@ def write_markdown_summary(summary: Dict[str, Any]) -> str:
                 makespan=format_seconds(scenario.get("makespan_seconds")),
             )
         )
+    failure_gate = "Create, validation, cleanup, preparation, pull, or unpack failures fail the job."
+    if not summary["parameters"].get("validation_enabled"):
+        failure_gate = "Post-create validation is disabled; create, cleanup, preparation, pull, or unpack failures fail the job."
     lines.extend(
         [
             "",
-            "The first version reports slow latency without enforcing thresholds. Create, validation, cleanup, preparation, pull, or unpack failures fail the job.",
+            f"The first version reports slow latency without enforcing thresholds. {failure_gate}",
             "",
         ]
     )
@@ -496,6 +520,7 @@ def write_outputs(
                 "sandbox cleanup",
             ],
             "readiness": "Sandbox.create(...) returning according to the Conch guest-agent ready contract.",
+            "post_create_validation": "enabled" if parameters.get("validation_enabled") else "disabled",
             "latency_threshold_gate": False,
         },
         "failed": failed,
@@ -521,12 +546,14 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Benchmark Conch sandbox startup latency.")
     parser.add_argument("--config-path", required=True)
     parser.add_argument("--image-name", required=True)
+    parser.add_argument("--snapshot-image-name")
     parser.add_argument("--namespace", required=True)
     parser.add_argument("--results-dir", required=True)
     parser.add_argument("--concurrency", required=True)
     parser.add_argument("--single-iterations", type=int, default=DEFAULT_SINGLE_ITERATIONS)
     parser.add_argument("--vcpu-num", type=int, default=2)
     parser.add_argument("--ram-mb", type=int, default=2048)
+    parser.add_argument("--skip-validation", action="store_true", help="skip post-create guest command validation")
     return parser.parse_args(argv)
 
 
@@ -542,6 +569,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 2
 
     sandbox_class = import_sandbox_class()
+    snapshot_image_name = args.snapshot_image_name or args.image_name
+    validate = not args.skip_validation
     all_samples: List[Dict[str, Any]] = []
     scenario_summaries: List[Dict[str, Any]] = []
 
@@ -550,6 +579,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         scenario="cold_single",
         iterations=args.single_iterations,
         use_snapshot=False,
+        validate=validate,
         config_path=args.config_path,
         image_name=args.image_name,
         namespace=args.namespace,
@@ -564,8 +594,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         scenario="snapshot_single",
         iterations=args.single_iterations,
         use_snapshot=True,
+        validate=validate,
         config_path=args.config_path,
-        image_name=args.image_name,
+        image_name=snapshot_image_name,
         namespace=args.namespace,
         vcpu_num=args.vcpu_num,
         ram_mb=args.ram_mb,
@@ -576,8 +607,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     snapshot_concurrent_samples, makespan = run_snapshot_concurrent_scenario(
         sandbox_class,
         concurrency=concurrency,
+        validate=validate,
         config_path=args.config_path,
-        image_name=args.image_name,
+        image_name=snapshot_image_name,
         namespace=args.namespace,
         vcpu_num=args.vcpu_num,
         ram_mb=args.ram_mb,
@@ -596,6 +628,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             "single_iterations": args.single_iterations,
             "vcpu_num": args.vcpu_num,
             "ram_mb": args.ram_mb,
+            "validation_enabled": validate,
         },
     )
     print(json.dumps(summary, indent=2, sort_keys=True))
