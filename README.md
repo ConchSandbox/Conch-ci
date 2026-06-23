@@ -19,6 +19,9 @@ repository/ref pair:
 - `e2e-ci.yml`: runs the Conch end-to-end CI entrypoint. It converts a
   prebuilt weekly E2B rootfs image by default, then runs the E2B SDK E2E job
   when `run_sdk_e2e` is not disabled.
+- `startup-performance.yml`: manually benchmarks sandbox startup latency on a
+  self-hosted runner using the weekly E2B rootfs image and a cached
+  `conch convert --snapshot` image.
 
 Common dispatch inputs:
 
@@ -64,6 +67,41 @@ The end-to-end workflow also installs Conch's default CNI config from the
 selected source ref into `/etc/conch/cni/net.d` and ensures the required CNI
 plugins exist under `/opt/cni/bin`. The default plugin set is `bridge`,
 `host-local`, and `loopback`.
+
+## Startup performance benchmark
+
+The `Conch Startup Performance CI` workflow is manually dispatched and runs on
+a self-hosted Linux runner. It exposes one input:
+
+```text
+concurrency=100
+```
+
+`concurrency` controls only the snapshot concurrent startup scenario. It must
+be a positive integer no greater than `1000`; single-start scenarios always run
+5 iterations.
+
+The workflow uses the weekly rootfs image configured in
+`CONCH_E2B_ROOTFS_IMAGE_<ARCH>`, builds the Conch agent initramfs for the
+selected Conch ref, and caches a snapshot image in the runner-local registry.
+The snapshot cache key includes the Conch commit, rootfs manifest digest,
+kernel digest, initrd digest, runner architecture, and snapshot format version.
+Cache misses convert the weekly rootfs into a local Conch boot image, create a
+preparation sandbox through the public SDK, export it as a snapshot image with
+`conch snapshot export`, and push that image into the runner-local registry.
+Cache hits skip that preparation. Every run still pulls/unpacks the selected
+snapshot image into the isolated benchmark namespace before measuring.
+
+Latency metrics include only Python-side timing around `Sandbox.create(...)`.
+Rootfs build, image conversion, image pull/unpack, conchd startup, validation,
+and cleanup are excluded. The first version reports slow latency without
+threshold gates. Create failures, validation failures, cleanup failures,
+preparation failures, pull/unpack failures, and invalid parameters fail the
+job.
+
+The workflow writes a GitHub job summary and uploads JSON, JSONL, preparation
+metadata, SDK/conchd config copies, and conchd logs as
+`conch-startup-benchmark-results` artifacts retained for 14 days.
 
 ## AtomGit mirror sync
 

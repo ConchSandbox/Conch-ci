@@ -1,0 +1,725 @@
+name: Conch Startup Performance CI
+run-name: startup-perf-${{ github.event.inputs.concurrency || '100' }}-${{ github.ref_name }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      concurrency:
+        description: Snapshot startup concurrency, from 1 to 1000
+        required: false
+        default: "100"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: conch-startup-performance-${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  CONCH_REPOSITORY: ${{ vars.CONCH_REPOSITORY || 'https://github.com/ConchSandbox/Conch.git' }}
+  CONCH_REF: ${{ vars.CONCH_REF || 'dev-cri' }}
+  CONCH_E2B_ROOTFS_PLATFORM_INPUT: ${{ vars.CONCH_E2B_ROOTFS_PLATFORM }}
+  CONCH_E2B_ROOTFS_IMAGE_AMD64: ${{ vars.CONCH_E2B_ROOTFS_IMAGE_AMD64 }}
+  CONCH_E2B_ROOTFS_IMAGE_ARM64: ${{ vars.CONCH_E2B_ROOTFS_IMAGE_ARM64 }}
+  CONCH_E2B_REGISTRY: ${{ vars.CONCH_E2B_REGISTRY || 'localhost:5000' }}
+  CONCH_KERNEL_PATH: ${{ vars.CONCH_E2E_KERNEL_PATH || '/opt/conch/bzImage' }}
+  CONCH_STARTUP_CONCURRENCY_INPUT: ${{ github.event.inputs.concurrency || '100' }}
+  CONCH_STARTUP_SINGLE_ITERATIONS: "5"
+  CONCH_SNAPSHOT_FORMAT_VERSION: v2
+  CONCH_E2B_VMM_NAME: cloud-hypervisor
+  CONCH_CLOUD_HYPERVISOR_REPOSITORY_REF: github.com/ConchSandbox/cloud-hypervisor
+  CONCH_CLOUD_HYPERVISOR_RELEASE_REF: v52.0-conch
+  CONCH_CLOUD_HYPERVISOR_X86_64_ASSET_REF: cloud-hypervisor-static
+  CONCH_CLOUD_HYPERVISOR_ARM64_ASSET_REF: cloud-hypervisor-static-aarch64
+  CONCH_MKFS_EROFS_REQUIRED_FLAG: --fsalignblks
+  CONCH_API_TIMEOUT: 35m
+  ALPINE_VERSION: ${{ vars.CONCH_AGENT_E2E_ALPINE_VERSION || '3.20.3' }}
+  ALPINE_MIRROR: ${{ vars.CONCH_AGENT_E2E_ALPINE_MIRROR || 'https://dl-cdn.alpinelinux.org/alpine' }}
+  CONCH_STARTUP_REQUIRED_COMMANDS: git protoc mkfs.erofs curl ip iptables tar gzip cpio file python3 sha256sum
+  OPENEULER_GIT_PACKAGES: git
+  OPENEULER_PROTOC_PACKAGES: protobuf protobuf-compiler
+  OPENEULER_EROFS_PACKAGES: erofs-utils
+  OPENEULER_IPROUTE_PACKAGES: iproute
+  OPENEULER_IPTABLES_PACKAGES: iptables
+  OPENEULER_CURL_PACKAGES: curl
+  GO_TAGS: exclude_graphdriver_btrfs
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  startup-performance:
+    name: Sandbox Startup Performance
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 240
+
+    steps:
+      - name: Checkout CI repository
+        uses: actions/checkout@v4
+
+      - name: Set up erofs-utils
+        uses: ./.github/actions/setup-erofs-utils
+        with:
+          required-flag: ${{ env.CONCH_MKFS_EROFS_REQUIRED_FLAG }}
+
+      - name: Set up cloud-hypervisor
+        uses: ./.github/actions/setup-cloud-hypervisor
+        with:
+          repository-ref: ${{ env.CONCH_CLOUD_HYPERVISOR_REPOSITORY_REF }}
+          release-ref: ${{ env.CONCH_CLOUD_HYPERVISOR_RELEASE_REF }}
+          x86-64-asset-ref: ${{ env.CONCH_CLOUD_HYPERVISOR_X86_64_ASSET_REF }}
+          arm64-asset-ref: ${{ env.CONCH_CLOUD_HYPERVISOR_ARM64_ASSET_REF }}
+          binary-name: ${{ env.CONCH_E2B_VMM_NAME }}
+
+      - name: Check self-hosted startup benchmark prerequisites
+        uses: ./.github/actions/check-self-hosted-runtime-prerequisites
+        with:
+          required-commands: ${{ env.CONCH_STARTUP_REQUIRED_COMMANDS }}
+          vmm-name: ${{ env.CONCH_E2B_VMM_NAME }}
+          require-erofs: "true"
+          mkfs-erofs-required-flag: ${{ env.CONCH_MKFS_EROFS_REQUIRED_FLAG }}
+          kernel-path: ${{ env.CONCH_KERNEL_PATH }}
+          kernel-name: Conch kernel
+
+      - name: Clean stale Conch network state
+        run: |
+          set +e
+          for ns in $(sudo ip netns list | awk '/^ns-[0-9]+([[:space:]]|$)/ {print $1}'); do
+            echo "Deleting stale Conch netns: $ns"
+            sudo ip netns delete "$ns" || true
+          done
+          sudo rm -rf /var/lib/cni/networks/conch-bridge /var/lib/cni/results/conch-bridge
+          for bridge in cni-conch0 conch_bridge; do
+            if sudo ip link show "$bridge" >/dev/null 2>&1; then
+              echo "Deleting stale Conch bridge: $bridge"
+              sudo ip link delete "$bridge" || true
+            fi
+          done
+
+      - name: Clean stale startup benchmark disk state
+        run: |
+          set +e
+          sudo rm -rf /tmp/csp-* "${RUNNER_TEMP:-/tmp}/conch-startup-performance-python"
+
+          runtime=""
+          if command -v docker >/dev/null 2>&1; then
+            runtime=docker
+          elif command -v podman >/dev/null 2>&1; then
+            runtime=podman
+          fi
+
+          if [ -n "$runtime" ]; then
+            sudo -n "$runtime" container prune -f || true
+            sudo -n "$runtime" volume prune -f || true
+            sudo -n "$runtime" builder prune -af || true
+            sudo -n "$runtime" image prune -f || true
+
+            sudo -n "$runtime" images --format '{{.Repository}}:{{.Tag}}' \
+              | awk '/^(conch\/startup-benchmark-runner|localhost\/conch\/e2b-startup-(boot|snapshot)):/ { print }' \
+              | xargs -r sudo -n "$runtime" rmi -f || true
+          fi
+
+          df -h / /tmp "$GITHUB_WORKSPACE" /opt/conch/registry 2>/dev/null || true
+
+      - name: Set up local registry
+        uses: ./.github/actions/setup-local-registry
+        with:
+          registry: ${{ env.CONCH_E2B_REGISTRY }}
+
+      - name: Prepare benchmark workspace and inputs
+        run: |
+          set -euo pipefail
+
+          concurrency="$CONCH_STARTUP_CONCURRENCY_INPUT"
+          case "$concurrency" in
+            ""|*[!0-9]*)
+              echo "::error::concurrency must be a positive integer, got: $concurrency" >&2
+              exit 1
+              ;;
+          esac
+          if [ "$concurrency" -lt 1 ] || [ "$concurrency" -gt 1000 ]; then
+            echo "::error::concurrency must be between 1 and 1000, got: $concurrency" >&2
+            exit 1
+          fi
+
+          if [ -n "${CONCH_E2B_ROOTFS_PLATFORM_INPUT:-}" ]; then
+            rootfs_platform="$CONCH_E2B_ROOTFS_PLATFORM_INPUT"
+          else
+            case "${RUNNER_ARCH:-$(uname -m)}" in
+              X64|x64|x86_64|amd64)
+                rootfs_platform=linux/amd64
+                ;;
+              ARM64|arm64|aarch64)
+                rootfs_platform=linux/arm64
+                ;;
+              *)
+                echo "::error::Cannot derive runner platform from RUNNER_ARCH=${RUNNER_ARCH:-unset}" >&2
+                exit 1
+                ;;
+            esac
+          fi
+
+          case "$rootfs_platform" in
+            linux/amd64)
+              platform_suffix=amd64
+              rootfs_image="${CONCH_E2B_ROOTFS_IMAGE_AMD64:-}"
+              ;;
+            linux/arm64)
+              platform_suffix=arm64
+              rootfs_image="${CONCH_E2B_ROOTFS_IMAGE_ARM64:-}"
+              ;;
+            *)
+              echo "::error::Unsupported E2B rootfs platform: $rootfs_platform" >&2
+              exit 1
+              ;;
+          esac
+
+          if [ -z "$rootfs_image" ]; then
+            echo "::error::No weekly E2B rootfs image is configured for $rootfs_platform. Run Weekly E2B Rootfs Image first or set CONCH_E2B_ROOTFS_IMAGE_${platform_suffix^^}." >&2
+            exit 1
+          fi
+          case "$rootfs_image" in
+            "${CONCH_E2B_REGISTRY}/"*)
+              ;;
+            *)
+              echo "::error::Weekly E2B rootfs image must live in local registry $CONCH_E2B_REGISTRY: $rootfs_image" >&2
+              exit 1
+              ;;
+          esac
+
+          tag="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          workdir="/tmp/csp-${tag}"
+          namespace="conch-startup-performance-${tag}"
+          pool_size=$((concurrency + 20))
+
+          sudo rm -rf "$workdir"
+          rm -rf startup-benchmark-results
+          mkdir -p "$workdir" startup-benchmark-results
+
+          {
+            echo "CONCH_STARTUP_CONCURRENCY=$concurrency"
+            echo "CONCH_NETWORK_POOL_SIZE=$pool_size"
+            echo "CONCH_E2B_ROOTFS_PLATFORM=$rootfs_platform"
+            echo "CONCH_E2B_ROOTFS_PLATFORM_SUFFIX=$platform_suffix"
+            echo "CONCH_E2B_ROOTFS_IMAGE=$rootfs_image"
+            echo "CONCH_BENCH_WORKDIR=$workdir"
+            echo "CONCH_BENCH_RESULTS_DIR=$GITHUB_WORKSPACE/startup-benchmark-results"
+            echo "CONCH_NAMESPACE=$namespace"
+            echo "CONCH_LOCAL_BOOT_IMAGE=localhost/conch/e2b-startup-boot:${tag}"
+            echo "CONCH_LOCAL_SNAPSHOT_IMAGE=localhost/conch/e2b-startup-snapshot:${tag}"
+            echo "CONCH_PREP_SANDBOX_ID=sandbox_perf_prep_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+            echo "CONCH_INITRD_PATH=$workdir/conch-agent-initramfs.cpio.gz"
+            echo "CONCH_AGENT_ROOTFS=$workdir/initramfs-rootfs"
+            echo "CONCH_CONFIG=$workdir/config.yaml"
+            echo "CONCH_SDK_CONFIG=$workdir/sdk-config.yaml"
+            echo "CONCHD_LOG=$workdir/conchd.log"
+            echo "CONCHD_PID_FILE=$workdir/conchd.pid"
+            echo "CONCHD_SERVICE_PID_FILE=$workdir/conchd-service.pid"
+          } >> "$GITHUB_ENV"
+
+      - name: Fetch Conch source
+        run: |
+          set -euo pipefail
+          rm -rf conch-src
+          git init conch-src
+          cd conch-src
+          git remote add origin "$CONCH_REPOSITORY"
+          git fetch --depth 1 origin "$CONCH_REF"
+          git checkout --detach FETCH_HEAD
+          git log --oneline -1
+          git status --short --branch
+
+      - name: Set up Conch CNI
+        uses: ./.github/actions/setup-conch-cni
+        with:
+          source-conf-dir: conch-src/config/cni/net.d
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 1.26.x
+          cache-dependency-path: conch-src/go.sum
+
+      - name: Set up Python
+        run: |
+          set -euo pipefail
+          python3 --version
+          rm -rf "${RUNNER_TEMP:-/tmp}/conch-startup-performance-python"
+          python3 -m venv "${RUNNER_TEMP:-/tmp}/conch-startup-performance-python"
+          echo "${RUNNER_TEMP:-/tmp}/conch-startup-performance-python/bin" >> "$GITHUB_PATH"
+          "${RUNNER_TEMP:-/tmp}/conch-startup-performance-python/bin/python" -m pip install --upgrade pip
+          "${RUNNER_TEMP:-/tmp}/conch-startup-performance-python/bin/python" --version
+
+      - name: Build Conch binaries and initramfs
+        working-directory: conch-src
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install grpcio-tools
+          make gen-proto
+          make build
+          test -x ./bin/conch
+          test -x ./bin/conchd
+          test -x ./bin/conch-agent
+          OUTPUT="$CONCH_INITRD_PATH" \
+            WORK_DIR="$CONCH_BENCH_WORKDIR/initramfs-work" \
+            ROOTFS_DIR="$CONCH_AGENT_ROOTFS" \
+            ALPINE_VERSION="$ALPINE_VERSION" \
+            ALPINE_MIRROR="$ALPINE_MIRROR" \
+            make build-agent-initramfs
+          file "$CONCH_INITRD_PATH"
+
+      - name: Resolve snapshot cache key and write configs
+        run: |
+          set -euo pipefail
+
+          registry_prefix="${CONCH_E2B_REGISTRY}/"
+          image_without_registry="${CONCH_E2B_ROOTFS_IMAGE#"$registry_prefix"}"
+          if [ "$image_without_registry" = "$CONCH_E2B_ROOTFS_IMAGE" ]; then
+            echo "::error::Rootfs image must start with $registry_prefix: $CONCH_E2B_ROOTFS_IMAGE" >&2
+            exit 1
+          fi
+
+          case "$image_without_registry" in
+            *@*)
+              repository="${image_without_registry%@*}"
+              reference="${image_without_registry#*@}"
+              ;;
+            *:*)
+              repository="${image_without_registry%:*}"
+              reference="${image_without_registry##*:}"
+              ;;
+            *)
+              echo "::error::Rootfs image must include a tag or digest: $CONCH_E2B_ROOTFS_IMAGE" >&2
+              exit 1
+              ;;
+          esac
+
+          accept_header="Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json"
+          headers_file="${CONCH_BENCH_WORKDIR}/rootfs-manifest.headers"
+          curl -fsSI -H "$accept_header" \
+            "http://${CONCH_E2B_REGISTRY}/v2/${repository}/manifests/${reference}" \
+            > "$headers_file"
+          rootfs_digest="$(awk 'BEGIN { IGNORECASE=1 } /^Docker-Content-Digest:/ { gsub("\r", "", $2); print $2; exit }' "$headers_file")"
+          if [ -z "$rootfs_digest" ]; then
+            echo "::error::Failed to resolve rootfs manifest digest for $CONCH_E2B_ROOTFS_IMAGE" >&2
+            cat "$headers_file" >&2
+            exit 1
+          fi
+
+          conch_commit="$(git -C conch-src rev-parse HEAD)"
+          kernel_digest="sha256:$(sha256sum "$CONCH_KERNEL_PATH" | awk '{print $1}')"
+          initrd_digest="sha256:$(sha256sum "$CONCH_INITRD_PATH" | awk '{print $1}')"
+          cache_material="${CONCH_SNAPSHOT_FORMAT_VERSION}|${CONCH_E2B_ROOTFS_PLATFORM_SUFFIX}|${conch_commit}|${rootfs_digest}|${kernel_digest}|${ALPINE_VERSION}"
+          cache_key="$(printf '%s' "$cache_material" | sha256sum | awk '{print $1}')"
+          snapshot_tag="${CONCH_SNAPSHOT_FORMAT_VERSION}-${CONCH_E2B_ROOTFS_PLATFORM_SUFFIX}-${cache_key}"
+          snapshot_image="${CONCH_E2B_REGISTRY}/conch/e2b-startup-snapshot:${snapshot_tag}"
+
+          snapshot_cache_hit=false
+          if curl -fsSI -H "$accept_header" \
+            "http://${CONCH_E2B_REGISTRY}/v2/conch/e2b-startup-snapshot/manifests/${snapshot_tag}" \
+            >/dev/null 2>&1; then
+            snapshot_cache_hit=true
+          fi
+
+          port="$(python - <<'PY'
+          import socket
+
+          with socket.socket() as sock:
+              sock.bind(("127.0.0.1", 0))
+              print(sock.getsockname()[1])
+          PY
+          )"
+
+          {
+            echo "CONCH_COMMIT=$conch_commit"
+            echo "CONCH_E2B_ROOTFS_DIGEST=$rootfs_digest"
+            echo "CONCH_KERNEL_DIGEST=$kernel_digest"
+            echo "CONCH_INITRD_DIGEST=$initrd_digest"
+            echo "CONCH_STARTUP_SNAPSHOT_CACHE_KEY=$cache_key"
+            echo "CONCH_STARTUP_SNAPSHOT_CACHE_HIT=$snapshot_cache_hit"
+            echo "CONCH_BENCHMARK_SNAPSHOT_IMAGE=$snapshot_image"
+            echo "CONCH_PORT=$port"
+            echo "CONCH_API_URL=http://127.0.0.1:$port"
+          } >> "$GITHUB_ENV"
+
+          cat > "$CONCH_CONFIG" <<YAML
+          app:
+            name: conch-startup-performance
+
+          log:
+            level: debug
+            output: stdout
+
+          server:
+            unix_socket: ""
+            pid_file: "$CONCHD_SERVICE_PID_FILE"
+            work_dir: "$CONCH_BENCH_WORKDIR/w"
+            host: 127.0.0.1
+            port: $port
+
+          state:
+            path: "$CONCH_BENCH_WORKDIR/state.db"
+
+          network:
+            pool_size: $CONCH_NETWORK_POOL_SIZE
+            dynamic_reservation: false
+            bridge_count: 1
+            tap_ip: 192.168.100.2
+            tap_mask: 24
+
+          containerd:
+            root_dir: "$CONCH_BENCH_WORKDIR/containerd-root"
+            state_dir: "$CONCH_BENCH_WORKDIR/containerd-state"
+            default_namespace: "$CONCH_NAMESPACE"
+
+          image:
+            default_kernel_image: ""
+
+          sandbox:
+            vsock_signal_retry: 10ms
+            vsock_signal_timeout: 10m
+            request_timeout: 30m
+          YAML
+
+          cat > "$CONCH_SDK_CONFIG" <<YAML
+          sandbox:
+            unix_socket: ""
+            api_url: "http://127.0.0.1:$port"
+            sandbox_id: ""
+
+          snapshot:
+            snapshot_id: ""
+            vmm_name: "$CONCH_E2B_VMM_NAME"
+            vcpu_num: 2
+            vcpu_max: 2
+            ram_mb: 2048
+
+          image:
+            image_name: "$snapshot_image"
+            use_snapshot: false
+            vmm_name: "$CONCH_E2B_VMM_NAME"
+            vcpu_num: 2
+            vcpu_max: 2
+            ram_mb: 2048
+          YAML
+
+          {
+            echo "Conch commit: $conch_commit"
+            echo "Rootfs digest: $rootfs_digest"
+            echo "Kernel digest: $kernel_digest"
+            echo "Initrd digest: $initrd_digest"
+            echo "Snapshot image: $snapshot_image"
+            echo "Snapshot cache hit: $snapshot_cache_hit"
+          } | tee "$CONCH_BENCH_RESULTS_DIR/preparation.txt"
+
+      - name: Start conchd
+        working-directory: conch-src
+        run: |
+          set -euo pipefail
+
+          sudo -n sh -c 'exec env PATH="$1" HOME="$2" CONCH_API_TIMEOUT="$3" ./bin/conchd -config "$4" > "$5" 2>&1' \
+            sh \
+            "$PATH" \
+            "$HOME" \
+            "$CONCH_API_TIMEOUT" \
+            "$CONCH_CONFIG" \
+            "$CONCHD_LOG" &
+          echo "$!" > "$CONCHD_PID_FILE"
+
+          for _ in $(seq 1 120); do
+            if curl -fsS -X POST "$CONCH_API_URL/api/snapshot/list" \
+              -H 'Content-Type: application/json' \
+              -d "{\"namespace\":\"$CONCH_NAMESPACE\"}" >/dev/null 2>&1; then
+              echo "conchd is ready at $CONCH_API_URL"
+              exit 0
+            fi
+            if [ -f "$CONCHD_SERVICE_PID_FILE" ]; then
+              service_pid="$(cat "$CONCHD_SERVICE_PID_FILE")"
+              if ! sudo -n kill -0 "$service_pid" >/dev/null 2>&1; then
+                echo "::error::conchd exited before becoming ready" >&2
+                sed -n '1,240p' "$CONCHD_LOG" >&2 || true
+                exit 1
+              fi
+            fi
+            sleep 1
+          done
+
+          echo "::error::timed out waiting for conchd" >&2
+          sed -n '1,240p' "$CONCHD_LOG" >&2 || true
+          exit 1
+
+      - name: Set up E2B SDK runner
+        id: e2b-sdk-runner
+        uses: ./.github/actions/setup-e2b-sdk-runner
+        with:
+          image-name: conch/startup-benchmark-runner:${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Prepare cached snapshot image
+        working-directory: conch-src
+        run: |
+          set -euo pipefail
+
+          cleanup_prepare_sandbox() {
+            payload="$(printf '{"namespace":"%s","sandbox_id":"%s"}' "$CONCH_NAMESPACE" "$CONCH_PREP_SANDBOX_ID")"
+            curl -fsS -X POST "$CONCH_API_URL/api/sandbox/delete" \
+              -H 'Content-Type: application/json' \
+              -d "$payload" >/dev/null 2>&1 || true
+          }
+
+          if [ "$CONCH_STARTUP_SNAPSHOT_CACHE_HIT" = "true" ]; then
+            echo "Using cached snapshot image: $CONCH_BENCHMARK_SNAPSHOT_IMAGE"
+          else
+            echo "Snapshot cache miss; converting weekly rootfs image to a local boot image."
+            ./bin/conch convert \
+              --config "$CONCH_CONFIG" \
+              -n "$CONCH_NAMESPACE" \
+              --plain-http \
+              --source "$CONCH_E2B_ROOTFS_IMAGE" \
+              --kernel "$CONCH_KERNEL_PATH" \
+              --initrd "$CONCH_INITRD_PATH" \
+              -t "$CONCH_LOCAL_BOOT_IMAGE"
+
+            ./bin/conch unpack \
+              --config "$CONCH_CONFIG" \
+              -n "$CONCH_NAMESPACE" \
+              "$CONCH_LOCAL_BOOT_IMAGE"
+
+            trap cleanup_prepare_sandbox EXIT
+
+            conch_src="$PWD"
+            runner_uid="$(id -u)"
+            runner_gid="$(id -g)"
+            container_home="$CONCH_BENCH_WORKDIR/prepare-home"
+            container_tmp="$CONCH_BENCH_WORKDIR/prepare-tmp"
+            mkdir -p "$container_home" "$container_tmp"
+
+            sudo -n "${{ steps.e2b-sdk-runner.outputs.runtime }}" run --rm -i \
+              --network host \
+              --security-opt seccomp=unconfined \
+              --user "$runner_uid:$runner_gid" \
+              -v "$conch_src:$conch_src" \
+              -v "$CONCH_BENCH_WORKDIR:$CONCH_BENCH_WORKDIR" \
+              -w "$conch_src" \
+              -e "CONCH_SDK_CONFIG=$CONCH_SDK_CONFIG" \
+              -e "CONCH_LOCAL_BOOT_IMAGE=$CONCH_LOCAL_BOOT_IMAGE" \
+              -e "CONCH_NAMESPACE=$CONCH_NAMESPACE" \
+              -e "CONCH_PREP_SANDBOX_ID=$CONCH_PREP_SANDBOX_ID" \
+              -e "CONCH_BENCH_WORKDIR=$CONCH_BENCH_WORKDIR" \
+              -e "HOME=$container_home" \
+              -e "TMPDIR=$container_tmp" \
+              -e PYTHONUNBUFFERED=1 \
+              "${{ steps.e2b-sdk-runner.outputs.image-name }}" sh <<'SH'
+          set -eu
+          python -m venv --without-pip --system-site-packages "$CONCH_BENCH_WORKDIR/startup-prepare-venv"
+          . "$CONCH_BENCH_WORKDIR/startup-prepare-venv/bin/activate"
+          python -m pip --version
+          python -m pip install --no-deps --progress-bar off './sdk'
+          python - <<'PY'
+          import os
+
+          from conch import Sandbox
+
+          sandbox = Sandbox.create(
+              config_path=os.environ["CONCH_SDK_CONFIG"],
+              image_name=os.environ["CONCH_LOCAL_BOOT_IMAGE"],
+              namespace=os.environ["CONCH_NAMESPACE"],
+              sandbox_id=os.environ["CONCH_PREP_SANDBOX_ID"],
+              use_snapshot=False,
+              vcpu_num=2,
+              ram_mb=2048,
+          )
+          print(f"created preparation sandbox: {sandbox.sandbox_id}")
+          PY
+          SH
+
+            ./bin/conch snapshot export \
+              --config "$CONCH_CONFIG" \
+              -n "$CONCH_NAMESPACE" \
+              --sandbox-id "$CONCH_PREP_SANDBOX_ID" \
+              -t "$CONCH_LOCAL_SNAPSHOT_IMAGE"
+
+            trap - EXIT
+            cleanup_prepare_sandbox
+
+            if ./bin/conch push \
+              --config "$CONCH_CONFIG" \
+              -n "$CONCH_NAMESPACE" \
+              --plain-http \
+              "$CONCH_LOCAL_SNAPSHOT_IMAGE" \
+              "$CONCH_BENCHMARK_SNAPSHOT_IMAGE"; then
+              ./bin/conch pull \
+                --config "$CONCH_CONFIG" \
+                -n "$CONCH_NAMESPACE" \
+                --plain-http \
+                "$CONCH_BENCHMARK_SNAPSHOT_IMAGE"
+              {
+                echo "Benchmark snapshot image: $CONCH_BENCHMARK_SNAPSHOT_IMAGE"
+                echo "Snapshot cache write: true"
+              } >> "$CONCH_BENCH_RESULTS_DIR/preparation.txt"
+            else
+              echo "::warning::Failed to push startup snapshot cache; using local snapshot image for this run." >&2
+              echo "CONCH_BENCHMARK_SNAPSHOT_IMAGE=$CONCH_LOCAL_SNAPSHOT_IMAGE" >> "$GITHUB_ENV"
+              {
+                echo "Benchmark snapshot image: $CONCH_LOCAL_SNAPSHOT_IMAGE"
+                echo "Snapshot cache write: false"
+              } >> "$CONCH_BENCH_RESULTS_DIR/preparation.txt"
+            fi
+          fi
+
+          if [ "$CONCH_STARTUP_SNAPSHOT_CACHE_HIT" = "true" ]; then
+            ./bin/conch pull \
+              --config "$CONCH_CONFIG" \
+              -n "$CONCH_NAMESPACE" \
+              --plain-http \
+              "$CONCH_BENCHMARK_SNAPSHOT_IMAGE"
+          fi
+
+      - name: Run startup benchmark
+        run: |
+          set -euo pipefail
+
+          venv="$CONCH_BENCH_WORKDIR/startup-benchmark-venv"
+          python -m venv --system-site-packages "$venv"
+          . "$venv/bin/activate"
+          python --version
+          python -m pip install --progress-bar off \
+            PyYAML \
+            requests \
+            requests-unixsocket \
+            grpcio \
+            grpcio-tools \
+            packaging
+
+          sdk_import_root="$CONCH_BENCH_WORKDIR/sdk-import"
+          rm -rf "$sdk_import_root"
+          mkdir -p "$sdk_import_root"
+          ln -s "$PWD/conch-src/sdk" "$sdk_import_root/conch"
+
+          PYTHONPATH="$sdk_import_root:$PWD/conch-src" \
+          PYTHONUNBUFFERED=1 \
+          python -u .github/scripts/startup_benchmark.py \
+            --config-path "$CONCH_SDK_CONFIG" \
+            --image-name "$CONCH_BENCHMARK_SNAPSHOT_IMAGE" \
+            --namespace "$CONCH_NAMESPACE" \
+            --results-dir "$CONCH_BENCH_RESULTS_DIR" \
+            --concurrency "$CONCH_STARTUP_CONCURRENCY" \
+            --single-iterations "$CONCH_STARTUP_SINGLE_ITERATIONS"
+
+      - name: Collect benchmark logs
+        if: always()
+        run: |
+          set +e
+          mkdir -p startup-benchmark-results/logs
+          if [ -n "${CONCHD_LOG:-}" ] && [ -f "$CONCHD_LOG" ]; then
+            cp "$CONCHD_LOG" startup-benchmark-results/logs/conchd.log
+          fi
+          if [ -n "${CONCH_CONFIG:-}" ] && [ -f "$CONCH_CONFIG" ]; then
+            cp "$CONCH_CONFIG" startup-benchmark-results/logs/conchd-config.yaml
+          fi
+          if [ -n "${CONCH_SDK_CONFIG:-}" ] && [ -f "$CONCH_SDK_CONFIG" ]; then
+            cp "$CONCH_SDK_CONFIG" startup-benchmark-results/logs/sdk-config.yaml
+          fi
+
+      - name: Write benchmark job summary
+        if: always()
+        run: |
+          set +e
+          if [ -f startup-benchmark-results/summary.md ]; then
+            cat startup-benchmark-results/summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Dump conchd log on failure
+        if: failure()
+        run: |
+          set -euo pipefail
+          if [ -n "${CONCHD_LOG:-}" ] && [ -f "$CONCHD_LOG" ]; then
+            sed -n '1,500p' "$CONCHD_LOG"
+          fi
+
+      - name: Dump network diagnostics on failure
+        if: failure()
+        run: |
+          set +e
+          sudo ip addr show
+          sudo ip route show
+          sudo ip netns list
+          sudo iptables -t nat -S
+          sudo bridge link
+          for ns in $(sudo ip netns list | awk '{print $1}'); do
+            echo "===== netns: $ns ====="
+            sudo ip netns exec "$ns" ip addr show
+            sudo ip netns exec "$ns" ip route show
+            sudo ip netns exec "$ns" iptables -t nat -S
+          done
+
+      - name: Upload benchmark artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conch-startup-benchmark-results
+          path: startup-benchmark-results
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Cleanup startup benchmark resources
+        if: always()
+        run: |
+          set +e
+
+          if [ -n "${CONCHD_PID_FILE:-}" ] && [ -f "$CONCHD_PID_FILE" ]; then
+            conchd_pid="$(cat "$CONCHD_PID_FILE")"
+            if kill -0 "$conchd_pid" >/dev/null 2>&1; then
+              sudo kill "$conchd_pid" >/dev/null 2>&1 || true
+              for _ in $(seq 1 30); do
+                kill -0 "$conchd_pid" >/dev/null 2>&1 || break
+                sleep 1
+              done
+              kill -0 "$conchd_pid" >/dev/null 2>&1 && sudo kill -9 "$conchd_pid" >/dev/null 2>&1 || true
+            fi
+          fi
+
+          if [ -n "${CONCHD_SERVICE_PID_FILE:-}" ] && [ -f "$CONCHD_SERVICE_PID_FILE" ]; then
+            service_pid="$(cat "$CONCHD_SERVICE_PID_FILE")"
+            if sudo kill -0 "$service_pid" >/dev/null 2>&1; then
+              sudo kill "$service_pid" >/dev/null 2>&1 || true
+              for _ in $(seq 1 30); do
+                sudo kill -0 "$service_pid" >/dev/null 2>&1 || break
+                sleep 1
+              done
+              sudo kill -0 "$service_pid" >/dev/null 2>&1 && sudo kill -9 "$service_pid" >/dev/null 2>&1 || true
+            fi
+          fi
+
+          if [ -n "${CONCH_BENCH_WORKDIR:-}" ]; then
+            sudo rm -rf "$CONCH_BENCH_WORKDIR"
+          fi
+          for ns in $(sudo ip netns list | awk '/^ns-[0-9]+([[:space:]]|$)/ {print $1}'); do
+            echo "Deleting stale Conch netns: $ns"
+            sudo ip netns delete "$ns" || true
+          done
+          sudo rm -rf /var/lib/cni/networks/conch-bridge /var/lib/cni/results/conch-bridge
+          for bridge in cni-conch0 conch_bridge; do
+            if sudo ip link show "$bridge" >/dev/null 2>&1; then
+              echo "Deleting stale Conch bridge: $bridge"
+              sudo ip link delete "$bridge" || true
+            fi
+          done
+          sudo rm -rf "$GITHUB_WORKSPACE/conch-src"
+
+          runtime=""
+          if command -v docker >/dev/null 2>&1; then
+            runtime=docker
+          elif command -v podman >/dev/null 2>&1; then
+            runtime=podman
+          fi
+          if [ -n "$runtime" ]; then
+            sudo -n "$runtime" rmi -f "${{ steps.e2b-sdk-runner.outputs.image-name }}" >/dev/null 2>&1 || true
+            sudo -n "$runtime" container prune -f || true
+            sudo -n "$runtime" volume prune -f || true
+            sudo -n "$runtime" builder prune -af || true
+            sudo -n "$runtime" image prune -f || true
+          fi
