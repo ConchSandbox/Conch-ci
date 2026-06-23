@@ -57,27 +57,33 @@ runs:
             ;;
         esac
 
-        registry_url="http://${registry_host}/v2/"
-        if curl -fsS "$registry_url" >/dev/null; then
-          echo "Using existing local registry: $registry_url"
-          {
-            echo "started=false"
-            echo "runtime="
-          } >> "$GITHUB_OUTPUT"
-          exit 0
-        fi
-
         runtime=""
         if command -v docker >/dev/null 2>&1; then
           runtime=docker
         elif command -v podman >/dev/null 2>&1; then
           runtime=podman
-        else
+        fi
+
+        registry_url="http://${registry_host}/v2/"
+        if [ -n "$runtime" ]; then
+          sudo -n "$runtime" rm -fv "$CONTAINER_NAME" >/dev/null 2>&1 || true
+          sudo -n "$runtime" volume prune -f || true
+        fi
+
+        if curl -fsS "$registry_url" >/dev/null; then
+          echo "Using existing local registry: $registry_url"
+          {
+            echo "started=false"
+            echo "runtime=$runtime"
+          } >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        if [ -z "$runtime" ]; then
           echo "::error::No container runtime found for local registry. Install docker or podman on the self-hosted runner." >&2
           exit 1
         fi
 
-        sudo -n "$runtime" rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
         sudo -n "$runtime" pull "$REGISTRY_IMAGE"
         if [ -n "$STORAGE_PATH" ]; then
           sudo -n mkdir -p "$STORAGE_PATH"
