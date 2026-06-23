@@ -1,4 +1,6 @@
 from pathlib import Path
+import os
+import tempfile
 import unittest
 
 import startup_benchmark
@@ -117,6 +119,49 @@ class StartupBenchmarkTest(unittest.TestCase):
         self.assertIsNotNone(makespan)
         self.assertEqual(len(FakeSandbox.created), 3)
         self.assertEqual(len(FakeSandbox.deleted), 3)
+
+    def test_write_outputs_leaves_github_step_summary_to_workflow(self):
+        sample = {
+            "scenario": "snapshot_single",
+            "sample_index": 1,
+            "sandbox_id": "sandbox-1",
+            "use_snapshot": True,
+            "status": "success",
+            "failure_phase": "",
+            "started_at": "2026-06-23T00:00:00.000Z",
+            "finished_at": "2026-06-23T00:00:01.000Z",
+            "create": {"status": "success", "latency_seconds": 0.1},
+            "validation": {"status": "success"},
+            "cleanup": {"status": "success"},
+        }
+        scenario_summary = startup_benchmark.summarize_samples("snapshot_single", [sample])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            results_dir = Path(tmp, "results")
+            step_summary = Path(tmp, "github-step-summary.md")
+            step_summary.write_text("existing\n", encoding="utf-8")
+            old_step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
+            os.environ["GITHUB_STEP_SUMMARY"] = str(step_summary)
+            try:
+                startup_benchmark.write_outputs(
+                    results_dir=results_dir,
+                    samples=[sample],
+                    scenario_summaries=[scenario_summary],
+                    parameters={
+                        "concurrency": 1,
+                        "single_iterations": 1,
+                        "vcpu_num": 2,
+                        "ram_mb": 2048,
+                    },
+                )
+            finally:
+                if old_step_summary is None:
+                    os.environ.pop("GITHUB_STEP_SUMMARY", None)
+                else:
+                    os.environ["GITHUB_STEP_SUMMARY"] = old_step_summary
+
+            self.assertTrue(results_dir.joinpath("summary.md").exists())
+            self.assertEqual(step_summary.read_text(encoding="utf-8"), "existing\n")
 
     def test_workflow_uses_guest_agent_static_tap_network(self):
         repo_root = Path(__file__).resolve().parents[2]

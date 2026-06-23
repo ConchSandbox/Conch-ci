@@ -514,12 +514,6 @@ def write_outputs(
     markdown_path = results_dir / "summary.md"
     markdown_path.write_text(markdown, encoding="utf-8")
 
-    github_summary = os.environ.get("GITHUB_STEP_SUMMARY")
-    if github_summary:
-        with open(github_summary, "a", encoding="utf-8") as handle:
-            handle.write(markdown)
-            handle.write("\n")
-
     return summary
 
 
