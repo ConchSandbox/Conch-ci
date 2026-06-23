@@ -99,10 +99,10 @@ def new_code_interpreter_sandbox(envd_url, sandbox_ip):
 
 def dump_guest_logs(e2b):
     for path in (
-        "/var/log/conch-agent/conch-agent.log",
-        "/var/log/conch-agent/envd.log",
-        "/var/log/conch-agent/code-interpreter.log",
-        "/var/log/conch-agent/service.log",
+        "/var/log/conch-init/conch-init.log",
+        "/var/log/conch-init/envd.log",
+        "/var/log/conch-init/code-interpreter.log",
+        "/var/log/conch-init/service.log",
     ):
         try:
             log(f"guest log: {path}")

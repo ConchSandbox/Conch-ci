@@ -1,4 +1,4 @@
-name: Conch-agent E2E
+name: Conch-init E2E
 run-name: ${{ github.event.inputs.ci_marker || github.event.inputs.conch_ref || github.ref_name }}
 
 on:
@@ -32,7 +32,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: conch-agent-init-e2e-${{ github.workflow }}
+  group: conch-init-e2e-${{ github.workflow }}
   cancel-in-progress: false
 
 env:
@@ -55,7 +55,7 @@ defaults:
 
 jobs:
   agent-init:
-    name: Agent Init Mode
+    name: Conch Init Mode
     runs-on: [self-hosted, Linux]
     timeout-minutes: 45
 
@@ -88,7 +88,7 @@ jobs:
       - name: Check self-hosted runtime prerequisites
         uses: ./.github/actions/check-self-hosted-runtime-prerequisites
         with:
-          required-commands: curl git tar gzip cpio file ip python3
+          required-commands: curl git tar gzip cpio file ip python3 make rustc cargo rustup
           vmm-name: ${{ env.CONCH_E2E_VMM_NAME }}
           kernel-path: ${{ env.CONCH_KERNEL_PATH }}
           kernel-name: Linux kernel image
@@ -111,21 +111,33 @@ jobs:
           go-version: 1.26.x
           cache-dependency-path: conch-src/go.sum
 
+      - name: Set up Rust
+        run: |
+          set -euo pipefail
+          rustc --version
+          cargo --version
+          case "$(uname -m)" in
+            x86_64) rust_target=x86_64-unknown-linux-musl ;;
+            aarch64|arm64) rust_target=aarch64-unknown-linux-musl ;;
+            *) echo "::error::unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
+          rustup target add "$rust_target"
+
       - name: Set up Python
         run: |
           set -euo pipefail
 
           python3 --version
-          python3 -m venv "${RUNNER_TEMP:-/tmp}/conch-agent-init-python"
-          echo "${RUNNER_TEMP:-/tmp}/conch-agent-init-python/bin" >> "$GITHUB_PATH"
-          "${RUNNER_TEMP:-/tmp}/conch-agent-init-python/bin/python" -m pip install --upgrade pip
-          "${RUNNER_TEMP:-/tmp}/conch-agent-init-python/bin/python" --version
+          python3 -m venv "${RUNNER_TEMP:-/tmp}/conch-init-python"
+          echo "${RUNNER_TEMP:-/tmp}/conch-init-python/bin" >> "$GITHUB_PATH"
+          "${RUNNER_TEMP:-/tmp}/conch-init-python/bin/python" -m pip install --upgrade pip
+          "${RUNNER_TEMP:-/tmp}/conch-init-python/bin/python" --version
 
       - name: Prepare e2e workspace
         run: |
           set -euo pipefail
 
-          workdir="${RUNNER_TEMP:-/tmp}/conch-agent-init-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          workdir="${RUNNER_TEMP:-/tmp}/conch-init-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           sudo rm -rf "$workdir"
           mkdir -p "$workdir"
 
@@ -135,21 +147,21 @@ jobs:
           {
             echo "CONCH_AGENT_E2E_WORKDIR=$workdir"
             echo "CONCH_AGENT_ROOTFS=$workdir/rootfs"
-            echo "CONCH_AGENT_INITRAMFS=$workdir/conch-agent-initramfs.cpio.gz"
+            echo "CONCH_AGENT_INITRAMFS=$workdir/conch-init-initramfs.cpio.gz"
             echo "CONCH_AGENT_CONSOLE_LOG=$workdir/console.log"
             echo "CONCH_AGENT_VMM_LOG=$workdir/cloud-hypervisor.log"
             echo "CONCH_AGENT_VMM_API=$workdir/cloud-hypervisor.sock"
-            echo "CONCH_AGENT_VSOCK_SOCKET=$workdir/conch-agent.vsock"
+            echo "CONCH_AGENT_VSOCK_SOCKET=$workdir/conch-init.vsock"
             echo "CONCH_AGENT_VMM_PID_FILE=$workdir/cloud-hypervisor.pid"
             echo "CONCH_AGENT_TAP_NAME=$tap_name"
             echo "CONCH_AGENT_HOST_IP=192.168.100.2"
             echo "CONCH_AGENT_GUEST_IP=192.168.100.21"
             echo "CONCH_AGENT_NET_CIDR=192.168.100.2/24"
-            echo "CONCH_AGENT_SANDBOX_ID=sandbox_agent_init_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
-            echo "CONCH_AGENT_TOKEN=conch-agent-init-token-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            echo "CONCH_AGENT_SANDBOX_ID=sandbox_conch_init_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+            echo "CONCH_AGENT_TOKEN=conch-init-token-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           } >> "$GITHUB_ENV"
 
-      - name: Build conch-agent initramfs
+      - name: Build conch-init initramfs
         working-directory: conch-src
         run: |
           set -euo pipefail
@@ -161,7 +173,7 @@ jobs:
             MODULES_DIR="${CONCH_AGENT_KERNEL_MODULES:-}" \
             ALPINE_VERSION="$ALPINE_VERSION" \
             ALPINE_MIRROR="$ALPINE_MIRROR" \
-            make build-agent-initramfs
+            make build-conch-init-initramfs
           file "$CONCH_AGENT_INITRAMFS"
 
       - name: Start cloud-hypervisor VM
@@ -219,19 +231,19 @@ jobs:
           sed -n '1,200p' "$CONCH_AGENT_VMM_LOG" >&2 || true
           exit 1
 
-      - name: Wait for agent init boot log
+      - name: Wait for conch-init boot log
         run: |
           set -euo pipefail
 
           for _ in $(seq 1 120); do
-            if grep -q 'Starting conch-agent as init process' "$CONCH_AGENT_CONSOLE_LOG" 2>/dev/null; then
-              grep 'Starting conch-agent as init process' "$CONCH_AGENT_CONSOLE_LOG"
+            if grep -q 'Starting conch-init as init process' "$CONCH_AGENT_CONSOLE_LOG" 2>/dev/null; then
+              grep 'Starting conch-init as init process' "$CONCH_AGENT_CONSOLE_LOG"
               exit 0
             fi
             sleep 1
           done
 
-          echo "::error::Timed out waiting for conch-agent init log" >&2
+          echo "::error::Timed out waiting for conch-init init log" >&2
           sed -n '1,240p' "$CONCH_AGENT_CONSOLE_LOG" >&2 || true
           exit 1
 
@@ -273,10 +285,10 @@ jobs:
                   last_error = exc
               time.sleep(1)
 
-          raise SystemExit(f"timed out waiting for agent vsock READY response: {last_error}")
+          raise SystemExit(f"timed out waiting for conch-init vsock READY response: {last_error}")
           PY
 
-      - name: Verify agent gRPC API over tap network
+      - name: Verify conch-init gRPC API over tap network
         working-directory: conch-src
         run: |
           set -euo pipefail
@@ -293,7 +305,7 @@ jobs:
           from api.py_proto import agent_pb2, agent_pb2_grpc
 
           target = f"{os.environ['CONCH_AGENT_GUEST_IP']}:{os.environ['CONCH_AGENT_GRPC_PORT']}"
-          expected = f"conch-agent-init:{os.environ['GITHUB_RUN_ID']}:{os.environ['GITHUB_RUN_ATTEMPT']}"
+          expected = f"conch-init:{os.environ['GITHUB_RUN_ID']}:{os.environ['GITHUB_RUN_ATTEMPT']}"
           metadata = (("x-conch-agent-token", os.environ["CONCH_AGENT_TOKEN"]),)
           deadline = time.time() + 120
           last_error = None
@@ -329,8 +341,8 @@ jobs:
                       )
                   if expected not in result.stdout:
                       raise RuntimeError(f"missing expected command marker in stdout: {result.stdout!r}")
-                  if "conch-agent" not in result.stdout:
-                      raise RuntimeError(f"PID 1 does not look like conch-agent: {result.stdout!r}")
+                  if "conch-init" not in result.stdout:
+                      raise RuntimeError(f"PID 1 does not look like conch-init: {result.stdout!r}")
 
                   print(result.stdout)
                   raise SystemExit(0)
@@ -358,7 +370,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: conch-agent-init-e2e-logs
+          name: conch-init-e2e-logs
           path: |
             ${{ env.CONCH_AGENT_VMM_LOG }}
             ${{ env.CONCH_AGENT_CONSOLE_LOG }}

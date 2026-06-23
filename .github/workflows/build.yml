@@ -52,6 +52,7 @@ jobs:
             liblz4-dev \
             liblzma-dev \
             libtool \
+            musl-tools \
             libzstd-dev \
             pkg-config \
             protobuf-compiler \
@@ -102,6 +103,19 @@ jobs:
           go-version: 1.26.x
           cache-dependency-path: conch-src/go.sum
 
+      - name: Set up Rust
+        working-directory: conch-src
+        run: |
+          set -euo pipefail
+          rustc --version
+          cargo --version
+          case "$(uname -m)" in
+            x86_64) rust_target=x86_64-unknown-linux-musl ;;
+            aarch64|arm64) rust_target=aarch64-unknown-linux-musl ;;
+            *) echo "::error::unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
+          rustup target add "$rust_target"
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -123,10 +137,9 @@ jobs:
         working-directory: conch-src
         run: |
           set -euo pipefail
-          make gen-proto-go
           python -m pip install --upgrade pip
           python -m pip install grpcio-tools
-          make gen-proto-py
+          make gen-proto
 
       - name: Check shell script syntax
         working-directory: conch-src
@@ -165,7 +178,16 @@ jobs:
         working-directory: conch-src
         run: |
           set -euo pipefail
-          go build ./cmd/conch ./cmd/conchd ./cmd/conch-agent
+          go build ./cmd/conch ./cmd/conchd
+
+      - name: Check and build conch-init
+        working-directory: conch-src
+        run: |
+          set -euo pipefail
+          make -C conch-init check
+          make -C conch-init test
+          make build-conch-init
+          test -x ./bin/conch-init
 
       - name: Run Go tests
         working-directory: conch-src

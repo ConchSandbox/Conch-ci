@@ -64,8 +64,8 @@ env:
   CONCH_CLOUD_HYPERVISOR_ARM64_ASSET_REF: cloud-hypervisor-static-aarch64
   CONCH_MKFS_EROFS_REQUIRED_FLAG: --fsalignblks
 
-  CONCH_IMAGE_BUILD_REQUIRED_COMMANDS: git protoc mkfs.erofs curl ip iptables buildctl tar gzip cpio file python3
-  CONCH_SDK_E2E_REQUIRED_COMMANDS: git protoc mkfs.erofs curl ip iptables python3 timeout
+  CONCH_IMAGE_BUILD_REQUIRED_COMMANDS: git protoc mkfs.erofs curl ip iptables buildctl tar gzip cpio file python3 make rustc cargo rustup
+  CONCH_SDK_E2E_REQUIRED_COMMANDS: git protoc mkfs.erofs curl ip iptables python3 timeout make rustc cargo rustup
   OPENEULER_GIT_PACKAGES: git
   OPENEULER_PROTOC_PACKAGES: protobuf protobuf-compiler
   OPENEULER_EROFS_PACKAGES: erofs-utils
@@ -148,6 +148,18 @@ jobs:
           go-version: 1.26.x
           cache-dependency-path: conch-src/go.sum
 
+      - name: Set up Rust
+        run: |
+          set -euo pipefail
+          rustc --version
+          cargo --version
+          case "$(uname -m)" in
+            x86_64) rust_target=x86_64-unknown-linux-musl ;;
+            aarch64|arm64) rust_target=aarch64-unknown-linux-musl ;;
+            *) echo "::error::unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
+          rustup target add "$rust_target"
+
       - name: Set up Python
         run: |
           set -euo pipefail
@@ -168,7 +180,8 @@ jobs:
           make build
           test -x ./bin/conch
           test -x ./bin/conchd
-          test -x ./bin/conch-agent
+          make build-conch-init
+          test -x ./bin/conch-init
 
       - name: Prepare image build names
         run: |
@@ -260,8 +273,8 @@ jobs:
             echo "CONCHD_LOG=$workdir/conchd.log"
             echo "CONCHD_PID_FILE=$workdir/conchd.pid"
             echo "CONCHD_SERVICE_PID_FILE=$workdir/conchd-service.pid"
-            echo "CONCH_INITRD_PATH=$workdir/conch-agent-initramfs.cpio.gz"
-            echo "CONCH_AGENT_ROOTFS=$workdir/initramfs-rootfs"
+            echo "CONCH_INITRD_PATH=$workdir/conch-init-initramfs.cpio.gz"
+            echo "CONCH_INIT_ROOTFS=$workdir/initramfs-rootfs"
           } >> "$GITHUB_ENV"
 
       - name: Set up local registry
@@ -317,16 +330,16 @@ jobs:
             "http://${CONCH_E2B_REGISTRY}/v2/${repository}/manifests/${reference}" >/dev/null
           echo "Prebuilt E2B rootfs image is available: $CONCH_E2B_ROOTFS_IMAGE"
 
-      - name: Build Conch agent initramfs
+      - name: Build conch-init initramfs
         working-directory: conch-src
         run: |
           set -euo pipefail
           OUTPUT="$CONCH_INITRD_PATH" \
             WORK_DIR="$CONCH_E2B_WORKDIR/initramfs-work" \
-            ROOTFS_DIR="$CONCH_AGENT_ROOTFS" \
+            ROOTFS_DIR="$CONCH_INIT_ROOTFS" \
             ALPINE_VERSION="$ALPINE_VERSION" \
             ALPINE_MIRROR="$ALPINE_MIRROR" \
-            make build-agent-initramfs
+            make build-conch-init-initramfs
           file "$CONCH_INITRD_PATH"
 
       - name: Prepare isolated Conch image configuration
@@ -681,6 +694,18 @@ jobs:
           go-version: 1.26.x
           cache-dependency-path: conch-src/go.sum
 
+      - name: Set up Rust
+        run: |
+          set -euo pipefail
+          rustc --version
+          cargo --version
+          case "$(uname -m)" in
+            x86_64) rust_target=x86_64-unknown-linux-musl ;;
+            aarch64|arm64) rust_target=aarch64-unknown-linux-musl ;;
+            *) echo "::error::unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
+          rustup target add "$rust_target"
+
       - name: Set up Python
         run: |
           set -euo pipefail
@@ -701,7 +726,8 @@ jobs:
           make build
           test -x ./bin/conch
           test -x ./bin/conchd
-          test -x ./bin/conch-agent
+          make build-conch-init
+          test -x ./bin/conch-init
 
       - name: Prepare isolated E2B SDK configuration
         run: |
