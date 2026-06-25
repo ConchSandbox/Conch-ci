@@ -64,8 +64,8 @@ env:
   CONCH_CLOUD_HYPERVISOR_ARM64_ASSET_REF: cloud-hypervisor-static-aarch64
   CONCH_MKFS_EROFS_REQUIRED_FLAG: --fsalignblks
 
-  CONCH_IMAGE_BUILD_REQUIRED_COMMANDS: git protoc mkfs.erofs curl ip iptables buildctl tar gzip cpio file python3
-  CONCH_SDK_E2E_REQUIRED_COMMANDS: git protoc mkfs.erofs curl ip iptables python3 timeout
+  CONCH_IMAGE_BUILD_REQUIRED_COMMANDS: git protoc mkfs.erofs curl ip iptables buildctl tar gzip cpio file python3 make rustc cargo
+  CONCH_SDK_E2E_REQUIRED_COMMANDS: git protoc mkfs.erofs curl ip iptables python3 timeout make rustc cargo
   OPENEULER_GIT_PACKAGES: git
   OPENEULER_PROTOC_PACKAGES: protobuf protobuf-compiler
   OPENEULER_EROFS_PACKAGES: erofs-utils
@@ -148,6 +148,53 @@ jobs:
           go-version: 1.26.x
           cache-dependency-path: conch-src/go.sum
 
+      - name: Set up Rust
+        run: |
+          set -euo pipefail
+
+          case "$(uname -m)" in
+            x86_64) rust_target=x86_64-unknown-linux-musl ;;
+            aarch64|arm64) rust_target=aarch64-unknown-linux-musl ;;
+            *) echo "::error::unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
+
+          rustc --version
+          cargo --version
+
+          cargo_minor="$(cargo --version | awk '{print $2}' | cut -d. -f2)"
+          needs_rustup=false
+          if [ -z "$cargo_minor" ] || [ "$cargo_minor" -lt 85 ]; then
+            echo "Cargo is too old for Rust 2024 edition; using rustup stable toolchain"
+            needs_rustup=true
+          fi
+
+          target_libdir="$(rustc --print target-libdir --target "$rust_target" 2>/dev/null || true)"
+          if [ -z "$target_libdir" ] || ! compgen -G "$target_libdir/libstd-*.rlib" >/dev/null; then
+            echo "Rust target standard library is missing: $rust_target"
+            needs_rustup=true
+          fi
+
+          if [ "$needs_rustup" = true ]; then
+            if ! command -v rustup >/dev/null 2>&1; then
+              echo "rustup not found; installing minimal rustup toolchain for $rust_target"
+              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+              export PATH="$HOME/.cargo/bin:$PATH"
+              echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            fi
+            rustup default stable
+            rustup target add "$rust_target"
+          else
+            echo "Rust toolchain and target already satisfy conch-init build requirements"
+          fi
+
+          rustc --version
+          cargo --version
+          target_libdir="$(rustc --print target-libdir --target "$rust_target")"
+          if ! compgen -G "$target_libdir/libstd-*.rlib" >/dev/null; then
+            echo "::error::Rust target standard library is missing after setup: $rust_target" >&2
+            exit 1
+          fi
+
       - name: Set up Python
         run: |
           set -euo pipefail
@@ -168,7 +215,8 @@ jobs:
           make build
           test -x ./bin/conch
           test -x ./bin/conchd
-          test -x ./bin/conch-agent
+          make build-conch-init
+          test -x ./bin/conch-init
 
       - name: Prepare image build names
         run: |
@@ -260,8 +308,8 @@ jobs:
             echo "CONCHD_LOG=$workdir/conchd.log"
             echo "CONCHD_PID_FILE=$workdir/conchd.pid"
             echo "CONCHD_SERVICE_PID_FILE=$workdir/conchd-service.pid"
-            echo "CONCH_INITRD_PATH=$workdir/conch-agent-initramfs.cpio.gz"
-            echo "CONCH_AGENT_ROOTFS=$workdir/initramfs-rootfs"
+            echo "CONCH_INITRD_PATH=$workdir/conch-init-initramfs.cpio.gz"
+            echo "CONCH_INIT_ROOTFS=$workdir/initramfs-rootfs"
           } >> "$GITHUB_ENV"
 
       - name: Set up local registry
@@ -317,16 +365,16 @@ jobs:
             "http://${CONCH_E2B_REGISTRY}/v2/${repository}/manifests/${reference}" >/dev/null
           echo "Prebuilt E2B rootfs image is available: $CONCH_E2B_ROOTFS_IMAGE"
 
-      - name: Build Conch agent initramfs
+      - name: Build conch-init initramfs
         working-directory: conch-src
         run: |
           set -euo pipefail
           OUTPUT="$CONCH_INITRD_PATH" \
             WORK_DIR="$CONCH_E2B_WORKDIR/initramfs-work" \
-            ROOTFS_DIR="$CONCH_AGENT_ROOTFS" \
+            ROOTFS_DIR="$CONCH_INIT_ROOTFS" \
             ALPINE_VERSION="$ALPINE_VERSION" \
             ALPINE_MIRROR="$ALPINE_MIRROR" \
-            make build-agent-initramfs
+            make build-conch-init-initramfs
           file "$CONCH_INITRD_PATH"
 
       - name: Prepare isolated Conch image configuration
@@ -681,6 +729,53 @@ jobs:
           go-version: 1.26.x
           cache-dependency-path: conch-src/go.sum
 
+      - name: Set up Rust
+        run: |
+          set -euo pipefail
+
+          case "$(uname -m)" in
+            x86_64) rust_target=x86_64-unknown-linux-musl ;;
+            aarch64|arm64) rust_target=aarch64-unknown-linux-musl ;;
+            *) echo "::error::unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
+
+          rustc --version
+          cargo --version
+
+          cargo_minor="$(cargo --version | awk '{print $2}' | cut -d. -f2)"
+          needs_rustup=false
+          if [ -z "$cargo_minor" ] || [ "$cargo_minor" -lt 85 ]; then
+            echo "Cargo is too old for Rust 2024 edition; using rustup stable toolchain"
+            needs_rustup=true
+          fi
+
+          target_libdir="$(rustc --print target-libdir --target "$rust_target" 2>/dev/null || true)"
+          if [ -z "$target_libdir" ] || ! compgen -G "$target_libdir/libstd-*.rlib" >/dev/null; then
+            echo "Rust target standard library is missing: $rust_target"
+            needs_rustup=true
+          fi
+
+          if [ "$needs_rustup" = true ]; then
+            if ! command -v rustup >/dev/null 2>&1; then
+              echo "rustup not found; installing minimal rustup toolchain for $rust_target"
+              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+              export PATH="$HOME/.cargo/bin:$PATH"
+              echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            fi
+            rustup default stable
+            rustup target add "$rust_target"
+          else
+            echo "Rust toolchain and target already satisfy conch-init build requirements"
+          fi
+
+          rustc --version
+          cargo --version
+          target_libdir="$(rustc --print target-libdir --target "$rust_target")"
+          if ! compgen -G "$target_libdir/libstd-*.rlib" >/dev/null; then
+            echo "::error::Rust target standard library is missing after setup: $rust_target" >&2
+            exit 1
+          fi
+
       - name: Set up Python
         run: |
           set -euo pipefail
@@ -701,7 +796,8 @@ jobs:
           make build
           test -x ./bin/conch
           test -x ./bin/conchd
-          test -x ./bin/conch-agent
+          make build-conch-init
+          test -x ./bin/conch-init
 
       - name: Prepare isolated E2B SDK configuration
         run: |

@@ -7,9 +7,12 @@ ENV PIP_ROOT_USER_ACTION=ignore
 
 RUN python -m pip install \
         --progress-bar off \
-        'e2b-code-interpreter==2.5.0' \
+        'e2b-code-interpreter==2.6.2' \
+        'e2b==2.21.1' \
         grpcio-tools \
         packaging \
         PyYAML \
         requests \
         requests-unixsocket
+
+RUN python -m pip show e2b e2b-code-interpreter

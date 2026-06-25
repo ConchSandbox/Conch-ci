@@ -2,6 +2,7 @@ import os
 import sys
 import time
 import urllib.request
+from importlib import metadata
 from urllib.parse import urlparse
 
 import grpc
@@ -82,6 +83,27 @@ def wait_conch_health(sandbox, timeout=180):
     raise RuntimeError(f"timed out waiting for Conch health check: {last_health}")
 
 
+def verify_conch_agent_start_process(sandbox):
+    expected = f"conch-agent-grpc:{sandbox.sandbox_id}"
+    log(f"validating Conch agent StartProcess: sandbox_id={sandbox.sandbox_id} ip={sandbox.ip}")
+    result = sandbox.client.stub.StartProcess(
+        agent_pb2.StartProcessRequest(
+            cmd="sh",
+            args=["-c", f"printf '%s\\n' '{expected}'"],
+            cwd="/tmp",
+        ),
+        timeout=10,
+        metadata=sandbox.client._metadata(),
+    )
+    if result.exit_code != 0 or result.error:
+        raise RuntimeError(
+            f"Conch agent StartProcess failed: exit={result.exit_code} stdout={result.stdout!r} "
+            f"stderr={result.stderr!r} error={result.error!r}"
+        )
+    if expected not in result.stdout:
+        raise RuntimeError(f"Conch agent StartProcess stdout missing marker: {result.stdout!r}")
+
+
 def new_code_interpreter_sandbox(envd_url, sandbox_ip):
     config = ConnectionConfig(debug=True, sandbox_url=envd_url)
     sandbox = CodeInterpreterSandbox(
@@ -99,10 +121,10 @@ def new_code_interpreter_sandbox(envd_url, sandbox_ip):
 
 def dump_guest_logs(e2b):
     for path in (
-        "/var/log/conch-agent/conch-agent.log",
-        "/var/log/conch-agent/envd.log",
-        "/var/log/conch-agent/code-interpreter.log",
-        "/var/log/conch-agent/service.log",
+        "/var/log/conch-init/conch-init.log",
+        "/var/log/conch-init/envd.log",
+        "/var/log/conch-init/code-interpreter.log",
+        "/var/log/conch-init/service.log",
     ):
         try:
             log(f"guest log: {path}")
@@ -116,6 +138,9 @@ def logs_stdout_text(result):
 
 
 def main():
+    for package in ("e2b", "e2b-code-interpreter"):
+        log(f"{package} version: {metadata.version(package)}")
+
     log("creating Conch sandbox")
     conch_sandbox = ConchSandbox.create(
         config_path=os.environ["CONCH_SDK_CONFIG"],
@@ -127,6 +152,7 @@ def main():
     )
     log(f"created Conch sandbox: sandbox_id={conch_sandbox.sandbox_id} ip={conch_sandbox.ip}")
     wait_conch_health(conch_sandbox)
+    verify_conch_agent_start_process(conch_sandbox)
 
     sandbox_ip = conch_sandbox.ip
     envd_url = f"http://{sandbox_ip}:49983"

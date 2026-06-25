@@ -126,7 +126,7 @@ jobs:
           CI_ENABLED: ${{ github.event_name == 'workflow_dispatch' && inputs.atomgit_pr_number != '' }}
           CI_GITHUB_OWNER: ConchSandbox
           CI_GITHUB_REPO: Conch-ci
-          CI_GITHUB_REF: main
+          CI_GITHUB_REF: ${{ github.ref_name }}
           CI_WORKFLOWS: ${{ steps.ci-workflows.outputs.workflows || '' }}
           CI_CONCH_REPOSITORY: https://github.com/ConchSandbox/Conch.git
           CI_WAIT_FOR_COMPLETION: ${{ github.event_name == 'workflow_dispatch' && inputs.atomgit_pr_number != '' }}
