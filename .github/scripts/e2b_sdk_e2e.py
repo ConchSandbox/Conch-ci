@@ -2,6 +2,7 @@ import os
 import sys
 import time
 import urllib.request
+from importlib.metadata import version
 from urllib.parse import urlparse
 
 import grpc
@@ -116,6 +117,7 @@ def logs_stdout_text(result):
 
 
 def main():
+    log(f"using e2b={version('e2b')} e2b-code-interpreter={version('e2b-code-interpreter')}")
     log("creating Conch sandbox")
     conch_sandbox = ConchSandbox.create(
         config_path=os.environ["CONCH_SDK_CONFIG"],

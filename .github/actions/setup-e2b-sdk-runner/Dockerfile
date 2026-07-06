@@ -7,7 +7,8 @@ ENV PIP_ROOT_USER_ACTION=ignore
 
 RUN python -m pip install \
         --progress-bar off \
-        'e2b-code-interpreter==2.5.0' \
+        'e2b==2.30.0' \
+        'e2b-code-interpreter==2.8.1' \
         grpcio-tools \
         packaging \
         PyYAML \
