@@ -121,7 +121,7 @@ def load_config() -> Config:
         github_token=env("GITHUB_TOKEN", required=not dry_run),
         target_repo=env("GITHUB_TARGET_REPO", f"github.com/{github_owner}/{github_repo}.git"),
         branch_prefix=env("MIRROR_BRANCH_PREFIX", "atomgit/pr-"),
-        base_branches=split_csv(env("MIRROR_BASE_BRANCHES", "dev,dev-cri")),
+        base_branches=split_csv(env("MIRROR_BASE_BRANCHES", "dev")),
         ci_enabled=env_bool("CI_ENABLED"),
         ci_github_owner=ci_github_owner,
         ci_github_repo=ci_github_repo,
