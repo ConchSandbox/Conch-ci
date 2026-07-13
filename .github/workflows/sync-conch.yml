@@ -100,17 +100,15 @@ jobs:
 
           cd "$workdir/repo.git"
 
-          echo "Fetching dev and dev-cri from AtomGit openeuler/Conch"
+          echo "Fetching dev from AtomGit openeuler/Conch"
           git remote add source "$SOURCE_REPO"
           git fetch --no-tags source \
-            +refs/heads/dev:refs/heads/dev \
-            +refs/heads/dev-cri:refs/heads/dev-cri
+            +refs/heads/dev:refs/heads/dev
 
-          echo "Pushing dev and dev-cri to GitHub ConchSandbox/Conch"
+          echo "Pushing dev to GitHub ConchSandbox/Conch"
           git remote add target "https://x-access-token:${TOKEN}@${TARGET_REPO}"
           git push target \
-            +refs/heads/dev:refs/heads/dev \
-            +refs/heads/dev-cri:refs/heads/dev-cri
+            +refs/heads/dev:refs/heads/dev
 
       - name: Mirror AtomGit pull requests
         env:
@@ -122,7 +120,7 @@ jobs:
           GITHUB_TARGET_OWNER: ConchSandbox
           GITHUB_TARGET_REPO_NAME: Conch
           GITHUB_TARGET_REPO: github.com/ConchSandbox/Conch.git
-          MIRROR_BASE_BRANCHES: dev,dev-cri
+          MIRROR_BASE_BRANCHES: dev
           CI_ENABLED: ${{ github.event_name == 'workflow_dispatch' && inputs.atomgit_pr_number != '' }}
           CI_GITHUB_OWNER: ConchSandbox
           CI_GITHUB_REPO: Conch-ci
