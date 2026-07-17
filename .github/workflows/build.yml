@@ -119,14 +119,14 @@ jobs:
           shellcheck --version
           git rev-parse HEAD
 
-      - name: Generate protobuf bindings
+      - name: Check generated protobuf bindings
         working-directory: conch-src
         run: |
           set -euo pipefail
-          make gen-proto-go
-          python -m pip install --upgrade pip
-          python -m pip install grpcio-tools
-          make gen-proto-py
+          test -f api/go_proto/agent.pb.go
+          test -f api/go_proto/pbconnect/agent.connect.go
+          test -f api/py_proto/agent_pb2.py
+          test -f api/py_proto/agent_connect.py
 
       - name: Check shell script syntax
         working-directory: conch-src

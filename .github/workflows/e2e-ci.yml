@@ -148,12 +148,15 @@ jobs:
           go-version: 1.26.x
           cache-dependency-path: conch-src/go.sum
 
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
       - name: Set up Python
         run: |
           set -euo pipefail
-          python3 --version
+          uv python install 3.12
           rm -rf "${RUNNER_TEMP:-/tmp}/conch-e2b-image-python"
-          python3 -m venv "${RUNNER_TEMP:-/tmp}/conch-e2b-image-python"
+          uv venv --python 3.12 --seed "${RUNNER_TEMP:-/tmp}/conch-e2b-image-python"
           echo "${RUNNER_TEMP:-/tmp}/conch-e2b-image-python/bin" >> "$GITHUB_PATH"
           "${RUNNER_TEMP:-/tmp}/conch-e2b-image-python/bin/python" -m pip install --upgrade pip
           "${RUNNER_TEMP:-/tmp}/conch-e2b-image-python/bin/python" --version
@@ -162,9 +165,6 @@ jobs:
         working-directory: conch-src
         run: |
           set -euo pipefail
-          python -m pip install --upgrade pip
-          python -m pip install grpcio-tools
-          make gen-proto
           make build
           test -x ./bin/conch
           test -x ./bin/conchd
@@ -693,12 +693,15 @@ jobs:
           go-version: 1.26.x
           cache-dependency-path: conch-src/go.sum
 
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
       - name: Set up Python
         run: |
           set -euo pipefail
-          python3 --version
+          uv python install 3.12
           rm -rf "${RUNNER_TEMP:-/tmp}/conch-e2b-sdk-python"
-          python3 -m venv "${RUNNER_TEMP:-/tmp}/conch-e2b-sdk-python"
+          uv venv --python 3.12 --seed "${RUNNER_TEMP:-/tmp}/conch-e2b-sdk-python"
           echo "${RUNNER_TEMP:-/tmp}/conch-e2b-sdk-python/bin" >> "$GITHUB_PATH"
           "${RUNNER_TEMP:-/tmp}/conch-e2b-sdk-python/bin/python" -m pip install --upgrade pip
           "${RUNNER_TEMP:-/tmp}/conch-e2b-sdk-python/bin/python" --version
@@ -707,9 +710,6 @@ jobs:
         working-directory: conch-src
         run: |
           set -euo pipefail
-          python -m pip install --upgrade pip
-          python -m pip install grpcio-tools
-          make gen-proto
           make build
           test -x ./bin/conch
           test -x ./bin/conchd
@@ -893,7 +893,7 @@ jobs:
           python -m venv --system-site-packages "$CONCH_E2B_WORKDIR/e2b-sdk-venv"
           . "$CONCH_E2B_WORKDIR/e2b-sdk-venv/bin/activate"
           echo "[e2b-sdk-e2e] installing local Conch SDK"
-          python -m pip install --no-deps --progress-bar off './sdk'
+          python -m pip install './sdk'
           python -u /ci-scripts/e2b_sdk_e2e.py
           SH
 
@@ -949,7 +949,7 @@ jobs:
           set -eu
           python -m venv --system-site-packages "$CONCH_E2B_WORKDIR/e2b-sdk-cleanup-venv"
           . "$CONCH_E2B_WORKDIR/e2b-sdk-cleanup-venv/bin/activate"
-          python -m pip install --no-deps --progress-bar off './sdk'
+          python -m pip install './sdk'
           python - <<'PY'
           import os
           import time

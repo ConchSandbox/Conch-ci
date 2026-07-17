@@ -111,12 +111,16 @@ jobs:
           go-version: 1.26.x
           cache-dependency-path: conch-src/go.sum
 
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
       - name: Set up Python
         run: |
           set -euo pipefail
 
-          python3 --version
-          python3 -m venv "${RUNNER_TEMP:-/tmp}/conch-init-python"
+          uv python install 3.12
+          rm -rf "${RUNNER_TEMP:-/tmp}/conch-init-python"
+          uv venv --python 3.12 --seed "${RUNNER_TEMP:-/tmp}/conch-init-python"
           echo "${RUNNER_TEMP:-/tmp}/conch-init-python/bin" >> "$GITHUB_PATH"
           "${RUNNER_TEMP:-/tmp}/conch-init-python/bin/python" -m pip install --upgrade pip
           "${RUNNER_TEMP:-/tmp}/conch-init-python/bin/python" --version
@@ -154,7 +158,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          make gen-proto-py
           OUTPUT="$CONCH_AGENT_INITRAMFS" \
             WORK_DIR="$CONCH_AGENT_E2E_WORKDIR/initramfs-work" \
             ROOTFS_DIR="$CONCH_AGENT_ROOTFS" \
