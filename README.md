@@ -11,7 +11,7 @@ repository/ref pair:
 
 - `build.yml`: build, static checks, Go tests, Go vet, and Python SDK import
   checks.
-- `conch-agent-init-e2e.yml`: boots `conch-agent --init` in a real
+- `conch-agent-init-e2e.yml`: boots `conch-init` as PID 1 in a real
   cloud-hypervisor VM on a self-hosted runner.
 - `e2b-rootfs-weekly.yml`: builds the E2B rootfs image into the self-hosted
   runner's local registry and updates the matching repository variable with

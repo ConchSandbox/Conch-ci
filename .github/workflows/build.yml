@@ -165,7 +165,7 @@ jobs:
         working-directory: conch-src
         run: |
           set -euo pipefail
-          go build ./cmd/conch ./cmd/conchd ./cmd/conch-agent
+          go build ./cmd/conch ./cmd/conchd ./cmd/conch-init
 
       - name: Run Go tests
         working-directory: conch-src

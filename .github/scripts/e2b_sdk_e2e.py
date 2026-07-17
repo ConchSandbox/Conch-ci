@@ -5,12 +5,10 @@ import urllib.request
 from importlib.metadata import version
 from urllib.parse import urlparse
 
-import grpc
 import requests
 
 sys.path.insert(0, os.getcwd())
 
-from api.py_proto import agent_pb2
 from conch import Sandbox as ConchSandbox
 from e2b.connection_config import ConnectionConfig
 from e2b_code_interpreter import Sandbox as CodeInterpreterSandbox
@@ -61,24 +59,16 @@ def wait_http(url, expected_body=None, timeout=180):
 
 
 def wait_conch_health(sandbox, timeout=180):
-    log(f"waiting for Conch agent health: sandbox_id={sandbox.sandbox_id} ip={sandbox.ip}")
+    log(f"waiting for conch-init health: sandbox_id={sandbox.sandbox_id} ip={sandbox.ip}")
     deadline = time.monotonic() + timeout
     last_health = None
     while time.monotonic() < deadline:
         try:
-            response = sandbox.client.stub.HealthCheck(
-                agent_pb2.Empty(),
-                timeout=5,
-                metadata=sandbox.client._metadata(),
-            )
-            last_health = {"status": "OK", "message": response.message}
-            return last_health
-        except grpc.RpcError as exc:
-            last_health = {
-                "status": "ERROR",
-                "code": str(exc.code()),
-                "message": exc.details(),
-            }
+            last_health = sandbox.health_check()
+            if last_health.get("status") == "OK" or last_health.get("message") == "OK":
+                return last_health
+        except Exception as exc:
+            last_health = {"status": "ERROR", "message": str(exc)}
         time.sleep(2)
     raise RuntimeError(f"timed out waiting for Conch health check: {last_health}")
 
@@ -100,10 +90,10 @@ def new_code_interpreter_sandbox(envd_url, sandbox_ip):
 
 def dump_guest_logs(e2b):
     for path in (
-        "/var/log/conch-agent/conch-agent.log",
-        "/var/log/conch-agent/envd.log",
-        "/var/log/conch-agent/code-interpreter.log",
-        "/var/log/conch-agent/service.log",
+        "/var/log/conch-init/conch-init.log",
+        "/var/log/conch-init/envd.log",
+        "/var/log/conch-init/code-interpreter.log",
+        "/var/log/conch-init/service.log",
     ):
         try:
             log(f"guest log: {path}")

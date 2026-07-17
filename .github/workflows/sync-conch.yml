@@ -15,7 +15,7 @@ on:
         type: boolean
         default: true
       run_agent_init_e2e:
-        description: Run Conch-agent E2E
+        description: Run Conch-init E2E
         required: false
         type: boolean
         default: true

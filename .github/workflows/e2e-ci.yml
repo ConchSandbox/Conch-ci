@@ -168,7 +168,7 @@ jobs:
           make build
           test -x ./bin/conch
           test -x ./bin/conchd
-          test -x ./bin/conch-agent
+          test -x ./bin/conch-init
 
       - name: Prepare image build names
         run: |
@@ -260,7 +260,7 @@ jobs:
             echo "CONCHD_LOG=$workdir/conchd.log"
             echo "CONCHD_PID_FILE=$workdir/conchd.pid"
             echo "CONCHD_SERVICE_PID_FILE=$workdir/conchd-service.pid"
-            echo "CONCH_INITRD_PATH=$workdir/conch-agent-initramfs.cpio.gz"
+            echo "CONCH_INITRD_PATH=$workdir/conch-init-initramfs.cpio.gz"
             echo "CONCH_AGENT_ROOTFS=$workdir/initramfs-rootfs"
           } >> "$GITHUB_ENV"
 
@@ -318,7 +318,7 @@ jobs:
             "http://${CONCH_E2B_REGISTRY}/v2/${repository}/manifests/${reference}" >/dev/null
           echo "Prebuilt E2B rootfs image is available: $CONCH_E2B_ROOTFS_IMAGE"
 
-      - name: Build Conch agent initramfs
+      - name: Build Conch init initramfs
         working-directory: conch-src
         run: |
           set -euo pipefail
@@ -327,7 +327,7 @@ jobs:
             ROOTFS_DIR="$CONCH_AGENT_ROOTFS" \
             ALPINE_VERSION="$ALPINE_VERSION" \
             ALPINE_MIRROR="$ALPINE_MIRROR" \
-            make build-agent-initramfs
+            make build-conch-init-initramfs
           file "$CONCH_INITRD_PATH"
 
       - name: Prepare isolated Conch image configuration
@@ -713,7 +713,7 @@ jobs:
           make build
           test -x ./bin/conch
           test -x ./bin/conchd
-          test -x ./bin/conch-agent
+          test -x ./bin/conch-init
 
       - name: Prepare isolated E2B SDK configuration
         run: |
