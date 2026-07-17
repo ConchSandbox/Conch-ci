@@ -121,7 +121,7 @@ def main():
     log("creating Conch sandbox")
     conch_sandbox = ConchSandbox.create(
         config_path=os.environ["CONCH_SDK_CONFIG"],
-        image_name=os.environ["CONCH_E2B_BOOT_IMAGE"],
+        template_id=os.environ["CONCH_TEMPLATE_ID"],
         namespace=os.environ["CONCH_NAMESPACE"],
         sandbox_id=os.environ["CONCH_SANDBOX_ID"],
         vcpu_num=2,

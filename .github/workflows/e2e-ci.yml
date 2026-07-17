@@ -296,7 +296,8 @@ jobs:
             exit 0
           fi
 
-          image_without_registry="${CONCH_E2B_ROOTFS_IMAGE#${CONCH_E2B_REGISTRY}/}"
+          registry_prefix="${CONCH_E2B_REGISTRY}/"
+          image_without_registry="${CONCH_E2B_ROOTFS_IMAGE#"$registry_prefix"}"
           case "$image_without_registry" in
             *@*)
               repository="${image_without_registry%@*}"
@@ -402,7 +403,7 @@ jobs:
           echo "$!" > "$CONCHD_PID_FILE"
 
           for _ in $(seq 1 120); do
-            if curl -fsS -X POST "$CONCH_API_URL/api/snapshot/list" \
+            if curl -fsS -X POST "$CONCH_API_URL/api/template/list" \
               -H 'Content-Type: application/json' \
               -d "{\"namespace\":\"$CONCH_NAMESPACE\"}" >/dev/null 2>&1; then
               echo "conchd is ready at $CONCH_API_URL"
@@ -420,37 +421,48 @@ jobs:
           sed -n '1,240p' "$CONCHD_LOG" >&2 || true
           exit 1
 
-      - name: Convert and validate E2B image in Conch
+      - name: Create, publish, and validate E2B template in Conch
         working-directory: conch-src
         run: |
           set -euo pipefail
 
-          ./bin/conch convert \
+          create_output="$(./bin/conch template create \
             --config "$CONCH_CONFIG" \
             -n "$CONCH_NAMESPACE" \
             --plain-http \
             --source "$CONCH_E2B_ROOTFS_IMAGE" \
             --kernel "$CONCH_KERNEL_PATH" \
             --initrd "$CONCH_INITRD_PATH" \
-            -t "$CONCH_E2B_LOCAL_BOOT_IMAGE"
+            -t "$CONCH_E2B_LOCAL_BOOT_IMAGE")"
+          printf '%s\n' "$create_output"
 
-          ./bin/conch unpack \
-            --config "$CONCH_CONFIG" \
-            -n "$CONCH_NAMESPACE" \
-            "$CONCH_E2B_LOCAL_BOOT_IMAGE"
+          template_id="$(awk '$1 == "Template:" { print $2; exit }' <<<"$create_output")"
+          if [[ ! "$template_id" =~ ^tmpl_[[:alnum:]]+$ ]]; then
+            echo "::error::Unable to parse Template ID from conch template create output" >&2
+            exit 1
+          fi
+          echo "Created E2B template: $template_id"
 
-          ./bin/conch push \
+          ./bin/conch template push \
             --config "$CONCH_CONFIG" \
             -n "$CONCH_NAMESPACE" \
             --plain-http \
-            "$CONCH_E2B_LOCAL_BOOT_IMAGE" \
+            "$template_id" \
             "$CONCH_E2B_REMOTE_BOOT_IMAGE"
 
-          ./bin/conch pull \
+          validation_output="$(./bin/conch template pull \
             --config "$CONCH_CONFIG" \
             -n "$CONCH_VALIDATION_NAMESPACE" \
             --plain-http \
-            "$CONCH_E2B_REMOTE_BOOT_IMAGE"
+            "$CONCH_E2B_REMOTE_BOOT_IMAGE")"
+          printf '%s\n' "$validation_output"
+
+          validation_template_id="$(awk '$1 == "Template:" { print $2; exit }' <<<"$validation_output")"
+          if [[ ! "$validation_template_id" =~ ^tmpl_[[:alnum:]]+$ ]]; then
+            echo "::error::Unable to parse Template ID from conch template pull output" >&2
+            exit 1
+          fi
+          echo "Validated published E2B template: $validation_template_id"
 
       - name: Write image metadata artifact
         run: |
@@ -779,17 +791,9 @@ jobs:
             unix_socket: ""
             api_url: "http://127.0.0.1:$port"
             sandbox_id: "$sandbox_id"
-
-          snapshot:
-            snapshot_id: ""
-            vmm_name: "$CONCH_E2B_VMM_NAME"
-            vcpu_num: 2
-            vcpu_max: 2
-            ram_mb: 2048
+            template_id: ""
 
           image:
-            image_name: "$CONCH_E2B_BOOT_IMAGE"
-            use_snapshot: false
             vmm_name: "$CONCH_E2B_VMM_NAME"
             vcpu_num: 2
             vcpu_max: 2
@@ -811,7 +815,7 @@ jobs:
           echo "$!" > "$CONCHD_PID_FILE"
 
           for _ in $(seq 1 120); do
-            if curl -fsS -X POST "$CONCH_API_URL/api/snapshot/list" \
+            if curl -fsS -X POST "$CONCH_API_URL/api/template/list" \
               -H 'Content-Type: application/json' \
               -d "{\"namespace\":\"$CONCH_NAMESPACE\"}" >/dev/null 2>&1; then
               echo "conchd is ready at $CONCH_API_URL"
@@ -829,7 +833,7 @@ jobs:
           sed -n '1,240p' "$CONCHD_LOG" >&2 || true
           exit 1
 
-      - name: Pull converted E2B image into Conch
+      - name: Pull E2B template into Conch
         working-directory: conch-src
         run: |
           set -euo pipefail
@@ -838,11 +842,20 @@ jobs:
             true|True|TRUE|1|yes|YES) pull_flags+=(--plain-http) ;;
           esac
 
-          ./bin/conch pull \
+          pull_output="$(./bin/conch template pull \
             --config "$CONCH_CONFIG" \
             -n "$CONCH_NAMESPACE" \
             "${pull_flags[@]}" \
-            "$CONCH_E2B_BOOT_IMAGE"
+            "$CONCH_E2B_BOOT_IMAGE")"
+          printf '%s\n' "$pull_output"
+
+          template_id="$(awk '$1 == "Template:" { print $2; exit }' <<<"$pull_output")"
+          if [[ ! "$template_id" =~ ^tmpl_[[:alnum:]]+$ ]]; then
+            echo "::error::Unable to parse Template ID from conch template pull output" >&2
+            exit 1
+          fi
+          echo "CONCH_TEMPLATE_ID=$template_id" >> "$GITHUB_ENV"
+          echo "Using E2B template: $template_id"
 
       - name: Boot sandbox and validate E2B SDK operations
         timeout-minutes: 20
@@ -867,7 +880,7 @@ jobs:
             -w "$conch_src" \
             -e "CONCH_SDK_CONFIG=$CONCH_SDK_CONFIG" \
             -e "CONCH_E2B_WORKDIR=$CONCH_E2B_WORKDIR" \
-            -e "CONCH_E2B_BOOT_IMAGE=$CONCH_E2B_BOOT_IMAGE" \
+            -e "CONCH_TEMPLATE_ID=$CONCH_TEMPLATE_ID" \
             -e "CONCH_E2B_SDK_HTTP_TIMEOUT=$CONCH_E2B_SDK_HTTP_TIMEOUT" \
             -e "CONCH_NAMESPACE=$CONCH_NAMESPACE" \
             -e "CONCH_SANDBOX_ID=$CONCH_SANDBOX_ID" \
