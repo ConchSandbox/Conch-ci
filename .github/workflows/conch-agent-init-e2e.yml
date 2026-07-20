@@ -14,7 +14,7 @@ on:
       conch_ref:
         description: Conch source ref to validate
         required: false
-        default: dev-cri
+        default: dev
       kernel_path:
         description: Pre-provisioned bzImage path on the self-hosted runner
         required: false
@@ -37,7 +37,7 @@ concurrency:
 
 env:
   CONCH_REPOSITORY: ${{ github.event.inputs.conch_repository || vars.CONCH_REPOSITORY || 'https://github.com/ConchSandbox/Conch.git' }}
-  CONCH_REF: ${{ github.event.inputs.conch_ref || vars.CONCH_REF || 'dev-cri' }}
+  CONCH_REF: ${{ github.event.inputs.conch_ref || vars.CONCH_REF || 'dev' }}
   CONCH_KERNEL_PATH: ${{ github.event.inputs.kernel_path || vars.CONCH_AGENT_E2E_KERNEL_PATH || '/opt/conch/bzImage' }}
   ALPINE_VERSION: ${{ github.event.inputs.alpine_version || vars.CONCH_AGENT_E2E_ALPINE_VERSION || '3.20.3' }}
   ALPINE_MIRROR: ${{ github.event.inputs.alpine_mirror || vars.CONCH_AGENT_E2E_ALPINE_MIRROR || 'https://dl-cdn.alpinelinux.org/alpine' }}
