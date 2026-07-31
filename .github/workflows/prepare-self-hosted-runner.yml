@@ -1,0 +1,52 @@
+name: Prepare Self-hosted Runner
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Read-only verification or installation
+        required: true
+        type: choice
+        default: verify
+        options:
+          - verify
+          - ensure
+  push:
+    branches:
+      - main
+    paths:
+      - runner-env.lock.yaml
+      - scripts/runner-env/**
+      - .github/actions/ensure-runner-environment/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: conch-production-self-hosted-runner
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  prepare:
+    name: ${{ github.event_name == 'push' && 'Ensure' || inputs.mode }}
+    runs-on: [self-hosted, Linux, ARM64, Huawei]
+    timeout-minutes: 60
+    steps:
+      - name: Checkout CI repository
+        uses: actions/checkout@v4.4.0
+
+      - name: Verify runner environment
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'verify' }}
+        uses: ./.github/actions/ensure-runner-environment
+        with:
+          mode: verify
+
+      - name: Install locked runner environment
+        if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'ensure') }}
+        uses: ./.github/actions/ensure-runner-environment
+        with:
+          mode: ensure

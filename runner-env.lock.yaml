@@ -1,0 +1,23 @@
+schema_version: 1
+
+managed_components:
+  cloud_hypervisor:
+    version: v52.0-conch
+    sha256: 363a3bcf5cd09b5885a3555c14e8f774c99aa87467ce60fcb65db41aaa677dcf
+  buildkit:
+    version: v0.32.0
+    sha256: bff1c800e765022cc498959d37250dd6101a07b8388f595d1548aaa378373e74
+  erofs_utils:
+    version: 1.9.1
+    sha256: a9ef5ab67c4b8d2d3e9ed71f39cd008bda653142a720d8a395a36f1110d0c432
+  cni_plugins:
+    version: v1.9.1
+    sha256: 56171987d3947707c3563db2f4001bccaf50fd63468611b9f3cbecb1375ee7ec
+
+job_build_inputs:
+  go_toolchain:
+    version: 1.26.3
+  e2b_sdk_packages:
+    e2b: 2.30.0
+    e2b-code-interpreter: 2.8.1
+  kernel_commit: c02455c4cce8052f74fc11c09e9073c01c7f33a4

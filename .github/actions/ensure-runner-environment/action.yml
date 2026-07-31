@@ -1,0 +1,42 @@
+name: Ensure Conch runner environment
+description: Thin entrypoint for the repository-owned runner environment manager.
+
+inputs:
+  mode:
+    description: ensure or verify
+    required: true
+
+outputs:
+  binary-dir:
+    value: ${{ steps.execute.outputs.binary-dir }}
+  cloud-hypervisor-path:
+    value: ${{ steps.execute.outputs.cloud-hypervisor-path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Execute runner environment command
+      id: execute
+      shell: bash
+      env:
+        MODE: ${{ inputs.mode }}
+      run: |
+        set -euo pipefail
+        case "$MODE" in
+          ensure|verify)
+            ;;
+          *)
+            echo "::error::unsupported runner environment mode: $MODE" >&2
+            exit 2
+            ;;
+        esac
+        "$GITHUB_ACTION_PATH/../../../scripts/runner-env/runner-env.sh" "$MODE"
+
+    - name: Export managed binary directory
+      if: ${{ steps.execute.outputs.binary-dir != '' }}
+      shell: bash
+      env:
+        BINARY_DIR: ${{ steps.execute.outputs.binary-dir }}
+      run: |
+        set -euo pipefail
+        printf '%s\n' "$BINARY_DIR" >> "$GITHUB_PATH"
