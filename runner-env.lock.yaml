@@ -21,3 +21,4 @@ job_build_inputs:
     e2b: 2.30.0
     e2b-code-interpreter: 2.8.1
   kernel_commit: c02455c4cce8052f74fc11c09e9073c01c7f33a4
+  kernel_archive_sha256: 0ba5fb19946375be29dcdb3729172ad4e6cdf61bbef27486503f704affb3e77a

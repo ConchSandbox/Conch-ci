@@ -114,7 +114,12 @@ def validate_lock(value: Any) -> dict[str, Any]:
     inputs = exact_object(
         lock["job_build_inputs"],
         "$.job_build_inputs",
-        ("go_toolchain", "e2b_sdk_packages", "kernel_commit"),
+        (
+            "go_toolchain",
+            "e2b_sdk_packages",
+            "kernel_commit",
+            "kernel_archive_sha256",
+        ),
     )
     validate_version(inputs["go_toolchain"], "$.job_build_inputs.go_toolchain")
     packages = exact_object(
@@ -127,6 +132,11 @@ def validate_lock(value: Any) -> dict[str, Any]:
         if not EXACT_VERSION_RE.fullmatch(version) or FLOATING_RE.search(version):
             raise ValidationError(f"$.job_build_inputs.e2b_sdk_packages.{name}: expected exact version")
     string(inputs["kernel_commit"], "$.job_build_inputs.kernel_commit", COMMIT_RE)
+    string(
+        inputs["kernel_archive_sha256"],
+        "$.job_build_inputs.kernel_archive_sha256",
+        SHA256_RE,
+    )
     return lock
 
 

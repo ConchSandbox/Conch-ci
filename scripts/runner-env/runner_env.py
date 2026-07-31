@@ -27,7 +27,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parents[1]
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
-from archive import ArchiveError, extract_selected, extract_source_archive  # noqa: E402
+from archive import ArchiveError, extract_selected  # noqa: E402
 from ids import repository_environment_id  # noqa: E402
 from lock import ValidationError, load_lock  # noqa: E402
 
@@ -40,7 +40,7 @@ EXIT_LOCK_TIMEOUT = 6
 LOCK_TIMEOUT_SECONDS = 300
 
 LOCK_PATH = REPO_ROOT / "runner-env.lock.yaml"
-EROFS_UTILS_BUILD_RECIPE = SCRIPT_DIR / "components/erofs-utils.sh"
+EROFS_UTILS_BUILD_RECIPE = SCRIPT_DIR / "jobs/prepare-erofs-utils.sh"
 
 COMPONENTS = ("buildkit", "cloud_hypervisor", "cni_plugins", "erofs_utils")
 COMPONENT_FILES = {
@@ -482,10 +482,17 @@ def install_component(component: str, declaration: dict[str, str], paths: dict[s
                 },
             )
         elif component == "erofs_utils":
-            source_root = extract_source_archive(archive, staging_root / "source")
-            output = output_root / "bin/mkfs.erofs"
-            output.parent.mkdir(parents=True)
-            run([str(SCRIPT_DIR / "components/erofs-utils.sh"), str(source_root), str(output)])
+            run(
+                [
+                    str(SCRIPT_DIR / "jobs/prepare-erofs-utils.sh"),
+                    "--archive",
+                    str(archive),
+                    "--work-dir",
+                    str(staging_root / "source"),
+                    "--prefix",
+                    str(output_root),
+                ]
+            )
         elif component == "cni_plugins":
             extract_selected(
                 archive,
