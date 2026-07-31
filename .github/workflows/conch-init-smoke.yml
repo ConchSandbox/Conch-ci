@@ -1,0 +1,349 @@
+name: Conch Init Smoke
+run-name: ${{ github.event.inputs.ci_marker || github.event.inputs.conch_ref || github.ref_name }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      ci_marker:
+        description: External CI correlation marker
+        required: false
+      conch_repository:
+        description: Must be the trusted Conch repository
+        required: false
+        default: https://github.com/ConchSandbox/Conch.git
+      conch_ref:
+        description: Conch ref resolved once to an immutable commit
+        required: false
+        default: dev
+
+permissions:
+  contents: read
+  actions: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CONCH_REPOSITORY: ${{ github.event.inputs.conch_repository || vars.CONCH_REPOSITORY || 'https://github.com/ConchSandbox/Conch.git' }}
+  CONCH_REF: ${{ github.event.inputs.conch_ref || vars.CONCH_REF || 'dev' }}
+  CONCH_INIT_API_PORT: "4064"
+  CONCH_INIT_VSOCK_PORT: "4065"
+
+jobs:
+  resolve-conch:
+    name: Resolve Conch commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      conch-commit: ${{ steps.resolve.outputs.conch-commit }}
+    steps:
+      - name: Checkout CI repository
+        uses: actions/checkout@v4.4.0
+      - name: Resolve immutable Conch commit
+        id: resolve
+        run: |
+          scripts/runner-env/jobs/resolve-conch-commit.sh \
+            --repository "$CONCH_REPOSITORY" \
+            --ref "$CONCH_REF"
+
+  build-kernel:
+    name: Build or reuse ARM64 kernel
+    needs: resolve-conch
+    runs-on: [self-hosted, Linux, ARM64, Huawei]
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      actions: write
+    outputs:
+      kernel-sha256: ${{ steps.kernel.outputs.kernel-sha256 }}
+      kernel-artifact-name: ${{ steps.kernel.outputs.kernel-artifact-name }}
+    steps:
+      - name: Checkout CI repository
+        uses: actions/checkout@v4.4.0
+
+      - name: Build or reuse ARM64 kernel
+        id: kernel
+        uses: ./.github/actions/build-kernel
+        with:
+          conch-commit: ${{ needs.resolve-conch.outputs.conch-commit }}
+
+  conch-init-smoke:
+    name: Conch Init Smoke
+    needs: [resolve-conch, build-kernel]
+    runs-on: [self-hosted, Linux, ARM64, Huawei]
+    timeout-minutes: 60
+    steps:
+      - name: Checkout CI repository
+        uses: actions/checkout@v4.4.0
+
+      - name: Verify runner environment
+        id: runner-environment
+        uses: ./.github/actions/ensure-runner-environment
+        with:
+          mode: verify
+
+      - name: Checkout immutable Conch source
+        run: |
+          scripts/runner-env/jobs/checkout-conch.sh \
+            --repository "$CONCH_REPOSITORY" \
+            --commit "${{ needs.resolve-conch.outputs.conch-commit }}" \
+            --destination "$RUNNER_TEMP/conch-init-source"
+
+      - name: Read locked Go version
+        id: go-lock
+        run: |
+          go_version=$(python3 scripts/runner-env/lib/lock.py \
+            get job_build_inputs.go_toolchain.version)
+          echo "go-version=$go_version" >> "$GITHUB_OUTPUT"
+
+      - name: Set up locked Go version
+        uses: actions/setup-go@v5.6.0
+        with:
+          go-version: ${{ steps.go-lock.outputs.go-version }}
+          cache: false
+
+      - name: Prepare Conch SDK virtualenv
+        id: sdk
+        run: |
+          scripts/runner-env/jobs/prepare-e2b-sdk-venv.sh \
+            --conch-source "$RUNNER_TEMP/conch-init-source" \
+            --venv "$RUNNER_TEMP/conch-init-sdk-venv" \
+            --sdk-only
+
+      - name: Download kernel artifact
+        uses: actions/download-artifact@v4.3.0
+        with:
+          name: ${{ needs.build-kernel.outputs.kernel-artifact-name }}
+          path: ${{ runner.temp }}/conch-init-kernel/${{ needs.build-kernel.outputs.kernel-artifact-name }}
+
+      - name: Validate downloaded kernel
+        run: |
+          scripts/runner-env/jobs/build-kernel.sh ensure \
+            --conch-source "$RUNNER_TEMP/conch-init-source" \
+            --conch-commit "${{ needs.resolve-conch.outputs.conch-commit }}" \
+            --cache-root "$RUNNER_TEMP/conch-init-kernel" \
+            --cache-hit true
+          kernel_path="$RUNNER_TEMP/conch-init-kernel/${{ needs.build-kernel.outputs.kernel-artifact-name }}/bzImage"
+          [[ "$(sha256sum "$kernel_path" | awk '{print $1}')" == "${{ needs.build-kernel.outputs.kernel-sha256 }}" ]]
+          echo "CONCH_KERNEL_PATH=$kernel_path" >> "$GITHUB_ENV"
+
+      - name: Prepare conch-init smoke workspace
+        run: |
+          workdir="$RUNNER_TEMP/conch-init-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          [[ ! -e "$workdir" ]] || sudo -n find "$workdir" -depth -delete
+          mkdir -p "$workdir"
+          suffix=$(printf '%s' "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" | sha256sum | cut -c1-8)
+          {
+            echo "CONCH_INIT_WORKDIR=$workdir"
+            echo "CONCH_INIT_INITRAMFS=$workdir/conch-init-initramfs.cpio.gz"
+            echo "CONCH_INIT_ROOTFS_DIR=$workdir/minimal-rootfs"
+            echo "CONCH_INIT_ROOTFS_IMAGE=$workdir/minimal-rootfs.erofs"
+            echo "CONCH_INIT_CONSOLE_LOG=$workdir/console.log"
+            echo "CONCH_INIT_VMM_LOG=$workdir/cloud-hypervisor.log"
+            echo "CONCH_INIT_VMM_API=$workdir/cloud-hypervisor.sock"
+            echo "CONCH_INIT_VSOCK_SOCKET=$workdir/conch-init.vsock"
+            echo "CONCH_INIT_VMM_PID_FILE=$workdir/cloud-hypervisor.pid"
+            echo "CONCH_INIT_TAP_NAME=ca${suffix}"
+            echo "CONCH_INIT_GUEST_IP=192.168.100.21"
+            echo "CONCH_INIT_NET_CIDR=192.168.100.2/24"
+            echo "CONCH_INIT_SANDBOX_ID=sandbox_conch_init_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+            echo "CONCH_INIT_TOKEN=conch-init-smoke-token-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          } >> "$GITHUB_ENV"
+
+      - name: Build minimal Conch initramfs
+        uses: ./.github/actions/build-conch-initramfs
+        with:
+          conch-source: ${{ runner.temp }}/conch-init-source
+          output: ${{ env.CONCH_INIT_INITRAMFS }}
+          work-dir: ${{ env.CONCH_INIT_WORKDIR }}/initramfs-work
+
+      - name: Build minimal job-local EROFS rootfs
+        env:
+          MKFS_EROFS: ${{ steps.runner-environment.outputs.binary-dir }}/mkfs.erofs
+        run: |
+          [[ "$MKFS_EROFS" == /* && -x "$MKFS_EROFS" ]]
+          mkdir -p \
+            "$CONCH_INIT_ROOTFS_DIR/usr" \
+            "$CONCH_INIT_ROOTFS_DIR/etc" \
+            "$CONCH_INIT_ROOTFS_DIR/run" \
+            "$CONCH_INIT_ROOTFS_DIR/var/log"
+          "$MKFS_EROFS" "$CONCH_INIT_ROOTFS_IMAGE" "$CONCH_INIT_ROOTFS_DIR"
+          python3 - "$CONCH_INIT_ROOTFS_IMAGE" <<'PY'
+          import os
+          import sys
+
+          path = sys.argv[1]
+          alignment = 2 * 1024 * 1024
+          size = os.path.getsize(path)
+          aligned_size = max(
+              alignment,
+              ((size + alignment - 1) // alignment) * alignment,
+          )
+          with open(path, "r+b") as stream:
+              stream.truncate(aligned_size)
+          PY
+          [[ -s "$CONCH_INIT_ROOTFS_IMAGE" ]]
+          file "$CONCH_INIT_ROOTFS_IMAGE" | grep -Fq 'EROFS filesystem'
+
+      - name: Start cloud-hypervisor VM
+        env:
+          CLOUD_HYPERVISOR: ${{ steps.runner-environment.outputs.cloud-hypervisor-path }}
+        run: |
+          sudo -n ip link del "$CONCH_INIT_TAP_NAME" >/dev/null 2>&1 || true
+          sudo -n ip tuntap add "$CONCH_INIT_TAP_NAME" mode tap
+          sudo -n ip addr add "$CONCH_INIT_NET_CIDR" dev "$CONCH_INIT_TAP_NAME"
+          sudo -n ip link set "$CONCH_INIT_TAP_NAME" up
+          touch "$CONCH_INIT_CONSOLE_LOG"
+          chmod 0666 "$CONCH_INIT_CONSOLE_LOG"
+          sudo -n env \
+            CLOUD_HYPERVISOR="$CLOUD_HYPERVISOR" \
+            CONCH_KERNEL_PATH="$CONCH_KERNEL_PATH" \
+            CONCH_INIT_INITRAMFS="$CONCH_INIT_INITRAMFS" \
+            CONCH_INIT_ROOTFS_IMAGE="$CONCH_INIT_ROOTFS_IMAGE" \
+            CONCH_INIT_SANDBOX_ID="$CONCH_INIT_SANDBOX_ID" \
+            CONCH_INIT_VMM_API="$CONCH_INIT_VMM_API" \
+            CONCH_INIT_CONSOLE_LOG="$CONCH_INIT_CONSOLE_LOG" \
+            CONCH_INIT_TAP_NAME="$CONCH_INIT_TAP_NAME" \
+            CONCH_INIT_VSOCK_SOCKET="$CONCH_INIT_VSOCK_SOCKET" \
+            CONCH_INIT_VMM_LOG="$CONCH_INIT_VMM_LOG" \
+            sh -c 'exec "$CLOUD_HYPERVISOR" \
+              --cpus boot=1,max=1 \
+              --memory size=512M \
+              --kernel "$CONCH_KERNEL_PATH" \
+              --initramfs "$CONCH_INIT_INITRAMFS" \
+              --pmem "file=$CONCH_INIT_ROOTFS_IMAGE,discard_writes=on" \
+              --cmdline "console=hvc0 root=/dev/ram0 rw panic=-1 conch.sandbox_id=${CONCH_INIT_SANDBOX_ID}" \
+              --api-socket "path=$CONCH_INIT_VMM_API" \
+              --console "file=$CONCH_INIT_CONSOLE_LOG" \
+              --serial null \
+              --net "tap=$CONCH_INIT_TAP_NAME" \
+              --vsock "cid=4,socket=$CONCH_INIT_VSOCK_SOCKET" \
+              --seccomp false \
+              > "$CONCH_INIT_VMM_LOG" 2>&1' &
+          echo "$!" > "$CONCH_INIT_VMM_PID_FILE"
+          for _ in $(seq 1 120); do
+            if [[ -S "$CONCH_INIT_VMM_API" && -S "$CONCH_INIT_VSOCK_SOCKET" ]]; then
+              sudo -n chmod 0666 "$CONCH_INIT_VMM_API" "$CONCH_INIT_VSOCK_SOCKET" || true
+              exit 0
+            fi
+            kill -0 "$(cat "$CONCH_INIT_VMM_PID_FILE")" 2>/dev/null || {
+              sed -n '1,240p' "$CONCH_INIT_VMM_LOG" >&2
+              exit 1
+            }
+            sleep 1
+          done
+          exit 1
+
+      - name: Wait for conch-init boot
+        run: |
+          for _ in $(seq 1 120); do
+            grep -q 'Starting conch-init as init process' "$CONCH_INIT_CONSOLE_LOG" 2>/dev/null && exit 0
+            sleep 1
+          done
+          sed -n '1,300p' "$CONCH_INIT_CONSOLE_LOG" >&2
+          exit 1
+
+      - name: Verify vsock readiness signal
+        run: |
+          python3 - <<'PY'
+          import os
+          import socket
+          import time
+
+          deadline = time.monotonic() + 120
+          last_error = None
+          while time.monotonic() < deadline:
+              try:
+                  with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+                      sock.settimeout(5)
+                      sock.connect(os.environ["CONCH_INIT_VSOCK_SOCKET"])
+                      sock.sendall(f"CONNECT {os.environ['CONCH_INIT_VSOCK_PORT']}\n".encode())
+                      if b"OK" not in sock.recv(1024):
+                          raise RuntimeError("VMM vsock proxy did not acknowledge CONNECT")
+                      payload = (
+                          f"I AM SANDBOX_ID:{os.environ['CONCH_INIT_SANDBOX_ID']}\n"
+                          f"AGENT_TOKEN:{os.environ['CONCH_INIT_TOKEN']}\n"
+                      ).encode()
+                      sock.sendall(payload)
+                      response = sock.recv(1024).decode(errors="replace")
+                      print(response)
+                      if "OK" in response and "READY:" in response:
+                          raise SystemExit(0)
+                      last_error = RuntimeError(response)
+              except SystemExit:
+                  raise
+              except Exception as exc:
+                  last_error = exc
+              time.sleep(1)
+          raise SystemExit(f"timed out waiting for conch-init READY: {last_error}")
+          PY
+
+      - name: Verify current Conch SDK health client
+        env:
+          SDK_PYTHON: ${{ steps.sdk.outputs.python }}
+        run: |
+          "$SDK_PYTHON" - <<'PY'
+          from functools import partial
+          import os
+          import time
+          from conch.client import AgentClient
+
+          client = AgentClient(
+              os.environ["CONCH_INIT_GUEST_IP"],
+              int(os.environ["CONCH_INIT_API_PORT"]),
+              os.environ["CONCH_INIT_TOKEN"],
+          )
+          # The current SDK does not expose a health-check timeout.
+          client.session.get = partial(client.session.get, timeout=5)
+          deadline = time.monotonic() + 120
+          last_error = None
+          while time.monotonic() < deadline:
+              try:
+                  response = client.health_check()
+                  if response.get("status") != "OK":
+                      raise RuntimeError(f"unexpected health response: {response!r}")
+                  print(response)
+                  raise SystemExit(0)
+              except SystemExit:
+                  raise
+              except Exception as exc:
+                  last_error = exc
+                  time.sleep(1)
+          raise SystemExit(f"timed out waiting for Conch health API: {last_error}")
+          PY
+
+      - name: Upload VM logs
+        if: always()
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: conch-init-smoke-logs
+          path: |
+            ${{ env.CONCH_INIT_VMM_LOG }}
+            ${{ env.CONCH_INIT_CONSOLE_LOG }}
+          if-no-files-found: ignore
+
+      - name: Clean conch-init smoke resources
+        if: always()
+        run: |
+          set +e
+          if [[ -n "${CONCH_INIT_VMM_API:-}" && -S "$CONCH_INIT_VMM_API" ]]; then
+            curl --unix-socket "$CONCH_INIT_VMM_API" -fsS -X PUT http://localhost/api/v1/vm.shutdown >/dev/null 2>&1 || true
+          fi
+          if [[ -n "${CONCH_INIT_VMM_PID_FILE:-}" && -f "$CONCH_INIT_VMM_PID_FILE" ]]; then
+            pid=$(<"$CONCH_INIT_VMM_PID_FILE")
+            sudo -n kill "$pid" >/dev/null 2>&1 || true
+            for _ in $(seq 1 30); do
+              kill -0 "$pid" 2>/dev/null || break
+              sleep 1
+            done
+            kill -0 "$pid" 2>/dev/null && sudo -n kill -9 "$pid" >/dev/null 2>&1 || true
+          fi
+          [[ -z "${CONCH_INIT_TAP_NAME:-}" ]] || sudo -n ip link del "$CONCH_INIT_TAP_NAME" >/dev/null 2>&1 || true
+          for path in \
+            "${CONCH_INIT_WORKDIR:-}" \
+            "$RUNNER_TEMP/conch-init-source" \
+            "$RUNNER_TEMP/conch-init-sdk-venv" \
+            "$RUNNER_TEMP/conch-init-kernel"; do
+            [[ -z "$path" || ! -e "$path" ]] || sudo -n find "$path" -depth -delete
+          done

@@ -22,10 +22,6 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: conch-production-self-hosted-runner
-  cancel-in-progress: false
-
 defaults:
   run:
     shell: bash

@@ -1,0 +1,343 @@
+name: Build E2B template
+description: Build or reuse and publish the locked E2B Conch template
+
+inputs:
+  conch-commit:
+    description: Immutable Conch commit to build
+    required: true
+  kernel-artifact-name:
+    description: Kernel workflow artifact name
+    required: true
+  kernel-sha256:
+    description: Expected kernel image SHA-256
+    required: true
+
+outputs:
+  template-image-ref:
+    description: Immutable published Conch template reference
+    value: ${{ steps.template.outputs.template-image-ref }}
+
+runs:
+  using: composite
+  steps:
+    - name: Verify runner environment
+      id: runner-environment
+      uses: ./.github/actions/ensure-runner-environment
+      with:
+        mode: verify
+
+    - name: Checkout immutable Conch source
+      shell: bash
+      env:
+        CONCH_REPOSITORY: https://github.com/ConchSandbox/Conch.git
+      run: |
+        scripts/runner-env/jobs/checkout-conch.sh \
+          --repository "$CONCH_REPOSITORY" \
+          --commit "${{ inputs.conch-commit }}" \
+          --destination "$RUNNER_TEMP/conch-template-source"
+
+    - name: Log in to GHCR
+      shell: bash
+      env:
+        GHCR_TOKEN: ${{ github.token }}
+      run: |
+        docker_config="$RUNNER_TEMP/conch-template-docker-config"
+        mkdir -p "$docker_config"
+        chmod 0700 "$docker_config"
+        echo "DOCKER_CONFIG=$docker_config" >> "$GITHUB_ENV"
+        printf '%s' "$GHCR_TOKEN" | DOCKER_CONFIG="$docker_config" \
+          docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+    - name: Build or reuse rootfs image
+      id: rootfs
+      shell: bash
+      env:
+        ROOTFS_REPOSITORY: ghcr.io/conchsandbox/conch-e2b-rootfs
+      run: |
+        scripts/runner-env/jobs/ensure-rootfs.sh \
+          --conch-source "$RUNNER_TEMP/conch-template-source" \
+          --conch-commit "${{ inputs.conch-commit }}" \
+          --dockerfile examples/e2b-rootfs/Dockerfile \
+          --repository "$ROOTFS_REPOSITORY" \
+          --bin-dir "${{ steps.runner-environment.outputs.binary-dir }}" \
+          --work-dir "$RUNNER_TEMP/conch-template-rootfs-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+    - name: Resolve template cache key
+      id: template-plan
+      shell: bash
+      env:
+        CONCH_COMMIT: ${{ inputs.conch-commit }}
+        KERNEL_SHA256: ${{ inputs.kernel-sha256 }}
+        ROOTFS_IMAGE_REF: ${{ steps.rootfs.outputs.rootfs-image-ref }}
+        TEMPLATE_REPOSITORY: ghcr.io/conchsandbox/conch-e2b-template
+      run: |
+        [[ "$CONCH_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+        [[ "$KERNEL_SHA256" =~ ^[0-9a-f]{64}$ ]]
+        [[ "$ROOTFS_IMAGE_REF" =~ @sha256:[0-9a-f]{64}$ ]]
+        recipe_sha256=$(
+          {
+            sha256sum "$GITHUB_ACTION_PATH/action.yml" | awk '{print $1}'
+            sha256sum "$GITHUB_WORKSPACE/.github/actions/build-conch/action.yml" | awk '{print $1}'
+            sha256sum "$GITHUB_WORKSPACE/.github/actions/build-conch-initramfs/action.yml" | awk '{print $1}'
+            sha256sum runner-env.lock.yaml | awk '{print $1}'
+          } | sha256sum | awk '{print $1}'
+        )
+        template_build_id=$(
+          printf '%s\n' \
+            "schema=1" \
+            "conch-commit=$CONCH_COMMIT" \
+            "rootfs-image=$ROOTFS_IMAGE_REF" \
+            "kernel-sha256=$KERNEL_SHA256" \
+            "recipe-sha256=$recipe_sha256" |
+            sha256sum | awk '{print $1}'
+        )
+        template_tag="$TEMPLATE_REPOSITORY:build-$template_build_id"
+        template_image_ref=
+        cache_hit=false
+        if template_digest=$("$GITHUB_ACTION_PATH/inspect-template.sh" "$template_tag" 2>/dev/null); then
+          template_image_ref="$TEMPLATE_REPOSITORY@$template_digest"
+          cache_hit=true
+        fi
+        {
+          echo "template-build-id=$template_build_id"
+          echo "template-tag=$template_tag"
+          echo "template-image-ref=$template_image_ref"
+          echo "cache-hit=$cache_hit"
+        } >> "$GITHUB_OUTPUT"
+        printf 'template build ID: %s\n' "$template_build_id"
+        printf 'template cache hit: %s\n' "$cache_hit"
+
+    - name: Build Conch binaries
+      if: ${{ steps.template-plan.outputs.cache-hit != 'true' }}
+      uses: ./.github/actions/build-conch
+      with:
+        conch-source: ${{ runner.temp }}/conch-template-source
+
+    - name: Download kernel artifact
+      if: ${{ steps.template-plan.outputs.cache-hit != 'true' }}
+      uses: actions/download-artifact@v4.3.0
+      with:
+        name: ${{ inputs.kernel-artifact-name }}
+        path: ${{ runner.temp }}/conch-template-kernel/${{ inputs.kernel-artifact-name }}
+
+    - name: Validate downloaded kernel
+      if: ${{ steps.template-plan.outputs.cache-hit != 'true' }}
+      shell: bash
+      env:
+        KERNEL_ARTIFACT_NAME: ${{ inputs.kernel-artifact-name }}
+        KERNEL_SHA256: ${{ inputs.kernel-sha256 }}
+      run: |
+        [[ "$KERNEL_ARTIFACT_NAME" =~ ^kernel-arm64-[0-9a-f]{64}$ ]]
+        scripts/runner-env/jobs/build-kernel.sh ensure \
+          --conch-source "$RUNNER_TEMP/conch-template-source" \
+          --conch-commit "${{ inputs.conch-commit }}" \
+          --cache-root "$RUNNER_TEMP/conch-template-kernel" \
+          --cache-hit true
+        kernel_path="$RUNNER_TEMP/conch-template-kernel/$KERNEL_ARTIFACT_NAME/bzImage"
+        [[ "$(sha256sum "$kernel_path" | awk '{print $1}')" == "$KERNEL_SHA256" ]]
+        echo "CONCH_TEMPLATE_KERNEL_PATH=$kernel_path" >> "$GITHUB_ENV"
+
+    - name: Prepare isolated template workspace
+      if: ${{ steps.template-plan.outputs.cache-hit != 'true' }}
+      shell: bash
+      env:
+        MANAGED_BINARY_DIR: ${{ steps.runner-environment.outputs.binary-dir }}
+      run: |
+        workdir="$RUNNER_TEMP/conch-template-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+        [[ ! -e "$workdir" ]] || sudo -n find "$workdir" -depth -delete
+        mkdir -p "$workdir/cni/net.d"
+        install -m 0644 "$RUNNER_TEMP/conch-template-source/config/cni/net.d/"*.conf "$workdir/cni/net.d/"
+        port=$(python3 - <<'PY'
+        import socket
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            print(sock.getsockname()[1])
+        PY
+        )
+        namespace="conch-template-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+        {
+          echo "CONCH_TEMPLATE_WORKDIR=$workdir"
+          echo "CONCH_TEMPLATE_CONFIG=$workdir/config.yaml"
+          echo "CONCH_TEMPLATE_API_URL=http://127.0.0.1:$port"
+          echo "CONCH_TEMPLATE_NAMESPACE=$namespace"
+          echo "CONCH_TEMPLATE_INITRD=$workdir/conch-init-initramfs.cpio.gz"
+          echo "CONCH_TEMPLATE_CONCHD_LOG=$workdir/conchd.log"
+          echo "CONCH_TEMPLATE_CONCHD_PID_FILE=$workdir/conchd.pid"
+          echo "CONCH_TEMPLATE_CONCHD_SERVICE_PID_FILE=$workdir/conchd-service.pid"
+        } >> "$GITHUB_ENV"
+        cat > "$workdir/config.yaml" <<YAML
+        app:
+          name: conch-template-builder
+        log:
+          level: info
+          output: stdout
+        server:
+          unix_socket: ""
+          pid_file: "$workdir/conchd-service.pid"
+          work_dir: "$workdir/work"
+          host: 127.0.0.1
+          port: $port
+        state:
+          path: "$workdir/state.db"
+        network:
+          pool_size: 1
+          dynamic_reservation: false
+          tap_ip: 192.168.100.2
+          tap_mask: 24
+          cni:
+            plugin_bin_dirs:
+              - "$MANAGED_BINARY_DIR/cni"
+            plugin_conf_dir: "$workdir/cni/net.d"
+            plugin_max_conf: 1
+            if_name: eth0
+            setup_serially: true
+        containerd:
+          root_dir: "$workdir/containerd-root"
+          state_dir: "$workdir/containerd-state"
+          default_namespace: "$namespace"
+        image:
+          default_kernel_image: ""
+        sandbox:
+          vsock_signal_retry: 10ms
+          vsock_signal_timeout: 90s
+          request_timeout: 120s
+          default_vmm_name: cloud-hypervisor
+        YAML
+
+    - name: Build minimal Conch initramfs
+      if: ${{ steps.template-plan.outputs.cache-hit != 'true' }}
+      uses: ./.github/actions/build-conch-initramfs
+      with:
+        conch-source: ${{ runner.temp }}/conch-template-source
+        output: ${{ env.CONCH_TEMPLATE_INITRD }}
+        work-dir: ${{ env.CONCH_TEMPLATE_WORKDIR }}/initramfs-work
+
+    - name: Start conchd
+      if: ${{ steps.template-plan.outputs.cache-hit != 'true' }}
+      shell: bash
+      working-directory: ${{ runner.temp }}/conch-template-source
+      run: |
+        runtime_path="$PATH:/usr/local/sbin:/usr/sbin:/sbin"
+        sudo -n sh -c 'exec env PATH="$1" HOME="$2" CONCH_API_TIMEOUT="$3" ./bin/conchd -config "$4" > "$5" 2>&1' \
+          sh "$runtime_path" "$HOME" "${CONCH_API_TIMEOUT:-90m}" \
+          "$CONCH_TEMPLATE_CONFIG" "$CONCH_TEMPLATE_CONCHD_LOG" &
+        echo "$!" > "$CONCH_TEMPLATE_CONCHD_PID_FILE"
+        for _ in $(seq 1 120); do
+          if curl -fsS -X POST "$CONCH_TEMPLATE_API_URL/api/template/list" \
+            -H 'Content-Type: application/json' \
+            -d "{\"namespace\":\"$CONCH_TEMPLATE_NAMESPACE\"}" >/dev/null 2>&1; then
+            exit 0
+          fi
+          kill -0 "$(cat "$CONCH_TEMPLATE_CONCHD_PID_FILE")" 2>/dev/null || {
+            sed -n '1,400p' "$CONCH_TEMPLATE_CONCHD_LOG" >&2
+            exit 1
+          }
+          sleep 1
+        done
+        sed -n '1,400p' "$CONCH_TEMPLATE_CONCHD_LOG" >&2
+        exit 1
+
+    - name: Create and publish Conch template
+      if: ${{ steps.template-plan.outputs.cache-hit != 'true' }}
+      id: template-publish
+      shell: bash
+      working-directory: ${{ runner.temp }}/conch-template-source
+      env:
+        GHCR_TOKEN: ${{ github.token }}
+        CONCH_API_TIMEOUT: 90m
+        ROOTFS_IMAGE_REF: ${{ steps.rootfs.outputs.rootfs-image-ref }}
+        TEMPLATE_BUILD_ID: ${{ steps.template-plan.outputs.template-build-id }}
+        TEMPLATE_TAG: ${{ steps.template-plan.outputs.template-tag }}
+      run: |
+        local_tag="localhost/conch/e2b-template:build-$TEMPLATE_BUILD_ID"
+        create_output=$(./bin/conch template create \
+          --config "$CONCH_TEMPLATE_CONFIG" \
+          -n "$CONCH_TEMPLATE_NAMESPACE" \
+          --source "$ROOTFS_IMAGE_REF" \
+          --kernel "$CONCH_TEMPLATE_KERNEL_PATH" \
+          --initrd "$CONCH_TEMPLATE_INITRD" \
+          -t "$local_tag" \
+          --username "$GITHUB_ACTOR" \
+          --password "$GHCR_TOKEN")
+        printf '%s\n' "$create_output"
+        template_id=$(awk '$1 == "Template:" {print $2; exit}' <<<"$create_output")
+        local_digest=$(awk '$1 == "Image" && $2 == "digest:" {print $3; exit}' <<<"$create_output")
+        [[ "$template_id" =~ ^tmpl_[[:alnum:]]+$ ]]
+        [[ "$local_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+        ./bin/conch template push \
+          --config "$CONCH_TEMPLATE_CONFIG" \
+          -n "$CONCH_TEMPLATE_NAMESPACE" \
+          --username "$GITHUB_ACTOR" \
+          --password "$GHCR_TOKEN" \
+          --timeout 60m \
+          "$template_id" "$TEMPLATE_TAG"
+        remote_digest=$("$GITHUB_ACTION_PATH/inspect-template.sh" "$TEMPLATE_TAG")
+        [[ "$remote_digest" == "$local_digest" ]]
+        template_repository=${TEMPLATE_TAG%%:*}
+        echo "template-image-ref=$template_repository@$remote_digest" >> "$GITHUB_OUTPUT"
+
+    - name: Resolve immutable template reference
+      id: template
+      shell: bash
+      env:
+        CACHE_HIT: ${{ steps.template-plan.outputs.cache-hit }}
+        CACHED_IMAGE_REF: ${{ steps.template-plan.outputs.template-image-ref }}
+        PUBLISHED_IMAGE_REF: ${{ steps.template-publish.outputs.template-image-ref }}
+      run: |
+        if [[ "$CACHE_HIT" == true ]]; then
+          template_image_ref=$CACHED_IMAGE_REF
+        else
+          template_image_ref=$PUBLISHED_IMAGE_REF
+        fi
+        [[ "$template_image_ref" =~ ^ghcr\.io/conchsandbox/conch-e2b-template@sha256:[0-9a-f]{64}$ ]]
+        echo "template-image-ref=$template_image_ref" >> "$GITHUB_OUTPUT"
+        printf 'E2B template: %s\n' "$template_image_ref"
+        if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+          {
+            echo "### E2B template"
+            echo
+            echo "- Build ID: \`${{ steps.template-plan.outputs.template-build-id }}\`"
+            echo "- Cache hit: \`$CACHE_HIT\`"
+            echo "- Image: \`$template_image_ref\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+        fi
+
+    - name: Dump template builder diagnostics
+      if: failure()
+      shell: bash
+      run: |
+        set +e
+        if [[ -n "${CONCH_TEMPLATE_CONCHD_LOG:-}" && -f "$CONCH_TEMPLATE_CONCHD_LOG" ]]; then
+          sed -n '1,600p' "$CONCH_TEMPLATE_CONCHD_LOG"
+        fi
+
+    - name: Clean template producer files
+      if: always()
+      shell: bash
+      run: |
+        set +e
+        for pid_file in \
+          "${CONCH_TEMPLATE_CONCHD_PID_FILE:-}" \
+          "${CONCH_TEMPLATE_CONCHD_SERVICE_PID_FILE:-}"; do
+          if [[ -n "$pid_file" && -f "$pid_file" ]]; then
+            pid=$(<"$pid_file")
+            sudo -n kill "$pid" >/dev/null 2>&1 || true
+            for _ in $(seq 1 30); do
+              kill -0 "$pid" 2>/dev/null || break
+              sleep 1
+            done
+            kill -0 "$pid" 2>/dev/null && sudo -n kill -9 "$pid" >/dev/null 2>&1 || true
+          fi
+        done
+        if [[ -n "${DOCKER_CONFIG:-}" && -d "$DOCKER_CONFIG" ]]; then
+          docker logout ghcr.io >/dev/null 2>&1 || true
+          find "$DOCKER_CONFIG" -depth -delete
+        fi
+        for path in \
+          "${CONCH_TEMPLATE_WORKDIR:-}" \
+          "$RUNNER_TEMP/conch-template-source" \
+          "$RUNNER_TEMP/conch-template-go" \
+          "$RUNNER_TEMP/conch-template-kernel" \
+          "$RUNNER_TEMP/conch-template-rootfs-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"; do
+          [[ -z "$path" || ! -e "$path" ]] || sudo -n find "$path" -depth -delete
+        done

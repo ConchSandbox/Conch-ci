@@ -5,12 +5,10 @@ import urllib.request
 from importlib.metadata import version
 from urllib.parse import urlparse
 
-import grpc
 import requests
 
 sys.path.insert(0, os.getcwd())
 
-from api.py_proto import agent_pb2
 from conch import Sandbox as ConchSandbox
 from e2b.connection_config import ConnectionConfig
 from e2b_code_interpreter import Sandbox as CodeInterpreterSandbox
@@ -66,19 +64,13 @@ def wait_conch_health(sandbox, timeout=180):
     last_health = None
     while time.monotonic() < deadline:
         try:
-            response = sandbox.client.stub.HealthCheck(
-                agent_pb2.Empty(),
-                timeout=5,
-                metadata=sandbox.client._metadata(),
-            )
-            last_health = {"status": "OK", "message": response.message}
+            response = sandbox.client.health_check()
+            if response.get("status") != "OK":
+                raise RuntimeError(f"unexpected health response: {response!r}")
+            last_health = response
             return last_health
-        except grpc.RpcError as exc:
-            last_health = {
-                "status": "ERROR",
-                "code": str(exc.code()),
-                "message": exc.details(),
-            }
+        except Exception as exc:
+            last_health = {"status": "ERROR", "message": str(exc)}
         time.sleep(2)
     raise RuntimeError(f"timed out waiting for Conch health check: {last_health}")
 

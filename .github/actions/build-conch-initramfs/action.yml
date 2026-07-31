@@ -1,0 +1,45 @@
+name: Build minimal Conch initramfs
+description: Build the minimal initramfs containing conch-init
+
+inputs:
+  conch-source:
+    description: Checked-out Conch source directory
+    required: true
+  output:
+    description: Output initramfs path
+    required: true
+  work-dir:
+    description: Job-local build directory
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Build minimal Conch initramfs
+      shell: bash
+      env:
+        CONCH_SOURCE: ${{ inputs.conch-source }}
+        INITRAMFS_OUTPUT: ${{ inputs.output }}
+        INITRAMFS_WORK_DIR: ${{ inputs.work-dir }}
+        GOPROXY: https://goproxy.cn,https://proxy.golang.org,direct
+        GOMODCACHE: ${{ runner.temp }}/conch-go-modcache
+        GOCACHE: ${{ runner.temp }}/conch-go-build-cache
+        GOFLAGS: -buildvcs=false
+        GO_TAGS: exclude_graphdriver_btrfs
+      run: |
+        set -euo pipefail
+        [[ -x "$CONCH_SOURCE/scripts/build-conch-init-initramfs.sh" ]]
+        [[ -n "$INITRAMFS_OUTPUT" && "$INITRAMFS_OUTPUT" != / ]]
+        [[ -n "$INITRAMFS_WORK_DIR" && "$INITRAMFS_WORK_DIR" != / ]]
+        mkdir -p \
+          "$GOMODCACHE" \
+          "$GOCACHE" \
+          "$INITRAMFS_WORK_DIR" \
+          "$(dirname "$INITRAMFS_OUTPUT")"
+        (
+          cd "$CONCH_SOURCE"
+          OUTPUT="$INITRAMFS_OUTPUT" \
+          WORK_DIR="$INITRAMFS_WORK_DIR/packing" \
+          ROOTFS_DIR="$INITRAMFS_WORK_DIR/rootfs" \
+            make BIN_DIR="$INITRAMFS_WORK_DIR/bin" build-conch-init-initramfs
+        )

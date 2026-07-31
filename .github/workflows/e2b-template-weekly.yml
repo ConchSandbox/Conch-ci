@@ -1,0 +1,81 @@
+name: Weekly E2B Template
+run-name: weekly-e2b-template-${{ github.event.inputs.conch_ref || vars.CONCH_E2B_TEMPLATE_REF || vars.CONCH_REF || 'dev' }}
+
+on:
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      conch_ref:
+        description: Conch ref resolved once to an immutable commit
+        required: false
+        default: dev
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CONCH_REPOSITORY: https://github.com/ConchSandbox/Conch.git
+  CONCH_REF: ${{ github.event.inputs.conch_ref || vars.CONCH_E2B_TEMPLATE_REF || vars.CONCH_REF || 'dev' }}
+
+jobs:
+  resolve-conch:
+    name: Resolve Conch commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      conch-commit: ${{ steps.resolve.outputs.conch-commit }}
+    steps:
+      - name: Checkout CI repository
+        uses: actions/checkout@v4.4.0
+      - name: Resolve immutable Conch commit
+        id: resolve
+        run: |
+          scripts/runner-env/jobs/resolve-conch-commit.sh \
+            --repository "$CONCH_REPOSITORY" \
+            --ref "$CONCH_REF"
+
+  build-kernel:
+    name: Build or reuse ARM64 kernel
+    needs: resolve-conch
+    runs-on: [self-hosted, Linux, ARM64, Huawei]
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      actions: write
+    outputs:
+      kernel-sha256: ${{ steps.kernel.outputs.kernel-sha256 }}
+      kernel-artifact-name: ${{ steps.kernel.outputs.kernel-artifact-name }}
+    steps:
+      - name: Checkout CI repository
+        uses: actions/checkout@v4.4.0
+
+      - name: Build or reuse ARM64 kernel
+        id: kernel
+        uses: ./.github/actions/build-kernel
+        with:
+          conch-commit: ${{ needs.resolve-conch.outputs.conch-commit }}
+
+  build-template:
+    name: Build or reuse E2B template
+    needs: [resolve-conch, build-kernel]
+    runs-on: [self-hosted, Linux, ARM64, Huawei]
+    timeout-minutes: 240
+    permissions:
+      contents: read
+      actions: read
+      packages: write
+    steps:
+      - name: Checkout CI repository
+        uses: actions/checkout@v4.4.0
+
+      - name: Build or reuse E2B template
+        uses: ./.github/actions/build-e2b-template
+        with:
+          conch-commit: ${{ needs.resolve-conch.outputs.conch-commit }}
+          kernel-artifact-name: ${{ needs.build-kernel.outputs.kernel-artifact-name }}
+          kernel-sha256: ${{ needs.build-kernel.outputs.kernel-sha256 }}

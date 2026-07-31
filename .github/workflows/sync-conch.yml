@@ -10,12 +10,12 @@ on:
         required: false
         type: string
       run_build:
-        description: Run Conch Build & Static Check
+        description: Run Conch Build and Check
         required: false
         type: boolean
         default: true
-      run_agent_init_e2e:
-        description: Run Conch-agent E2E
+      run_conch_init_smoke:
+        description: Run Conch Init Smoke
         required: false
         type: boolean
         default: true
@@ -40,13 +40,13 @@ jobs:
 
     steps:
       - name: Checkout sync scripts
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.4.0
         with:
           persist-credentials: false
 
       - name: Create GitHub App sync token
         id: sync-token
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@v3.2.0
         with:
           app-id: ${{ vars.CONCH_SYNC_APP_ID }}
           private-key: ${{ secrets.CONCH_SYNC_APP_PRIVATE_KEY }}
@@ -60,17 +60,17 @@ jobs:
         if: github.event_name == 'workflow_dispatch' && inputs.atomgit_pr_number != ''
         env:
           RUN_BUILD: ${{ inputs.run_build }}
-          RUN_AGENT_INIT_E2E: ${{ inputs.run_agent_init_e2e }}
+          RUN_CONCH_INIT_SMOKE: ${{ inputs.run_conch_init_smoke }}
           RUN_E2E_CI: ${{ inputs.run_e2e_ci }}
         run: |
           set -euo pipefail
 
           workflows=()
           if [ "$RUN_BUILD" = "true" ]; then
-            workflows+=("build.yml")
+            workflows+=("build-and-check.yml")
           fi
-          if [ "$RUN_AGENT_INIT_E2E" = "true" ]; then
-            workflows+=("conch-agent-init-e2e.yml")
+          if [ "$RUN_CONCH_INIT_SMOKE" = "true" ]; then
+            workflows+=("conch-init-smoke.yml")
           fi
           if [ "$RUN_E2E_CI" = "true" ]; then
             workflows+=("e2e-ci.yml")
