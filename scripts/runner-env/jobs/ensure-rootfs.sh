@@ -178,7 +178,7 @@ printf 'rootfs cache hit: %s\n' "$cache_hit"
 [[ -z "$image_ref" ]] || printf 'rootfs image: %s\n' "$image_ref"
 if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
   {
-    echo "### E2B rootfs"
+    echo "### Rootfs image"
     echo
     echo "- Build ID: \`$build_id\`"
     echo "- Conch commit: \`$conch_commit\`"

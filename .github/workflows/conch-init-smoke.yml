@@ -106,10 +106,9 @@ jobs:
       - name: Prepare Conch SDK virtualenv
         id: sdk
         run: |
-          scripts/runner-env/jobs/prepare-e2b-sdk-venv.sh \
+          scripts/runner-env/jobs/prepare-conch-sdk-venv.sh \
             --conch-source "$RUNNER_TEMP/conch-init-source" \
-            --venv "$RUNNER_TEMP/conch-init-sdk-venv" \
-            --sdk-only
+            --venv "$RUNNER_TEMP/conch-init-sdk-venv"
 
       - name: Download kernel artifact
         uses: actions/download-artifact@v4.3.0

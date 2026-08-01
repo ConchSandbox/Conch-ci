@@ -44,7 +44,7 @@ runs:
         [[ -x bin/conch ]]
         [[ -f "$CONCH_CONFIG" ]]
         [[ -n "$CONCH_NAMESPACE" ]]
-        [[ "$TEMPLATE_IMAGE_REF" =~ ^ghcr\.io/conchsandbox/conch-e2b-template@sha256:[0-9a-f]{64}$ ]]
+        [[ "$TEMPLATE_IMAGE_REF" =~ ^ghcr\.io/[a-z0-9_.-]+/[a-z0-9_.-]+@sha256:[0-9a-f]{64}$ ]]
 
         pull_output=$(./bin/conch template pull \
           --config "$CONCH_CONFIG" \

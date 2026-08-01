@@ -16,7 +16,7 @@ from packaging.version import Version
 
 
 def log(message):
-    print(f"[e2b-sdk-e2e] {message}", flush=True)
+    print(f"[e2b-workload-smoke] {message}", flush=True)
 
 
 REQUEST_TIMEOUT = int(os.environ.get("CONCH_E2B_SDK_HTTP_TIMEOUT", "300"))
@@ -171,7 +171,7 @@ def main():
     if "shared-through-envd" not in shared_text:
         raise RuntimeError(f"code interpreter cannot read envd-written file: {shared_text!r}")
 
-    log("conch e2b sdk e2e ok")
+    log("conch e2b workload smoke ok")
 
 
 if __name__ == "__main__":

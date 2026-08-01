@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-reference=${1:?template reference is required}
+reference=${1:?Conch template reference is required}
 work_dir=$(mktemp -d)
 trap 'find "$work_dir" -depth -delete' EXIT
 

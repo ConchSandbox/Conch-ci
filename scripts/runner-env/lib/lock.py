@@ -12,7 +12,6 @@ from typing import Any
 
 
 COMPONENTS = ("cloud_hypervisor", "buildkit", "erofs_utils", "cni_plugins")
-SDK_PACKAGES = ("e2b", "e2b-code-interpreter")
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 EXACT_VERSION_RE = re.compile(r"[0-9]+(?:\.[0-9]+)+(?:[A-Za-z0-9.-]*)?")
@@ -114,23 +113,9 @@ def validate_lock(value: Any) -> dict[str, Any]:
     inputs = exact_object(
         lock["job_build_inputs"],
         "$.job_build_inputs",
-        (
-            "go_toolchain",
-            "e2b_sdk_packages",
-            "kernel_commit",
-            "kernel_archive_sha256",
-        ),
+        ("go_toolchain", "kernel_commit", "kernel_archive_sha256"),
     )
     validate_version(inputs["go_toolchain"], "$.job_build_inputs.go_toolchain")
-    packages = exact_object(
-        inputs["e2b_sdk_packages"],
-        "$.job_build_inputs.e2b_sdk_packages",
-        SDK_PACKAGES,
-    )
-    for name in SDK_PACKAGES:
-        version = string(packages[name], f"$.job_build_inputs.e2b_sdk_packages.{name}")
-        if not EXACT_VERSION_RE.fullmatch(version) or FLOATING_RE.search(version):
-            raise ValidationError(f"$.job_build_inputs.e2b_sdk_packages.{name}: expected exact version")
     string(inputs["kernel_commit"], "$.job_build_inputs.kernel_commit", COMMIT_RE)
     string(
         inputs["kernel_archive_sha256"],

@@ -74,8 +74,11 @@ jobs:
         uses: actions/checkout@v4.4.0
 
       - name: Build or reuse E2B template
-        uses: ./.github/actions/build-e2b-template
+        uses: ./.github/actions/build-conch-template
         with:
           conch-commit: ${{ needs.resolve-conch.outputs.conch-commit }}
           kernel-artifact-name: ${{ needs.build-kernel.outputs.kernel-artifact-name }}
           kernel-sha256: ${{ needs.build-kernel.outputs.kernel-sha256 }}
+          dockerfile: examples/e2b-rootfs/Dockerfile
+          rootfs-repository: ghcr.io/conchsandbox/conch-e2b-rootfs
+          template-repository: ghcr.io/conchsandbox/conch-e2b-template

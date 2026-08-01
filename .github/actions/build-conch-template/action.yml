@@ -1,5 +1,5 @@
-name: Build E2B template
-description: Build or reuse and publish the locked E2B Conch template
+name: Build Conch template
+description: Build, reuse, and publish a parameterized Conch template
 
 inputs:
   conch-commit:
@@ -10,6 +10,15 @@ inputs:
     required: true
   kernel-sha256:
     description: Expected kernel image SHA-256
+    required: true
+  dockerfile:
+    description: Conch-repository-relative Dockerfile used to build the rootfs
+    required: true
+  rootfs-repository:
+    description: GHCR repository used to cache and publish the rootfs
+    required: true
+  template-repository:
+    description: GHCR repository used to cache and publish the Conch template
     required: true
 
 outputs:
@@ -52,12 +61,13 @@ runs:
       id: rootfs
       shell: bash
       env:
-        ROOTFS_REPOSITORY: ghcr.io/conchsandbox/conch-e2b-rootfs
+        DOCKERFILE: ${{ inputs.dockerfile }}
+        ROOTFS_REPOSITORY: ${{ inputs.rootfs-repository }}
       run: |
         scripts/runner-env/jobs/ensure-rootfs.sh \
           --conch-source "$RUNNER_TEMP/conch-template-source" \
           --conch-commit "${{ inputs.conch-commit }}" \
-          --dockerfile examples/e2b-rootfs/Dockerfile \
+          --dockerfile "$DOCKERFILE" \
           --repository "$ROOTFS_REPOSITORY" \
           --bin-dir "${{ steps.runner-environment.outputs.binary-dir }}" \
           --work-dir "$RUNNER_TEMP/conch-template-rootfs-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
@@ -69,18 +79,20 @@ runs:
         CONCH_COMMIT: ${{ inputs.conch-commit }}
         KERNEL_SHA256: ${{ inputs.kernel-sha256 }}
         ROOTFS_IMAGE_REF: ${{ steps.rootfs.outputs.rootfs-image-ref }}
-        TEMPLATE_REPOSITORY: ghcr.io/conchsandbox/conch-e2b-template
+        TEMPLATE_REPOSITORY: ${{ inputs.template-repository }}
       run: |
         [[ "$CONCH_COMMIT" =~ ^[0-9a-f]{40}$ ]]
         [[ "$KERNEL_SHA256" =~ ^[0-9a-f]{64}$ ]]
         [[ "$ROOTFS_IMAGE_REF" =~ @sha256:[0-9a-f]{64}$ ]]
+        [[ "$TEMPLATE_REPOSITORY" =~ ^ghcr\.io/[a-z0-9_.-]+/[a-z0-9_.-]+$ ]]
         recipe_sha256=$(
           {
             sha256sum "$GITHUB_ACTION_PATH/action.yml" | awk '{print $1}'
             sha256sum "$GITHUB_WORKSPACE/.github/actions/build-conch/action.yml" | awk '{print $1}'
             sha256sum "$GITHUB_WORKSPACE/.github/actions/build-conch-initramfs/action.yml" | awk '{print $1}'
             sha256sum "$GITHUB_WORKSPACE/.github/actions/start-conchd/action.yml" | awk '{print $1}'
-            sha256sum runner-env.lock.yaml | awk '{print $1}'
+            printf 'go-toolchain=%s\n' "$(python3 scripts/runner-env/lib/lock.py \
+              get job_build_inputs.go_toolchain.version)"
           } | sha256sum | awk '{print $1}'
         )
         template_build_id=$(
@@ -171,7 +183,7 @@ runs:
         CONCH_TEMPLATE_NAMESPACE: ${{ steps.conchd.outputs.namespace }}
         CONCH_TEMPLATE_INITRD: ${{ runner.temp }}/conch-template-initramfs-${{ github.run_id }}-${{ github.run_attempt }}/conch-init-initramfs.cpio.gz
       run: |
-        local_tag="localhost/conch/e2b-template:build-$TEMPLATE_BUILD_ID"
+        local_tag="localhost/conch/template:build-$TEMPLATE_BUILD_ID"
         create_output=$(./bin/conch template create \
           --config "$CONCH_TEMPLATE_CONFIG" \
           -n "$CONCH_TEMPLATE_NAMESPACE" \
@@ -205,18 +217,21 @@ runs:
         CACHE_HIT: ${{ steps.template-plan.outputs.cache-hit }}
         CACHED_IMAGE_REF: ${{ steps.template-plan.outputs.template-image-ref }}
         PUBLISHED_IMAGE_REF: ${{ steps.template-publish.outputs.template-image-ref }}
+        TEMPLATE_REPOSITORY: ${{ inputs.template-repository }}
       run: |
         if [[ "$CACHE_HIT" == true ]]; then
           template_image_ref=$CACHED_IMAGE_REF
         else
           template_image_ref=$PUBLISHED_IMAGE_REF
         fi
-        [[ "$template_image_ref" =~ ^ghcr\.io/conchsandbox/conch-e2b-template@sha256:[0-9a-f]{64}$ ]]
+        template_digest=${template_image_ref#"$TEMPLATE_REPOSITORY@"}
+        [[ "$template_image_ref" == "$TEMPLATE_REPOSITORY@$template_digest" ]]
+        [[ "$template_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
         echo "template-image-ref=$template_image_ref" >> "$GITHUB_OUTPUT"
-        printf 'E2B template: %s\n' "$template_image_ref"
+        printf 'Conch template: %s\n' "$template_image_ref"
         if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
           {
-            echo "### E2B template"
+            echo "### Conch template"
             echo
             echo "- Build ID: \`${{ steps.template-plan.outputs.template-build-id }}\`"
             echo "- Cache hit: \`$CACHE_HIT\`"

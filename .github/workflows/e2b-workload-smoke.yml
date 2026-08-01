@@ -1,4 +1,4 @@
-name: Conch End-to-End CI
+name: E2B Workload Smoke
 run-name: ${{ github.event.inputs.ci_marker || github.event.inputs.conch_ref || github.ref_name }}
 
 on:
@@ -15,7 +15,7 @@ on:
         description: Conch ref resolved once to an immutable commit
         required: false
         default: dev
-      run_sdk_e2e:
+      run_sdk_smoke:
         description: Run E2B SDK operations after pulling the published template
         required: false
         type: boolean
@@ -89,14 +89,17 @@ jobs:
 
       - name: Build or reuse E2B template
         id: template
-        uses: ./.github/actions/build-e2b-template
+        uses: ./.github/actions/build-conch-template
         with:
           conch-commit: ${{ needs.resolve-conch.outputs.conch-commit }}
           kernel-artifact-name: ${{ needs.build-kernel.outputs.kernel-artifact-name }}
           kernel-sha256: ${{ needs.build-kernel.outputs.kernel-sha256 }}
+          dockerfile: examples/e2b-rootfs/Dockerfile
+          rootfs-repository: ghcr.io/conchsandbox/conch-e2b-rootfs
+          template-repository: ghcr.io/conchsandbox/conch-e2b-template
 
-  e2e:
-    name: Published Template and E2B SDK E2E
+  workload-smoke:
+    name: E2B Workload Smoke
     needs: [resolve-conch, build-template]
     runs-on: [self-hosted, Linux, ARM64, Huawei]
     timeout-minutes: 150
@@ -118,28 +121,29 @@ jobs:
           scripts/runner-env/jobs/checkout-conch.sh \
             --repository "$CONCH_REPOSITORY" \
             --commit "${{ needs.resolve-conch.outputs.conch-commit }}" \
-            --destination "$RUNNER_TEMP/conch-e2e-source"
+            --destination "$RUNNER_TEMP/conch-e2b-workload-source"
 
       - name: Prepare locked E2B SDK virtualenv
         run: |
-          scripts/runner-env/jobs/prepare-e2b-sdk-venv.sh \
-            --conch-source "$RUNNER_TEMP/conch-e2e-source" \
-            --venv "$RUNNER_TEMP/conch-e2e-sdk-venv"
-          echo "CONCH_SDK_PYTHON=$RUNNER_TEMP/conch-e2e-sdk-venv/bin/python" >> "$GITHUB_ENV"
+          scripts/runner-env/jobs/prepare-conch-sdk-venv.sh \
+            --conch-source "$RUNNER_TEMP/conch-e2b-workload-source" \
+            --venv "$RUNNER_TEMP/conch-e2b-workload-sdk-venv" \
+            --requirements scripts/workflows/e2b-workload-smoke/requirements.lock.txt
+          echo "CONCH_SDK_PYTHON=$RUNNER_TEMP/conch-e2b-workload-sdk-venv/bin/python" >> "$GITHUB_ENV"
 
       - name: Build Conch binaries
         uses: ./.github/actions/build-conch
         with:
-          conch-source: ${{ runner.temp }}/conch-e2e-source
+          conch-source: ${{ runner.temp }}/conch-e2b-workload-source
 
       - name: Start isolated conchd
         id: conchd
         uses: ./.github/actions/start-conchd
         with:
-          conch-source: ${{ runner.temp }}/conch-e2e-source
+          conch-source: ${{ runner.temp }}/conch-e2b-workload-source
           binary-dir: ${{ steps.runner-environment.outputs.binary-dir }}
-          runtime-name: conch-e2e
-          app-name: conch-e2e
+          runtime-name: conch-e2b-workload
+          app-name: conch-e2b-workload
           log-level: debug
           api-timeout: ${{ env.CONCH_API_TIMEOUT }}
 
@@ -172,7 +176,7 @@ jobs:
         id: template
         uses: ./.github/actions/pull-conch-template
         with:
-          conch-source: ${{ runner.temp }}/conch-e2e-source
+          conch-source: ${{ runner.temp }}/conch-e2b-workload-source
           config: ${{ steps.conchd.outputs.config }}
           namespace: ${{ steps.conchd.outputs.namespace }}
           template-image-ref: ${{ needs.build-template.outputs.template-image-ref }}
@@ -180,14 +184,15 @@ jobs:
           registry-token: ${{ github.token }}
 
       - name: Boot sandbox and validate E2B SDK operations
-        if: ${{ github.event.inputs.run_sdk_e2e != 'false' }}
+        if: ${{ github.event.inputs.run_sdk_smoke != 'false' }}
         timeout-minutes: 20
-        working-directory: ${{ runner.temp }}/conch-e2e-source
+        working-directory: ${{ runner.temp }}/conch-e2b-workload-source
         env:
           CONCH_TEMPLATE_ID: ${{ steps.template.outputs.template-id }}
         run: |
           timeout --foreground --kill-after=30s 15m \
-            "$CONCH_SDK_PYTHON" -u "$GITHUB_WORKSPACE/.github/scripts/e2b_sdk_e2e.py"
+            "$CONCH_SDK_PYTHON" -u \
+              "$GITHUB_WORKSPACE/scripts/workflows/e2b-workload-smoke/e2b-sdk-smoke.py"
 
       - name: Dump conchd and network diagnostics on failure
         if: failure()
@@ -195,7 +200,7 @@ jobs:
           START_CONCHD_WORK_DIR: ${{ steps.conchd.outputs.work-dir }}
         run: |
           set +e
-          START_CONCHD_WORK_DIR=${START_CONCHD_WORK_DIR:-$RUNNER_TEMP/conch-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}}
+          START_CONCHD_WORK_DIR=${START_CONCHD_WORK_DIR:-$RUNNER_TEMP/conch-e2b-workload-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}}
           [[ ! -f "$START_CONCHD_WORK_DIR/conchd.log" ]] || \
             sed -n '1,600p' "$START_CONCHD_WORK_DIR/conchd.log"
           sudo -n ip addr show
@@ -204,7 +209,7 @@ jobs:
           sudo -n iptables -t nat -S
 
       - name: Delete E2B sandbox
-        if: ${{ always() && github.event.inputs.run_sdk_e2e != 'false' }}
+        if: ${{ always() && github.event.inputs.run_sdk_smoke != 'false' }}
         run: |
           set +e
           if [[ -n "${CONCH_SDK_PYTHON:-}" && -x "$CONCH_SDK_PYTHON" && -n "${CONCH_SDK_CONFIG:-}" ]]; then
@@ -231,15 +236,15 @@ jobs:
         if: always()
         uses: ./.github/actions/cleanup-conch-runtime
         with:
-          runtime-name: conch-e2e
+          runtime-name: conch-e2b-workload
 
-      - name: Clean E2E files
+      - name: Clean workload files
         if: always()
         run: |
           set +e
           for path in \
-            "$RUNNER_TEMP/conch-e2e-source" \
-            "$RUNNER_TEMP/conch-e2e-sdk-venv"; do
+            "$RUNNER_TEMP/conch-e2b-workload-source" \
+            "$RUNNER_TEMP/conch-e2b-workload-sdk-venv"; do
             [[ -z "$path" || ! -e "$path" ]] || sudo -n find "$path" -depth -delete
           done
           exit 0

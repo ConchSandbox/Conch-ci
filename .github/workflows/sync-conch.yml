@@ -19,8 +19,8 @@ on:
         required: false
         type: boolean
         default: true
-      run_e2e_ci:
-        description: Run Conch End-to-End CI
+      run_e2b_workload_smoke:
+        description: Run E2B Workload Smoke
         required: false
         type: boolean
         default: true
@@ -61,7 +61,7 @@ jobs:
         env:
           RUN_BUILD: ${{ inputs.run_build }}
           RUN_CONCH_INIT_SMOKE: ${{ inputs.run_conch_init_smoke }}
-          RUN_E2E_CI: ${{ inputs.run_e2e_ci }}
+          RUN_E2B_WORKLOAD_SMOKE: ${{ inputs.run_e2b_workload_smoke }}
         run: |
           set -euo pipefail
 
@@ -72,8 +72,8 @@ jobs:
           if [ "$RUN_CONCH_INIT_SMOKE" = "true" ]; then
             workflows+=("conch-init-smoke.yml")
           fi
-          if [ "$RUN_E2E_CI" = "true" ]; then
-            workflows+=("e2e-ci.yml")
+          if [ "$RUN_E2B_WORKLOAD_SMOKE" = "true" ]; then
+            workflows+=("e2b-workload-smoke.yml")
           fi
 
           if [ "${#workflows[@]}" -eq 0 ]; then
