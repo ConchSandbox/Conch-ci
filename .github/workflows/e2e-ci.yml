@@ -33,7 +33,6 @@ env:
   CONCH_REF: ${{ github.event.inputs.conch_ref || vars.CONCH_REF || 'dev' }}
   CONCH_API_TIMEOUT: 90m
   CONCH_E2B_SDK_HTTP_TIMEOUT: "300"
-  GO_TAGS: exclude_graphdriver_btrfs
 
 jobs:
   resolve-conch:
@@ -122,7 +121,6 @@ jobs:
             --destination "$RUNNER_TEMP/conch-e2e-source"
 
       - name: Prepare locked E2B SDK virtualenv
-        id: sdk
         run: |
           scripts/runner-env/jobs/prepare-e2b-sdk-venv.sh \
             --conch-source "$RUNNER_TEMP/conch-e2e-source" \
@@ -134,77 +132,33 @@ jobs:
         with:
           conch-source: ${{ runner.temp }}/conch-e2e-source
 
-      - name: Prepare isolated E2E workspace
+      - name: Start isolated conchd
+        id: conchd
+        uses: ./.github/actions/start-conchd
+        with:
+          conch-source: ${{ runner.temp }}/conch-e2e-source
+          binary-dir: ${{ steps.runner-environment.outputs.binary-dir }}
+          runtime-name: conch-e2e
+          app-name: conch-e2e
+          log-level: debug
+          api-timeout: ${{ env.CONCH_API_TIMEOUT }}
+
+      - name: Prepare E2B SDK configuration
         env:
-          MANAGED_BINARY_DIR: ${{ steps.runner-environment.outputs.binary-dir }}
+          CONCHD_WORK_DIR: ${{ steps.conchd.outputs.work-dir }}
+          CONCHD_API_URL: ${{ steps.conchd.outputs.api-url }}
+          CONCHD_NAMESPACE: ${{ steps.conchd.outputs.namespace }}
         run: |
-          workdir="$RUNNER_TEMP/conch-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          [[ ! -e "$workdir" ]] || sudo -n find "$workdir" -depth -delete
-          mkdir -p "$workdir/cni/net.d"
-          install -m 0644 "$RUNNER_TEMP/conch-e2e-source/config/cni/net.d/"*.conf "$workdir/cni/net.d/"
-          port=$(python3 - <<'PY'
-          import socket
-          with socket.socket() as sock:
-              sock.bind(("127.0.0.1", 0))
-              print(sock.getsockname()[1])
-          PY
-          )
-          namespace="conch-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           sandbox_id="sandbox_e2b_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
           {
-            echo "CONCH_E2E_WORKDIR=$workdir"
-            echo "CONCH_CONFIG=$workdir/config.yaml"
-            echo "CONCH_SDK_CONFIG=$workdir/sdk-config.yaml"
-            echo "CONCHD_LOG=$workdir/conchd.log"
-            echo "CONCHD_PID_FILE=$workdir/conchd.pid"
-            echo "CONCHD_SERVICE_PID_FILE=$workdir/conchd-service.pid"
-            echo "CONCH_API_URL=http://127.0.0.1:$port"
-            echo "CONCH_NAMESPACE=$namespace"
+            echo "CONCH_SDK_CONFIG=$CONCHD_WORK_DIR/sdk-config.yaml"
+            echo "CONCH_NAMESPACE=$CONCHD_NAMESPACE"
             echo "CONCH_SANDBOX_ID=$sandbox_id"
-            echo "CONCH_TEMPLATE_IMAGE=${{ needs.build-template.outputs.template-image-ref }}"
           } >> "$GITHUB_ENV"
-          cat > "$workdir/config.yaml" <<YAML
-          app:
-            name: conch-e2e
-          log:
-            level: debug
-            output: stdout
-          server:
-            unix_socket: ""
-            pid_file: "$workdir/conchd-service.pid"
-            work_dir: "$workdir/work"
-            host: 127.0.0.1
-            port: $port
-          state:
-            path: "$workdir/state.db"
-          network:
-            pool_size: 1
-            dynamic_reservation: false
-            tap_ip: 192.168.100.2
-            tap_mask: 24
-            cni:
-              plugin_bin_dirs:
-                - "$MANAGED_BINARY_DIR/cni"
-              plugin_conf_dir: "$workdir/cni/net.d"
-              plugin_max_conf: 1
-              if_name: eth0
-              setup_serially: true
-          containerd:
-            root_dir: "$workdir/containerd-root"
-            state_dir: "$workdir/containerd-state"
-            default_namespace: "$namespace"
-          image:
-            default_kernel_image: ""
-          sandbox:
-            vsock_signal_retry: 10ms
-            vsock_signal_timeout: 90s
-            request_timeout: 120s
-            default_vmm_name: cloud-hypervisor
-          YAML
-          cat > "$workdir/sdk-config.yaml" <<YAML
+          cat > "$CONCHD_WORK_DIR/sdk-config.yaml" <<YAML
           sandbox:
             unix_socket: ""
-            api_url: "http://127.0.0.1:$port"
+            api_url: "$CONCHD_API_URL"
             sandbox_id: "$sandbox_id"
             template_id: ""
           image:
@@ -214,67 +168,43 @@ jobs:
             ram_mb: 2048
           YAML
 
-      - name: Start conchd
-        working-directory: ${{ runner.temp }}/conch-e2e-source
-        run: |
-          runtime_path="$PATH:/usr/local/sbin:/usr/sbin:/sbin"
-          sudo -n sh -c 'exec env PATH="$1" HOME="$2" CONCH_API_TIMEOUT="$3" ./bin/conchd -config "$4" > "$5" 2>&1' \
-            sh "$runtime_path" "$HOME" "$CONCH_API_TIMEOUT" "$CONCH_CONFIG" "$CONCHD_LOG" &
-          echo "$!" > "$CONCHD_PID_FILE"
-          for _ in $(seq 1 120); do
-            if curl -fsS -X POST "$CONCH_API_URL/api/template/list" \
-              -H 'Content-Type: application/json' \
-              -d "{\"namespace\":\"$CONCH_NAMESPACE\"}" >/dev/null 2>&1; then
-              exit 0
-            fi
-            kill -0 "$(cat "$CONCHD_PID_FILE")" 2>/dev/null || {
-              sed -n '1,400p' "$CONCHD_LOG" >&2
-              exit 1
-            }
-            sleep 1
-          done
-          sed -n '1,400p' "$CONCHD_LOG" >&2
-          exit 1
-
       - name: Pull published Conch template
-        working-directory: ${{ runner.temp }}/conch-e2e-source
-        env:
-          GHCR_TOKEN: ${{ github.token }}
-        run: |
-          [[ "$CONCH_TEMPLATE_IMAGE" =~ ^ghcr\.io/conchsandbox/conch-e2b-template@sha256:[0-9a-f]{64}$ ]]
-          pull_output=$(./bin/conch template pull \
-            --config "$CONCH_CONFIG" \
-            -n "$CONCH_NAMESPACE" \
-            --username "$GITHUB_ACTOR" \
-            --password "$GHCR_TOKEN" \
-            "$CONCH_TEMPLATE_IMAGE")
-          printf '%s\n' "$pull_output"
-          template_id=$(awk '$1 == "Template:" {print $2; exit}' <<<"$pull_output")
-          image_digest=$(awk '$1 == "Image" && $2 == "digest:" {print $3; exit}' <<<"$pull_output")
-          [[ "$template_id" =~ ^tmpl_[[:alnum:]]+$ ]]
-          [[ "$image_digest" == "${CONCH_TEMPLATE_IMAGE##*@}" ]]
-          echo "CONCH_TEMPLATE_ID=$template_id" >> "$GITHUB_ENV"
+        id: template
+        uses: ./.github/actions/pull-conch-template
+        with:
+          conch-source: ${{ runner.temp }}/conch-e2e-source
+          config: ${{ steps.conchd.outputs.config }}
+          namespace: ${{ steps.conchd.outputs.namespace }}
+          template-image-ref: ${{ needs.build-template.outputs.template-image-ref }}
+          registry-username: ${{ github.actor }}
+          registry-token: ${{ github.token }}
 
       - name: Boot sandbox and validate E2B SDK operations
         if: ${{ github.event.inputs.run_sdk_e2e != 'false' }}
         timeout-minutes: 20
         working-directory: ${{ runner.temp }}/conch-e2e-source
+        env:
+          CONCH_TEMPLATE_ID: ${{ steps.template.outputs.template-id }}
         run: |
           timeout --foreground --kill-after=30s 15m \
             "$CONCH_SDK_PYTHON" -u "$GITHUB_WORKSPACE/.github/scripts/e2b_sdk_e2e.py"
 
       - name: Dump conchd and network diagnostics on failure
         if: failure()
+        env:
+          START_CONCHD_WORK_DIR: ${{ steps.conchd.outputs.work-dir }}
         run: |
           set +e
-          [[ -z "${CONCHD_LOG:-}" || ! -f "$CONCHD_LOG" ]] || sed -n '1,600p' "$CONCHD_LOG"
+          START_CONCHD_WORK_DIR=${START_CONCHD_WORK_DIR:-$RUNNER_TEMP/conch-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}}
+          [[ ! -f "$START_CONCHD_WORK_DIR/conchd.log" ]] || \
+            sed -n '1,600p' "$START_CONCHD_WORK_DIR/conchd.log"
           sudo -n ip addr show
           sudo -n ip route show
           sudo -n ip netns list
           sudo -n iptables -t nat -S
 
-      - name: Clean E2E resources
-        if: always()
+      - name: Delete E2B sandbox
+        if: ${{ always() && github.event.inputs.run_sdk_e2e != 'false' }}
         run: |
           set +e
           if [[ -n "${CONCH_SDK_PYTHON:-}" && -x "$CONCH_SDK_PYTHON" && -n "${CONCH_SDK_CONFIG:-}" ]]; then
@@ -295,29 +225,21 @@ jobs:
                   print(f"warning: sandbox cleanup failed: {exc}")
           PY
           fi
-          for pid_file in "${CONCHD_PID_FILE:-}" "${CONCHD_SERVICE_PID_FILE:-}"; do
-            if [[ -n "$pid_file" && -f "$pid_file" ]]; then
-              pid=$(<"$pid_file")
-              sudo -n kill "$pid" >/dev/null 2>&1 || true
-              for _ in $(seq 1 30); do
-                kill -0 "$pid" 2>/dev/null || break
-                sleep 1
-              done
-              kill -0 "$pid" 2>/dev/null && sudo -n kill -9 "$pid" >/dev/null 2>&1 || true
-            fi
-          done
-          for namespace in $(sudo -n ip netns list | awk '/^ns-[0-9]+([[:space:]]|$)/ {print $1}'); do
-            sudo -n ip netns delete "$namespace" || true
-          done
-          sudo -n find /var/lib/cni/networks/conch-bridge -mindepth 1 -delete 2>/dev/null || true
-          sudo -n find /var/lib/cni/results/conch-bridge -mindepth 1 -delete 2>/dev/null || true
-          for bridge in cni-conch0 conch_bridge; do
-            sudo -n ip link delete "$bridge" >/dev/null 2>&1 || true
-          done
+          exit 0
+
+      - name: Clean Conch runtime
+        if: always()
+        uses: ./.github/actions/cleanup-conch-runtime
+        with:
+          runtime-name: conch-e2e
+
+      - name: Clean E2E files
+        if: always()
+        run: |
+          set +e
           for path in \
-            "${CONCH_E2E_WORKDIR:-}" \
             "$RUNNER_TEMP/conch-e2e-source" \
-            "$RUNNER_TEMP/conch-e2e-go" \
             "$RUNNER_TEMP/conch-e2e-sdk-venv"; do
             [[ -z "$path" || ! -e "$path" ]] || sudo -n find "$path" -depth -delete
           done
+          exit 0

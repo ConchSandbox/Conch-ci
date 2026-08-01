@@ -79,6 +79,7 @@ runs:
             sha256sum "$GITHUB_ACTION_PATH/action.yml" | awk '{print $1}'
             sha256sum "$GITHUB_WORKSPACE/.github/actions/build-conch/action.yml" | awk '{print $1}'
             sha256sum "$GITHUB_WORKSPACE/.github/actions/build-conch-initramfs/action.yml" | awk '{print $1}'
+            sha256sum "$GITHUB_WORKSPACE/.github/actions/start-conchd/action.yml" | awk '{print $1}'
             sha256sum runner-env.lock.yaml | awk '{print $1}'
           } | sha256sum | awk '{print $1}'
         )
@@ -137,105 +138,23 @@ runs:
         [[ "$(sha256sum "$kernel_path" | awk '{print $1}')" == "$KERNEL_SHA256" ]]
         echo "CONCH_TEMPLATE_KERNEL_PATH=$kernel_path" >> "$GITHUB_ENV"
 
-    - name: Prepare isolated template workspace
-      if: ${{ steps.template-plan.outputs.cache-hit != 'true' }}
-      shell: bash
-      env:
-        MANAGED_BINARY_DIR: ${{ steps.runner-environment.outputs.binary-dir }}
-      run: |
-        workdir="$RUNNER_TEMP/conch-template-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-        [[ ! -e "$workdir" ]] || sudo -n find "$workdir" -depth -delete
-        mkdir -p "$workdir/cni/net.d"
-        install -m 0644 "$RUNNER_TEMP/conch-template-source/config/cni/net.d/"*.conf "$workdir/cni/net.d/"
-        port=$(python3 - <<'PY'
-        import socket
-        with socket.socket() as sock:
-            sock.bind(("127.0.0.1", 0))
-            print(sock.getsockname()[1])
-        PY
-        )
-        namespace="conch-template-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-        {
-          echo "CONCH_TEMPLATE_WORKDIR=$workdir"
-          echo "CONCH_TEMPLATE_CONFIG=$workdir/config.yaml"
-          echo "CONCH_TEMPLATE_API_URL=http://127.0.0.1:$port"
-          echo "CONCH_TEMPLATE_NAMESPACE=$namespace"
-          echo "CONCH_TEMPLATE_INITRD=$workdir/conch-init-initramfs.cpio.gz"
-          echo "CONCH_TEMPLATE_CONCHD_LOG=$workdir/conchd.log"
-          echo "CONCH_TEMPLATE_CONCHD_PID_FILE=$workdir/conchd.pid"
-          echo "CONCH_TEMPLATE_CONCHD_SERVICE_PID_FILE=$workdir/conchd-service.pid"
-        } >> "$GITHUB_ENV"
-        cat > "$workdir/config.yaml" <<YAML
-        app:
-          name: conch-template-builder
-        log:
-          level: info
-          output: stdout
-        server:
-          unix_socket: ""
-          pid_file: "$workdir/conchd-service.pid"
-          work_dir: "$workdir/work"
-          host: 127.0.0.1
-          port: $port
-        state:
-          path: "$workdir/state.db"
-        network:
-          pool_size: 1
-          dynamic_reservation: false
-          tap_ip: 192.168.100.2
-          tap_mask: 24
-          cni:
-            plugin_bin_dirs:
-              - "$MANAGED_BINARY_DIR/cni"
-            plugin_conf_dir: "$workdir/cni/net.d"
-            plugin_max_conf: 1
-            if_name: eth0
-            setup_serially: true
-        containerd:
-          root_dir: "$workdir/containerd-root"
-          state_dir: "$workdir/containerd-state"
-          default_namespace: "$namespace"
-        image:
-          default_kernel_image: ""
-        sandbox:
-          vsock_signal_retry: 10ms
-          vsock_signal_timeout: 90s
-          request_timeout: 120s
-          default_vmm_name: cloud-hypervisor
-        YAML
-
     - name: Build minimal Conch initramfs
       if: ${{ steps.template-plan.outputs.cache-hit != 'true' }}
       uses: ./.github/actions/build-conch-initramfs
       with:
         conch-source: ${{ runner.temp }}/conch-template-source
-        output: ${{ env.CONCH_TEMPLATE_INITRD }}
-        work-dir: ${{ env.CONCH_TEMPLATE_WORKDIR }}/initramfs-work
+        output: ${{ runner.temp }}/conch-template-initramfs-${{ github.run_id }}-${{ github.run_attempt }}/conch-init-initramfs.cpio.gz
+        work-dir: ${{ runner.temp }}/conch-template-initramfs-${{ github.run_id }}-${{ github.run_attempt }}/work
 
-    - name: Start conchd
+    - name: Start isolated conchd
+      id: conchd
       if: ${{ steps.template-plan.outputs.cache-hit != 'true' }}
-      shell: bash
-      working-directory: ${{ runner.temp }}/conch-template-source
-      run: |
-        runtime_path="$PATH:/usr/local/sbin:/usr/sbin:/sbin"
-        sudo -n sh -c 'exec env PATH="$1" HOME="$2" CONCH_API_TIMEOUT="$3" ./bin/conchd -config "$4" > "$5" 2>&1' \
-          sh "$runtime_path" "$HOME" "${CONCH_API_TIMEOUT:-90m}" \
-          "$CONCH_TEMPLATE_CONFIG" "$CONCH_TEMPLATE_CONCHD_LOG" &
-        echo "$!" > "$CONCH_TEMPLATE_CONCHD_PID_FILE"
-        for _ in $(seq 1 120); do
-          if curl -fsS -X POST "$CONCH_TEMPLATE_API_URL/api/template/list" \
-            -H 'Content-Type: application/json' \
-            -d "{\"namespace\":\"$CONCH_TEMPLATE_NAMESPACE\"}" >/dev/null 2>&1; then
-            exit 0
-          fi
-          kill -0 "$(cat "$CONCH_TEMPLATE_CONCHD_PID_FILE")" 2>/dev/null || {
-            sed -n '1,400p' "$CONCH_TEMPLATE_CONCHD_LOG" >&2
-            exit 1
-          }
-          sleep 1
-        done
-        sed -n '1,400p' "$CONCH_TEMPLATE_CONCHD_LOG" >&2
-        exit 1
+      uses: ./.github/actions/start-conchd
+      with:
+        conch-source: ${{ runner.temp }}/conch-template-source
+        binary-dir: ${{ steps.runner-environment.outputs.binary-dir }}
+        runtime-name: conch-template
+        app-name: conch-template-builder
 
     - name: Create and publish Conch template
       if: ${{ steps.template-plan.outputs.cache-hit != 'true' }}
@@ -248,6 +167,9 @@ runs:
         ROOTFS_IMAGE_REF: ${{ steps.rootfs.outputs.rootfs-image-ref }}
         TEMPLATE_BUILD_ID: ${{ steps.template-plan.outputs.template-build-id }}
         TEMPLATE_TAG: ${{ steps.template-plan.outputs.template-tag }}
+        CONCH_TEMPLATE_CONFIG: ${{ steps.conchd.outputs.config }}
+        CONCH_TEMPLATE_NAMESPACE: ${{ steps.conchd.outputs.namespace }}
+        CONCH_TEMPLATE_INITRD: ${{ runner.temp }}/conch-template-initramfs-${{ github.run_id }}-${{ github.run_attempt }}/conch-init-initramfs.cpio.gz
       run: |
         local_tag="localhost/conch/e2b-template:build-$TEMPLATE_BUILD_ID"
         create_output=$(./bin/conch template create \
@@ -305,38 +227,33 @@ runs:
     - name: Dump template builder diagnostics
       if: failure()
       shell: bash
+      env:
+        CONCHD_WORK_DIR: ${{ steps.conchd.outputs.work-dir }}
       run: |
         set +e
-        if [[ -n "${CONCH_TEMPLATE_CONCHD_LOG:-}" && -f "$CONCH_TEMPLATE_CONCHD_LOG" ]]; then
-          sed -n '1,600p' "$CONCH_TEMPLATE_CONCHD_LOG"
+        conchd_work_dir=${CONCHD_WORK_DIR:-$RUNNER_TEMP/conch-template-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}}
+        if [[ -f "$conchd_work_dir/conchd.log" ]]; then
+          sed -n '1,600p' "$conchd_work_dir/conchd.log"
         fi
+
+    - name: Clean Conch runtime
+      if: always()
+      uses: ./.github/actions/cleanup-conch-runtime
+      with:
+        runtime-name: conch-template
 
     - name: Clean template producer files
       if: always()
       shell: bash
       run: |
         set +e
-        for pid_file in \
-          "${CONCH_TEMPLATE_CONCHD_PID_FILE:-}" \
-          "${CONCH_TEMPLATE_CONCHD_SERVICE_PID_FILE:-}"; do
-          if [[ -n "$pid_file" && -f "$pid_file" ]]; then
-            pid=$(<"$pid_file")
-            sudo -n kill "$pid" >/dev/null 2>&1 || true
-            for _ in $(seq 1 30); do
-              kill -0 "$pid" 2>/dev/null || break
-              sleep 1
-            done
-            kill -0 "$pid" 2>/dev/null && sudo -n kill -9 "$pid" >/dev/null 2>&1 || true
-          fi
-        done
         if [[ -n "${DOCKER_CONFIG:-}" && -d "$DOCKER_CONFIG" ]]; then
           docker logout ghcr.io >/dev/null 2>&1 || true
           find "$DOCKER_CONFIG" -depth -delete
         fi
         for path in \
-          "${CONCH_TEMPLATE_WORKDIR:-}" \
           "$RUNNER_TEMP/conch-template-source" \
-          "$RUNNER_TEMP/conch-template-go" \
+          "$RUNNER_TEMP/conch-template-initramfs-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
           "$RUNNER_TEMP/conch-template-kernel" \
           "$RUNNER_TEMP/conch-template-rootfs-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"; do
           [[ -z "$path" || ! -e "$path" ]] || sudo -n find "$path" -depth -delete

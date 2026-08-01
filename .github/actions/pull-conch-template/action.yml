@@ -1,0 +1,61 @@
+name: Pull Conch template
+description: Pull an immutable published Conch template and verify its digest
+
+inputs:
+  conch-source:
+    description: Checked-out Conch source directory containing bin/conch
+    required: true
+  config:
+    description: conch configuration path
+    required: true
+  namespace:
+    description: containerd namespace used by conch
+    required: true
+  template-image-ref:
+    description: Immutable published template reference
+    required: true
+  registry-username:
+    description: Registry username
+    required: true
+  registry-token:
+    description: Registry token
+    required: true
+
+outputs:
+  template-id:
+    description: ID of the locally pulled template
+    value: ${{ steps.pull.outputs.template-id }}
+
+runs:
+  using: composite
+  steps:
+    - name: Pull and verify Conch template
+      id: pull
+      shell: bash
+      working-directory: ${{ inputs.conch-source }}
+      env:
+        CONCH_CONFIG: ${{ inputs.config }}
+        CONCH_NAMESPACE: ${{ inputs.namespace }}
+        TEMPLATE_IMAGE_REF: ${{ inputs.template-image-ref }}
+        REGISTRY_USERNAME: ${{ inputs.registry-username }}
+        REGISTRY_TOKEN: ${{ inputs.registry-token }}
+      run: |
+        set -euo pipefail
+        [[ -x bin/conch ]]
+        [[ -f "$CONCH_CONFIG" ]]
+        [[ -n "$CONCH_NAMESPACE" ]]
+        [[ "$TEMPLATE_IMAGE_REF" =~ ^ghcr\.io/conchsandbox/conch-e2b-template@sha256:[0-9a-f]{64}$ ]]
+
+        pull_output=$(./bin/conch template pull \
+          --config "$CONCH_CONFIG" \
+          -n "$CONCH_NAMESPACE" \
+          --username "$REGISTRY_USERNAME" \
+          --password "$REGISTRY_TOKEN" \
+          "$TEMPLATE_IMAGE_REF")
+        printf '%s\n' "$pull_output"
+
+        template_id=$(awk '$1 == "Template:" {print $2; exit}' <<<"$pull_output")
+        image_digest=$(awk '$1 == "Image" && $2 == "digest:" {print $3; exit}' <<<"$pull_output")
+        [[ "$template_id" =~ ^tmpl_[[:alnum:]]+$ ]]
+        [[ "$image_digest" == "${TEMPLATE_IMAGE_REF##*@}" ]]
+        echo "template-id=$template_id" >> "$GITHUB_OUTPUT"
