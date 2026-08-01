@@ -103,12 +103,12 @@ jobs:
           go-version: ${{ steps.go-lock.outputs.go-version }}
           cache: false
 
-      - name: Prepare Conch SDK virtualenv
+      - name: Prepare Conch SDK
         id: sdk
-        run: |
-          scripts/runner-env/jobs/prepare-conch-sdk-venv.sh \
-            --conch-source "$RUNNER_TEMP/conch-init-source" \
-            --venv "$RUNNER_TEMP/conch-init-sdk-venv"
+        uses: ./.github/actions/prepare-conch-sdk
+        with:
+          conch-source: ${{ runner.temp }}/conch-init-source
+          venv: ${{ runner.temp }}/conch-init-sdk-venv
 
       - name: Download kernel artifact
         uses: actions/download-artifact@v4.3.0

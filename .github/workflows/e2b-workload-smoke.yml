@@ -123,13 +123,13 @@ jobs:
             --commit "${{ needs.resolve-conch.outputs.conch-commit }}" \
             --destination "$RUNNER_TEMP/conch-e2b-workload-source"
 
-      - name: Prepare locked E2B SDK virtualenv
-        run: |
-          scripts/runner-env/jobs/prepare-conch-sdk-venv.sh \
-            --conch-source "$RUNNER_TEMP/conch-e2b-workload-source" \
-            --venv "$RUNNER_TEMP/conch-e2b-workload-sdk-venv" \
-            --requirements scripts/workflows/e2b-workload-smoke/requirements.lock.txt
-          echo "CONCH_SDK_PYTHON=$RUNNER_TEMP/conch-e2b-workload-sdk-venv/bin/python" >> "$GITHUB_ENV"
+      - name: Prepare Conch SDK
+        id: sdk
+        uses: ./.github/actions/prepare-conch-sdk
+        with:
+          conch-source: ${{ runner.temp }}/conch-e2b-workload-source
+          venv: ${{ runner.temp }}/conch-e2b-workload-sdk-venv
+          requirements: scripts/workflows/e2b-workload-smoke/requirements.lock.txt
 
       - name: Build Conch binaries
         uses: ./.github/actions/build-conch
@@ -147,31 +147,6 @@ jobs:
           log-level: debug
           api-timeout: ${{ env.CONCH_API_TIMEOUT }}
 
-      - name: Prepare E2B SDK configuration
-        env:
-          CONCHD_WORK_DIR: ${{ steps.conchd.outputs.work-dir }}
-          CONCHD_API_URL: ${{ steps.conchd.outputs.api-url }}
-          CONCHD_NAMESPACE: ${{ steps.conchd.outputs.namespace }}
-        run: |
-          sandbox_id="sandbox_e2b_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
-          {
-            echo "CONCH_SDK_CONFIG=$CONCHD_WORK_DIR/sdk-config.yaml"
-            echo "CONCH_NAMESPACE=$CONCHD_NAMESPACE"
-            echo "CONCH_SANDBOX_ID=$sandbox_id"
-          } >> "$GITHUB_ENV"
-          cat > "$CONCHD_WORK_DIR/sdk-config.yaml" <<YAML
-          sandbox:
-            unix_socket: ""
-            api_url: "$CONCHD_API_URL"
-            sandbox_id: "$sandbox_id"
-            template_id: ""
-          image:
-            vmm_name: cloud-hypervisor
-            vcpu_num: 2
-            vcpu_max: 2
-            ram_mb: 2048
-          YAML
-
       - name: Pull published Conch template
         id: template
         uses: ./.github/actions/pull-conch-template
@@ -188,6 +163,11 @@ jobs:
         timeout-minutes: 20
         working-directory: ${{ runner.temp }}/conch-e2b-workload-source
         env:
+          CONCH_SDK_PYTHON: ${{ steps.sdk.outputs.python }}
+          CONCHD_API_URL: ${{ steps.conchd.outputs.api-url }}
+          CONCH_NAMESPACE: ${{ steps.conchd.outputs.namespace }}
+          CONCH_SANDBOX_ID: sandbox_e2b_${{ github.run_id }}_${{ github.run_attempt }}
+          CONCH_SDK_CONFIG: ${{ runner.temp }}/conch-e2b-workload-source/config/sdk-config.yaml
           CONCH_TEMPLATE_ID: ${{ steps.template.outputs.template-id }}
         run: |
           timeout --foreground --kill-after=30s 15m \
@@ -210,6 +190,12 @@ jobs:
 
       - name: Delete E2B sandbox
         if: ${{ always() && github.event.inputs.run_sdk_smoke != 'false' }}
+        env:
+          CONCH_SDK_PYTHON: ${{ steps.sdk.outputs.python }}
+          CONCHD_API_URL: ${{ steps.conchd.outputs.api-url }}
+          CONCH_NAMESPACE: ${{ steps.conchd.outputs.namespace }}
+          CONCH_SANDBOX_ID: sandbox_e2b_${{ github.run_id }}_${{ github.run_attempt }}
+          CONCH_SDK_CONFIG: ${{ runner.temp }}/conch-e2b-workload-source/config/sdk-config.yaml
         run: |
           set +e
           if [[ -n "${CONCH_SDK_PYTHON:-}" && -x "$CONCH_SDK_PYTHON" && -n "${CONCH_SDK_CONFIG:-}" ]]; then
@@ -222,6 +208,8 @@ jobs:
               try:
                   Sandbox.delete_sandbox(
                       sandbox_id,
+                      unix_socket="",
+                      api_url=os.environ["CONCHD_API_URL"],
                       config_path=os.environ["CONCH_SDK_CONFIG"],
                       namespace=os.environ.get("CONCH_NAMESPACE") or None,
                   )
