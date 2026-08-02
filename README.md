@@ -49,6 +49,13 @@ platform. A valid Actions cache hit avoids compilation, but every run still
 publishes and validates a workflow-local kernel artifact. Consumers never read
 `/opt/conch/bzImage`.
 
+The kernel build ID intentionally does not include the host compiler, compiler
+flags, or other build-tool versions. Those are treated as runner infrastructure
+rather than semantic test inputs, so changing them does not invalidate an
+existing kernel cache. When a toolchain change must be exercised, change an
+explicit kernel input or evict the relevant Actions cache. This policy favors
+stable test reuse over strict byte-for-byte reproducibility across toolchains.
+
 The generic `build-conch-template` action first builds or reuses the rootfs OCI image. Its
 rootfs build ID is derived from the platform, exact Conch commit, selected
 Dockerfile path, and rootfs build script digest. The action then combines that
@@ -62,6 +69,12 @@ E2B-specific paths or repository names. Consumers receive only an immutable refe
 ```text
 ghcr.io/conchsandbox/conch-e2b-template@sha256:<digest>
 ```
+
+The rootfs build ID likewise intentionally excludes the BuildKit version and
+its host-side wrapper. It includes the source, Dockerfile, platform, and rootfs
+recipe inputs that define the semantic test image. Builder changes therefore do
+not automatically invalidate an existing rootfs tag; explicitly change a
+semantic input or evict the cache when a builder change must be validated.
 
 The weekly and E2E workflows call the same Template action. A matching remote
 tag avoids rebuilding and republishing the Template; E2E pulls the published
@@ -92,16 +105,17 @@ workflow with:
 ```text
 atomgit_pr_number=<AtomGit PR number>
 run_build=<checked by default>
-run_conch_init_smoke=<checked by default>
-run_e2b_workload_smoke=<checked by default>
+run_conch_init_smoke=<unchecked by default>
+run_e2b_workload_smoke=<unchecked by default>
 ```
 
 `atomgit_pr_number` accepts exactly one PR number. Leave it empty to sync
 branches and mirrored pull requests without running CI.
 
-The CI workflow checkboxes default to selected. Uncheck a workflow to skip it
-for that manual dispatch. If `atomgit_pr_number` is set, at least one CI
-workflow must be selected.
+The build workflow checkbox defaults to selected, while both smoke workflow
+checkboxes default to unselected. Select either smoke workflow to include it in
+that manual dispatch. If `atomgit_pr_number` is set, at least one CI workflow
+must be selected.
 
 Manual CI dispatch always starts a new GitHub Actions run for the selected
 AtomGit PR head. Existing completed runs are not reused.
@@ -110,7 +124,8 @@ When CI is enabled, the workflow:
 
 1. Mirrors the AtomGit PR head to `ConchSandbox/Conch` as `atomgit/pr-<number>`.
 2. Dispatches the selected workflows in this repository. By default this is
-   `build-and-check.yml`, `conch-init-smoke.yml`, and `e2b-workload-smoke.yml`.
+   only `build-and-check.yml`; `conch-init-smoke.yml` and
+   `e2b-workload-smoke.yml` are opt-in.
 3. Waits for the GitHub Actions run to finish.
 4. Updates the GitHub mirror pull request body with the CI result and run link.
 
