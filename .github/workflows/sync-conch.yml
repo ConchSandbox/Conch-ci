@@ -18,12 +18,12 @@ on:
         description: Run Conch Init Smoke
         required: false
         type: boolean
-        default: true
+        default: false
       run_e2b_workload_smoke:
         description: Run E2B Workload Smoke
         required: false
         type: boolean
-        default: true
+        default: false
 
 permissions:
   actions: write
