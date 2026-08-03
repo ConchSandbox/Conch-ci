@@ -108,7 +108,7 @@ def load_config() -> Config:
     ci_github_owner = env("CI_GITHUB_OWNER", "ConchSandbox")
     ci_github_repo = env("CI_GITHUB_REPO", "Conch-ci")
     dry_run = env_bool("DRY_RUN")
-    ci_workflows = split_csv_list(env("CI_WORKFLOWS", "build.yml"))
+    ci_workflows = split_csv_list(env("CI_WORKFLOWS", "build-and-check.yml"))
     return Config(
         atomgit_api_base=env("ATOMGIT_API_BASE", "https://api.atomgit.com/api/v5").rstrip("/"),
         atomgit_owner=atomgit_owner,

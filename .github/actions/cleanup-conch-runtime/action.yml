@@ -1,0 +1,45 @@
+name: Clean Conch runtime
+description: Stop conchd and remove its job-local runtime and network state
+
+inputs:
+  runtime-name:
+    description: Runtime name passed to start-conchd
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Stop and clean Conch runtime
+      shell: bash
+      env:
+        RUNTIME_NAME: ${{ inputs.runtime-name }}
+      run: |
+        set -euo pipefail
+        [[ "$RUNTIME_NAME" =~ ^[a-z0-9][a-z0-9-]*$ ]]
+        workdir="$RUNNER_TEMP/$RUNTIME_NAME-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+        set +e
+        for pid_file in "$workdir/conchd.pid" "$workdir/conchd-service.pid"; do
+          if [[ -f "$pid_file" ]]; then
+            pid=$(<"$pid_file")
+            [[ "$pid" =~ ^[0-9]+$ ]] || continue
+            sudo -n kill "$pid" >/dev/null 2>&1 || true
+            for _ in $(seq 1 30); do
+              kill -0 "$pid" 2>/dev/null || break
+              sleep 1
+            done
+            kill -0 "$pid" 2>/dev/null && sudo -n kill -9 "$pid" >/dev/null 2>&1 || true
+          fi
+        done
+
+        for namespace in $(sudo -n ip netns list | awk '/^ns-[0-9]+([[:space:]]|$)/ {print $1}'); do
+          sudo -n ip netns delete "$namespace" || true
+        done
+        sudo -n find /var/lib/cni/networks/conch-bridge -mindepth 1 -delete 2>/dev/null || true
+        sudo -n find /var/lib/cni/results/conch-bridge -mindepth 1 -delete 2>/dev/null || true
+        for bridge in cni-conch0 conch_bridge; do
+          sudo -n ip link delete "$bridge" >/dev/null 2>&1 || true
+        done
+
+        [[ ! -e "$workdir" ]] || sudo -n find "$workdir" -depth -delete
+        exit 0

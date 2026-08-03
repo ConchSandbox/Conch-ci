@@ -1,0 +1,180 @@
+name: Conch Build and Check
+run-name: ${{ github.event.inputs.ci_marker || github.event.inputs.conch_ref || github.ref_name }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      ci_marker:
+        description: External CI correlation marker
+        required: false
+      conch_repository:
+        description: Conch source repository URL
+        required: false
+        default: https://github.com/ConchSandbox/Conch.git
+      conch_ref:
+        description: Conch source ref to validate
+        required: false
+        default: dev
+
+permissions:
+  contents: read
+
+concurrency:
+  group: conch-pr-ci-${{ github.workflow }}-${{ github.event.inputs.ci_marker || github.event.inputs.conch_ref || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CONCH_REPOSITORY: ${{ github.event.inputs.conch_repository || vars.CONCH_REPOSITORY || 'https://github.com/ConchSandbox/Conch.git' }}
+  CONCH_REF: ${{ github.event.inputs.conch_ref || vars.CONCH_REF || 'dev' }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  ci:
+    name: Conch Build and Check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout CI repository
+        uses: actions/checkout@v4.4.0
+
+      - name: Install host tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            autoconf \
+            automake \
+            build-essential \
+            curl \
+            git \
+            libdeflate-dev \
+            liblz4-dev \
+            liblzma-dev \
+            libtool \
+            libzstd-dev \
+            pkg-config \
+            protobuf-compiler \
+            shellcheck \
+            uuid-dev \
+            zlib1g-dev
+
+      - name: Validate runner environment implementation
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          mapfile -t runner_scripts < <(find scripts/runner-env -type f -name '*.sh' -print | sort)
+          shellcheck "${runner_scripts[@]}"
+          scripts/runner-env/runner-env.sh print-id
+
+      - name: Prepare locked erofs-utils
+        run: |
+          scripts/runner-env/jobs/prepare-erofs-utils.sh \
+            --work-dir "$RUNNER_TEMP/erofs-utils-source" \
+            --prefix "$RUNNER_TEMP/erofs-utils" \
+            --add-to-path
+
+      - name: Check EROFS support
+        run: |
+          set -euo pipefail
+          hash -r
+          sudo modprobe erofs
+          grep -qw erofs /proc/filesystems
+          command -v mkfs.erofs
+          mkfs.erofs --version
+          mkfs_erofs_help="$(mkfs.erofs --help)"
+          grep -q -- '--fsalignblks' <<<"$mkfs_erofs_help"
+
+      - name: Fetch Conch source
+        run: |
+          commit=$(scripts/runner-env/jobs/resolve-conch-commit.sh \
+            --repository "$CONCH_REPOSITORY" \
+            --ref "$CONCH_REF")
+          scripts/runner-env/jobs/checkout-conch.sh \
+            --repository "$CONCH_REPOSITORY" \
+            --commit "$commit" \
+            --destination "$GITHUB_WORKSPACE/conch-src"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5.6.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: conch-src/sdk/pyproject.toml
+
+      - name: Build Conch binaries
+        uses: ./.github/actions/build-conch
+        with:
+          conch-source: ${{ github.workspace }}/conch-src
+
+      - name: Show tool versions
+        working-directory: conch-src
+        run: |
+          set -euo pipefail
+          go version
+          python --version
+          protoc --version
+          shellcheck --version
+          git rev-parse HEAD
+
+      - name: Check shell script syntax
+        working-directory: conch-src
+        run: |
+          set -euo pipefail
+          mapfile -t shell_files < <(find scripts initrd -type f -name '*.sh' -print 2>/dev/null | sort)
+          if [ "${#shell_files[@]}" -eq 0 ]; then
+            echo "no shell scripts found"
+            exit 0
+          fi
+          bash -n "${shell_files[@]}"
+
+      - name: Run shellcheck
+        working-directory: conch-src
+        run: |
+          set -euo pipefail
+          mapfile -t shell_files < <(find scripts initrd -type f -name '*.sh' -print 2>/dev/null | sort)
+          if [ "${#shell_files[@]}" -eq 0 ]; then
+            echo "no shell scripts found"
+            exit 0
+          fi
+          shellcheck "${shell_files[@]}"
+
+      - name: Check Go formatting
+        working-directory: conch-src
+        run: |
+          set -euo pipefail
+          unformatted="$(find . -name '*.go' -not -path './.git/*' -print0 | xargs -0 gofmt -l)"
+          if [ -n "$unformatted" ]; then
+            echo "go files need gofmt:"
+            printf '%s\n' "$unformatted"
+            exit 1
+          fi
+
+      - name: Run Go tests
+        working-directory: conch-src
+        run: |
+          set -euo pipefail
+          go test ./...
+
+      - name: Run Go vet
+        working-directory: conch-src
+        run: |
+          set -euo pipefail
+          go vet ./...
+
+      - name: Check Python SDK import path
+        working-directory: conch-src
+        run: |
+          set -euo pipefail
+          python -m pip install -e './sdk[test]'
+          python - <<'PY'
+          from conch import AgentClient, Sandbox
+          from conch.sandbox import generate_random_id
+
+          assert AgentClient
+          assert Sandbox
+          assert generate_random_id().startswith("sandbox_")
+          PY

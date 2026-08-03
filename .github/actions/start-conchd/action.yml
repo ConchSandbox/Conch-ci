@@ -1,0 +1,159 @@
+name: Start isolated conchd
+description: Create an isolated runtime, start conchd, and wait for its API
+
+inputs:
+  conch-source:
+    description: Checked-out Conch source directory containing bin/conchd
+    required: true
+  binary-dir:
+    description: Runner binary directory containing CNI plugins
+    required: true
+  runtime-name:
+    description: Name used for the job-local directory and containerd namespace
+    required: true
+  app-name:
+    description: Application name written to the conchd configuration
+    required: true
+  log-level:
+    description: conchd log level
+    required: false
+    default: info
+  api-timeout:
+    description: Conch API timeout passed to conchd
+    required: false
+    default: 90m
+
+outputs:
+  work-dir:
+    description: Isolated conchd runtime directory
+    value: ${{ steps.runtime.outputs.work-dir }}
+  config:
+    description: Generated conchd configuration path
+    value: ${{ steps.runtime.outputs.config }}
+  api-url:
+    description: Local conchd API URL
+    value: ${{ steps.runtime.outputs.api-url }}
+  namespace:
+    description: Isolated containerd namespace
+    value: ${{ steps.runtime.outputs.namespace }}
+
+runs:
+  using: composite
+  steps:
+    - name: Prepare isolated conchd runtime
+      id: runtime
+      shell: bash
+      env:
+        CONCH_SOURCE: ${{ inputs.conch-source }}
+        BINARY_DIR: ${{ inputs.binary-dir }}
+        RUNTIME_NAME: ${{ inputs.runtime-name }}
+        APP_NAME: ${{ inputs.app-name }}
+        LOG_LEVEL: ${{ inputs.log-level }}
+      run: |
+        set -euo pipefail
+        [[ "$CONCH_SOURCE" == /* && -x "$CONCH_SOURCE/bin/conchd" ]]
+        [[ "$BINARY_DIR" == /* && -d "$BINARY_DIR/cni" ]]
+        [[ "$RUNTIME_NAME" =~ ^[a-z0-9][a-z0-9-]*$ ]]
+        [[ "$APP_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]
+        [[ "$LOG_LEVEL" =~ ^(debug|info|warn|error)$ ]]
+
+        workdir="$RUNNER_TEMP/$RUNTIME_NAME-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+        [[ ! -e "$workdir" ]] || sudo -n find "$workdir" -depth -delete
+        mkdir -p "$workdir/cni/net.d"
+        install -m 0644 "$CONCH_SOURCE/config/cni/net.d/"*.conf "$workdir/cni/net.d/"
+
+        port=$(python3 - <<'PY'
+        import socket
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            print(sock.getsockname()[1])
+        PY
+        )
+        namespace="$RUNTIME_NAME-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+        config="$workdir/config.yaml"
+        api_url="http://127.0.0.1:$port"
+
+        cat > "$config" <<YAML
+        app:
+          name: $APP_NAME
+        log:
+          level: $LOG_LEVEL
+          output: stdout
+        server:
+          unix_socket: ""
+          pid_file: "$workdir/conchd-service.pid"
+          work_dir: "$workdir/work"
+          host: 127.0.0.1
+          port: $port
+        state:
+          path: "$workdir/state.db"
+        network:
+          pool_size: 1
+          dynamic_reservation: false
+          tap_ip: 192.168.100.2
+          tap_mask: 24
+          cni:
+            plugin_bin_dirs:
+              - "$BINARY_DIR/cni"
+            plugin_conf_dir: "$workdir/cni/net.d"
+            plugin_max_conf: 1
+            if_name: eth0
+            setup_serially: true
+        containerd:
+          root_dir: "$workdir/containerd-root"
+          state_dir: "$workdir/containerd-state"
+          default_namespace: "$namespace"
+        image:
+          default_kernel_image: ""
+        sandbox:
+          vsock_signal_retry: 10ms
+          vsock_signal_timeout: 90s
+          request_timeout: 120s
+          default_vmm_name: cloud-hypervisor
+        YAML
+
+        {
+          echo "work-dir=$workdir"
+          echo "config=$config"
+          echo "api-url=$api_url"
+          echo "namespace=$namespace"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Start conchd and wait for API
+      shell: bash
+      working-directory: ${{ inputs.conch-source }}
+      env:
+        API_TIMEOUT: ${{ inputs.api-timeout }}
+        API_URL: ${{ steps.runtime.outputs.api-url }}
+        CONFIG: ${{ steps.runtime.outputs.config }}
+        NAMESPACE: ${{ steps.runtime.outputs.namespace }}
+        WORK_DIR: ${{ steps.runtime.outputs.work-dir }}
+      run: |
+        set -euo pipefail
+        fail_startup() {
+          sed -n '1,400p' "$WORK_DIR/conchd.log" >&2 || true
+          for pid_file in "$WORK_DIR/conchd.pid" "$WORK_DIR/conchd-service.pid"; do
+            if [[ -f "$pid_file" ]]; then
+              sudo -n kill "$(<"$pid_file")" >/dev/null 2>&1 || true
+            fi
+          done
+          exit 1
+        }
+
+        runtime_path="$PATH:/usr/local/sbin:/usr/sbin:/sbin"
+        sudo -n sh -c 'exec env PATH="$1" HOME="$2" CONCH_API_TIMEOUT="$3" ./bin/conchd -config "$4" > "$5" 2>&1' \
+          sh "$runtime_path" "$HOME" "$API_TIMEOUT" "$CONFIG" "$WORK_DIR/conchd.log" &
+        echo "$!" > "$WORK_DIR/conchd.pid"
+
+        for _ in $(seq 1 120); do
+          if curl -fsS -X POST "$API_URL/api/template/list" \
+            -H 'Content-Type: application/json' \
+            -d "{\"namespace\":\"$NAMESPACE\"}" >/dev/null 2>&1; then
+            exit 0
+          fi
+          kill -0 "$(<"$WORK_DIR/conchd.pid")" 2>/dev/null || {
+            fail_startup
+          }
+          sleep 1
+        done
+        fail_startup

@@ -1,0 +1,44 @@
+name: Prepare Conch SDK
+description: Create a virtual environment and install the Conch Python SDK
+
+inputs:
+  conch-source:
+    description: Checked-out Conch source directory containing the Python SDK
+    required: true
+  venv:
+    description: Job-local virtual environment directory
+    required: true
+  requirements:
+    description: Optional pip requirements file for workflow-specific SDK integrations
+    required: false
+    default: ""
+
+outputs:
+  venv:
+    description: Prepared virtual environment directory
+    value: ${{ steps.sdk.outputs.venv }}
+  python:
+    description: Python interpreter with the Conch SDK installed
+    value: ${{ steps.sdk.outputs.python }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install Conch SDK
+      id: sdk
+      shell: bash
+      env:
+        CONCH_SOURCE: ${{ inputs.conch-source }}
+        VENV: ${{ inputs.venv }}
+        REQUIREMENTS: ${{ inputs.requirements }}
+      run: |
+        set -euo pipefail
+        command=(
+          "$GITHUB_WORKSPACE/scripts/runner-env/jobs/prepare-conch-sdk-venv.sh"
+          --conch-source "$CONCH_SOURCE"
+          --venv "$VENV"
+        )
+        if [[ -n "$REQUIREMENTS" ]]; then
+          command+=(--requirements "$REQUIREMENTS")
+        fi
+        "${command[@]}"

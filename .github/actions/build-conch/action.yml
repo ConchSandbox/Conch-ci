@@ -1,0 +1,48 @@
+name: Build Conch binaries
+description: Build and validate the Conch command binaries
+
+inputs:
+  conch-source:
+    description: Checked-out Conch source directory
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Read locked Go version
+      id: go-lock
+      shell: bash
+      run: |
+        go_version=$(python3 "$GITHUB_WORKSPACE/scripts/runner-env/lib/lock.py" \
+          get job_build_inputs.go_toolchain.version)
+        echo "go-version=$go_version" >> "$GITHUB_OUTPUT"
+
+    - name: Set up locked Go version
+      uses: actions/setup-go@v6.4.0
+      with:
+        go-version: ${{ steps.go-lock.outputs.go-version }}
+        go-download-base-url: https://golang.google.cn/dl
+        cache: false
+
+    - name: Configure job-local Go caches
+      shell: bash
+      run: |
+        mkdir -p "$RUNNER_TEMP/conch-go-modcache" "$RUNNER_TEMP/conch-go-build-cache"
+        {
+          echo "GOPROXY=https://goproxy.cn"
+          echo "GOMODCACHE=$RUNNER_TEMP/conch-go-modcache"
+          echo "GOCACHE=$RUNNER_TEMP/conch-go-build-cache"
+          echo "GOFLAGS=${GOFLAGS:+$GOFLAGS }-buildvcs=false"
+        } >> "$GITHUB_ENV"
+
+    - name: Build Conch binaries
+      shell: bash
+      working-directory: ${{ inputs.conch-source }}
+      env:
+        GO_TAGS: exclude_graphdriver_btrfs
+      run: |
+        set -euo pipefail
+        make build
+        test -x bin/conch
+        test -x bin/conchd
+        test -x bin/conch-init

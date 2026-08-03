@@ -1,0 +1,86 @@
+name: Build kernel
+description: Build or reuse the locked ARM64 kernel artifact
+
+inputs:
+  conch-commit:
+    description: Immutable Conch commit containing the kernel configuration
+    required: true
+
+outputs:
+  kernel-sha256:
+    description: Kernel image SHA-256
+    value: ${{ steps.kernel.outputs.kernel-sha256 }}
+  kernel-artifact-name:
+    description: Uploaded kernel artifact name
+    value: ${{ steps.kernel.outputs.kernel-artifact-name }}
+
+runs:
+  using: composite
+  steps:
+    - name: Verify runner environment
+      id: runner-environment
+      uses: ./.github/actions/ensure-runner-environment
+      with:
+        mode: verify
+
+    - name: Checkout Conch kernel configuration
+      shell: bash
+      env:
+        CONCH_REPOSITORY: https://github.com/ConchSandbox/Conch.git
+      run: |
+        scripts/runner-env/jobs/checkout-conch.sh \
+          --repository "$CONCH_REPOSITORY" \
+          --commit "${{ inputs.conch-commit }}" \
+          --destination "$RUNNER_TEMP/conch-kernel-config-source"
+
+    - name: Compute kernel build ID
+      id: plan
+      shell: bash
+      run: |
+        scripts/runner-env/jobs/build-kernel.sh plan \
+          --conch-source "$RUNNER_TEMP/conch-kernel-config-source" \
+          --conch-commit "${{ inputs.conch-commit }}" \
+          --cache-root "$RUNNER_TEMP/conch-kernel-cache"
+
+    - name: Restore kernel cache
+      id: cache
+      uses: actions/cache/restore@v4.3.0
+      with:
+        path: ${{ steps.plan.outputs.cache-dir }}
+        key: ${{ steps.plan.outputs.kernel-artifact-name }}
+
+    - name: Build or validate kernel
+      id: kernel
+      shell: bash
+      run: |
+        scripts/runner-env/jobs/build-kernel.sh ensure \
+          --conch-source "$RUNNER_TEMP/conch-kernel-config-source" \
+          --conch-commit "${{ inputs.conch-commit }}" \
+          --cache-root "$RUNNER_TEMP/conch-kernel-cache" \
+          --cache-hit "${{ steps.cache.outputs.cache-hit == 'true' && 'true' || 'false' }}"
+
+    - name: Save kernel cache
+      if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+      uses: actions/cache/save@v4.3.0
+      with:
+        path: ${{ steps.plan.outputs.cache-dir }}
+        key: ${{ steps.plan.outputs.kernel-artifact-name }}
+
+    - name: Upload kernel artifact
+      uses: actions/upload-artifact@v4.6.2
+      with:
+        name: ${{ steps.kernel.outputs.kernel-artifact-name }}
+        path: ${{ steps.plan.outputs.cache-dir }}
+        if-no-files-found: error
+        retention-days: 3
+
+    - name: Clean kernel producer files
+      if: always()
+      shell: bash
+      run: |
+        set +e
+        for path in \
+          "$RUNNER_TEMP/conch-kernel-config-source" \
+          "$RUNNER_TEMP/conch-kernel-cache"; do
+          [[ ! -e "$path" ]] || find "$path" -depth -delete
+        done
