@@ -1,0 +1,199 @@
+name: Publish Conch template to GHCR
+description: Copy immutable runner-local rootfs and template images to fixed GHCR repositories
+
+inputs:
+  conch-commit:
+    description: Immutable Conch commit used to build the images
+    required: true
+  image-profile:
+    description: Workflow-owned lowercase profile used in OCI repository names
+    required: true
+  rootfs-image-ref:
+    description: Immutable rootfs reference in the runner-local OCI registry
+    required: true
+  rootfs-build-id:
+    description: Deterministic rootfs build ID
+    required: true
+  template-image-ref:
+    description: Immutable template reference in the runner-local OCI registry
+    required: true
+  template-build-id:
+    description: Deterministic template build ID
+    required: true
+
+outputs:
+  rootfs-image-ref:
+    description: Immutable rootfs reference published to GHCR
+    value: ${{ steps.publish.outputs.rootfs-image-ref }}
+  template-image-ref:
+    description: Immutable template reference published to GHCR
+    value: ${{ steps.publish.outputs.template-image-ref }}
+
+runs:
+  using: composite
+  steps:
+    - name: Verify runner environment
+      id: runner-environment
+      uses: ./.github/actions/ensure-runner-environment
+      with:
+        mode: verify
+
+    - name: Resolve OCI repositories
+      id: repositories
+      shell: bash
+      env:
+        IMAGE_PROFILE: ${{ inputs.image-profile }}
+      run: |
+        "$GITHUB_WORKSPACE/scripts/runner-env/lib/image_repositories.sh" \
+          "$IMAGE_PROFILE" >> "$GITHUB_OUTPUT"
+
+    - name: Checkout immutable Conch source
+      shell: bash
+      env:
+        CONCH_REPOSITORY: https://github.com/ConchSandbox/Conch.git
+      run: |
+        scripts/runner-env/jobs/checkout-conch.sh \
+          --repository "$CONCH_REPOSITORY" \
+          --commit "${{ inputs.conch-commit }}" \
+          --destination "$RUNNER_TEMP/conch-template-publisher-source"
+
+    - name: Build Conch binaries
+      uses: ./.github/actions/build-conch
+      with:
+        conch-source: ${{ runner.temp }}/conch-template-publisher-source
+
+    - name: Start isolated conchd
+      id: conchd
+      uses: ./.github/actions/start-conchd
+      with:
+        conch-source: ${{ runner.temp }}/conch-template-publisher-source
+        binary-dir: ${{ steps.runner-environment.outputs.binary-dir }}
+        runtime-name: conch-template-publisher
+        app-name: conch-template-publisher
+
+    - name: Log in to GHCR
+      shell: bash
+      env:
+        GHCR_TOKEN: ${{ github.token }}
+      run: |
+        docker buildx version
+        docker_config="$RUNNER_TEMP/conch-template-publisher-docker-config"
+        mkdir -p "$docker_config"
+        chmod 0700 "$docker_config"
+        echo "DOCKER_CONFIG=$docker_config" >> "$GITHUB_ENV"
+        printf '%s' "$GHCR_TOKEN" | DOCKER_CONFIG="$docker_config" \
+          docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+    - name: Publish immutable images to GHCR
+      id: publish
+      shell: bash
+      working-directory: ${{ runner.temp }}/conch-template-publisher-source
+      env:
+        GHCR_TOKEN: ${{ github.token }}
+        CONCH_API_TIMEOUT: 90m
+        CONCH_CONFIG: ${{ steps.conchd.outputs.config }}
+        CONCH_NAMESPACE: ${{ steps.conchd.outputs.namespace }}
+        LOCAL_ROOTFS_REPOSITORY: ${{ steps.repositories.outputs.local-rootfs-repository }}
+        LOCAL_TEMPLATE_REPOSITORY: ${{ steps.repositories.outputs.local-template-repository }}
+        GHCR_ROOTFS_REPOSITORY: ${{ steps.repositories.outputs.ghcr-rootfs-repository }}
+        GHCR_TEMPLATE_REPOSITORY: ${{ steps.repositories.outputs.ghcr-template-repository }}
+        ROOTFS_IMAGE_REF: ${{ inputs.rootfs-image-ref }}
+        ROOTFS_BUILD_ID: ${{ inputs.rootfs-build-id }}
+        TEMPLATE_IMAGE_REF: ${{ inputs.template-image-ref }}
+        TEMPLATE_BUILD_ID: ${{ inputs.template-build-id }}
+      run: |
+        set -euo pipefail
+        [[ "$ROOTFS_BUILD_ID" =~ ^[0-9a-f]{64}$ ]]
+        [[ "$TEMPLATE_BUILD_ID" =~ ^[0-9a-f]{64}$ ]]
+        rootfs_digest=${ROOTFS_IMAGE_REF#"$LOCAL_ROOTFS_REPOSITORY@"}
+        template_digest=${TEMPLATE_IMAGE_REF#"$LOCAL_TEMPLATE_REPOSITORY@"}
+        [[ "$ROOTFS_IMAGE_REF" == "$LOCAL_ROOTFS_REPOSITORY@$rootfs_digest" ]]
+        [[ "$TEMPLATE_IMAGE_REF" == "$LOCAL_TEMPLATE_REPOSITORY@$template_digest" ]]
+        [[ "$rootfs_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+        [[ "$template_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+
+        ./bin/conch image pull \
+          --config "$CONCH_CONFIG" \
+          -n "$CONCH_NAMESPACE" \
+          --plain-http \
+          --skip-unpack \
+          "$ROOTFS_IMAGE_REF"
+        ghcr_rootfs_tag="$GHCR_ROOTFS_REPOSITORY:build-$ROOTFS_BUILD_ID"
+        ./bin/conch image push \
+          --config "$CONCH_CONFIG" \
+          -n "$CONCH_NAMESPACE" \
+          --username "$GITHUB_ACTOR" \
+          --password "$GHCR_TOKEN" \
+          --timeout 60m \
+          "$ROOTFS_IMAGE_REF" "$ghcr_rootfs_tag"
+        published_rootfs_digest=$(docker buildx imagetools inspect "$ghcr_rootfs_tag" |
+          awk '$1 == "Digest:" {print $2; exit}')
+        [[ "$published_rootfs_digest" == "$rootfs_digest" ]]
+
+        pull_output=$(./bin/conch template pull \
+          --config "$CONCH_CONFIG" \
+          -n "$CONCH_NAMESPACE" \
+          --plain-http \
+          "$TEMPLATE_IMAGE_REF")
+        printf '%s\n' "$pull_output"
+        template_id=$(awk '$1 == "Template:" {print $2; exit}' <<<"$pull_output")
+        pulled_template_digest=$(awk '$1 == "Image" && $2 == "digest:" {print $3; exit}' \
+          <<<"$pull_output")
+        [[ "$template_id" =~ ^tmpl_[[:alnum:]]+$ ]]
+        [[ "$pulled_template_digest" == "$template_digest" ]]
+
+        ghcr_template_tag="$GHCR_TEMPLATE_REPOSITORY:build-$TEMPLATE_BUILD_ID"
+        ./bin/conch template push \
+          --config "$CONCH_CONFIG" \
+          -n "$CONCH_NAMESPACE" \
+          --username "$GITHUB_ACTOR" \
+          --password "$GHCR_TOKEN" \
+          --timeout 60m \
+          "$template_id" "$ghcr_template_tag"
+        published_template_digest=$(
+          "$GITHUB_WORKSPACE/.github/actions/build-conch-template/inspect-template.sh" \
+            "$ghcr_template_tag"
+        )
+        [[ "$published_template_digest" == "$template_digest" ]]
+
+        echo "rootfs-image-ref=$GHCR_ROOTFS_REPOSITORY@$published_rootfs_digest" >> "$GITHUB_OUTPUT"
+        echo "template-image-ref=$GHCR_TEMPLATE_REPOSITORY@$published_template_digest" >> "$GITHUB_OUTPUT"
+
+        if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+          {
+            echo "### GHCR publication"
+            echo
+            echo "- Rootfs: \`$GHCR_ROOTFS_REPOSITORY@$published_rootfs_digest\`"
+            echo "- Template: \`$GHCR_TEMPLATE_REPOSITORY@$published_template_digest\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+        fi
+
+    - name: Dump publisher diagnostics
+      if: failure()
+      shell: bash
+      env:
+        CONCHD_WORK_DIR: ${{ steps.conchd.outputs.work-dir }}
+      run: |
+        set +e
+        if [[ -n "${CONCHD_WORK_DIR:-}" && -f "$CONCHD_WORK_DIR/conchd.log" ]]; then
+          sed -n '1,600p' "$CONCHD_WORK_DIR/conchd.log"
+        fi
+
+    - name: Clean Conch runtime
+      if: always()
+      uses: ./.github/actions/cleanup-conch-runtime
+      with:
+        runtime-name: conch-template-publisher
+
+    - name: Clean publisher files
+      if: always()
+      shell: bash
+      run: |
+        set +e
+        if [[ -n "${DOCKER_CONFIG:-}" && -d "$DOCKER_CONFIG" ]]; then
+          docker logout ghcr.io >/dev/null 2>&1 || true
+          find "$DOCKER_CONFIG" -depth -delete
+        fi
+        publisher_source="$RUNNER_TEMP/conch-template-publisher-source"
+        [[ ! -e "$publisher_source" ]] || sudo -n find "$publisher_source" -depth -delete
+        exit 0

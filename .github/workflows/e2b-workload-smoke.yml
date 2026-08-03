@@ -81,7 +81,6 @@ jobs:
     permissions:
       contents: read
       actions: read
-      packages: write
     outputs:
       template-image-ref: ${{ steps.template.outputs.template-image-ref }}
     steps:
@@ -96,8 +95,7 @@ jobs:
           kernel-artifact-name: ${{ needs.build-kernel.outputs.kernel-artifact-name }}
           kernel-sha256: ${{ needs.build-kernel.outputs.kernel-sha256 }}
           dockerfile: examples/e2b-rootfs/Dockerfile
-          rootfs-repository: ghcr.io/conchsandbox/conch-e2b-rootfs
-          template-repository: ghcr.io/conchsandbox/conch-e2b-template
+          image-profile: e2b
 
   workload-smoke:
     name: E2B Workload Smoke
@@ -106,7 +104,6 @@ jobs:
     timeout-minutes: 150
     permissions:
       contents: read
-      packages: read
     steps:
       - name: Checkout CI repository
         uses: actions/checkout@v4.4.0
@@ -148,7 +145,7 @@ jobs:
           log-level: debug
           api-timeout: ${{ env.CONCH_API_TIMEOUT }}
 
-      - name: Pull published Conch template
+      - name: Pull runner-local Conch template
         id: template
         uses: ./.github/actions/pull-conch-template
         with:
@@ -156,8 +153,7 @@ jobs:
           config: ${{ steps.conchd.outputs.config }}
           namespace: ${{ steps.conchd.outputs.namespace }}
           template-image-ref: ${{ needs.build-template.outputs.template-image-ref }}
-          registry-username: ${{ github.actor }}
-          registry-token: ${{ github.token }}
+          image-profile: e2b
 
       - name: Boot sandbox and validate E2B SDK operations
         if: ${{ github.event.inputs.run_sdk_smoke != 'false' }}

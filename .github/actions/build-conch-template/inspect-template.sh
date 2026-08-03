@@ -5,9 +5,35 @@ reference=${1:?Conch template reference is required}
 work_dir=$(mktemp -d)
 trap 'find "$work_dir" -depth -delete' EXIT
 
-docker buildx imagetools inspect "$reference" > "$work_dir/inspect.txt"
-docker buildx imagetools inspect --raw "$reference" > "$work_dir/index.json"
-digest=$(awk '$1 == "Digest:" {print $2; exit}' "$work_dir/inspect.txt")
+if [[ "$reference" =~ ^localhost:5000/conch-ci/conch-[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?-template:build-[0-9a-f]{64}$ ]]; then
+  local_reference=${reference#localhost:5000/}
+  repository=${local_reference%:*}
+  tag=${local_reference##*:}
+  curl \
+    --fail \
+    --silent \
+    --show-error \
+    --noproxy localhost \
+    --dump-header "$work_dir/headers" \
+    --header 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json' \
+    --output "$work_dir/index.json" \
+    "http://localhost:5000/v2/$repository/manifests/$tag"
+  digest=$(awk '
+    tolower($1) == "docker-content-digest:" {
+      gsub("\\r", "", $2)
+      print $2
+      exit
+    }
+  ' "$work_dir/headers")
+  [[ "$digest" == "sha256:$(sha256sum "$work_dir/index.json" | awk '{print $1}')" ]]
+elif [[ "$reference" =~ ^ghcr\.io/conchsandbox/conch-[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?-template:build-[0-9a-f]{64}$ ]]; then
+  docker buildx imagetools inspect "$reference" > "$work_dir/inspect.txt"
+  docker buildx imagetools inspect --raw "$reference" > "$work_dir/index.json"
+  digest=$(awk '$1 == "Digest:" {print $2; exit}' "$work_dir/inspect.txt")
+else
+  echo "unsupported Conch template reference: $reference" >&2
+  exit 2
+fi
 [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
 
 TEMPLATE_INDEX="$work_dir/index.json" python3 - <<'PY'

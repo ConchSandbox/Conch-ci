@@ -14,17 +14,23 @@ inputs:
   dockerfile:
     description: Conch-repository-relative Dockerfile used to build the rootfs
     required: true
-  rootfs-repository:
-    description: GHCR repository used to cache and publish the rootfs
-    required: true
-  template-repository:
-    description: GHCR repository used to cache and publish the Conch template
+  image-profile:
+    description: Workflow-owned lowercase profile used in local OCI repository names
     required: true
 
 outputs:
+  rootfs-image-ref:
+    description: Immutable rootfs reference in the runner-local OCI registry
+    value: ${{ steps.rootfs.outputs.rootfs-image-ref }}
+  rootfs-build-id:
+    description: Deterministic rootfs build ID
+    value: ${{ steps.rootfs.outputs.rootfs-build-id }}
   template-image-ref:
-    description: Immutable published Conch template reference
+    description: Immutable template reference in the runner-local OCI registry
     value: ${{ steps.template.outputs.template-image-ref }}
+  template-build-id:
+    description: Deterministic template build ID
+    value: ${{ steps.template-plan.outputs.template-build-id }}
 
 runs:
   using: composite
@@ -34,6 +40,15 @@ runs:
       uses: ./.github/actions/ensure-runner-environment
       with:
         mode: verify
+
+    - name: Resolve local OCI repositories
+      id: repositories
+      shell: bash
+      env:
+        IMAGE_PROFILE: ${{ inputs.image-profile }}
+      run: |
+        "$GITHUB_WORKSPACE/scripts/runner-env/lib/image_repositories.sh" \
+          "$IMAGE_PROFILE" >> "$GITHUB_OUTPUT"
 
     - name: Checkout immutable Conch source
       shell: bash
@@ -45,24 +60,12 @@ runs:
           --commit "${{ inputs.conch-commit }}" \
           --destination "$RUNNER_TEMP/conch-template-source"
 
-    - name: Log in to GHCR
-      shell: bash
-      env:
-        GHCR_TOKEN: ${{ github.token }}
-      run: |
-        docker_config="$RUNNER_TEMP/conch-template-docker-config"
-        mkdir -p "$docker_config"
-        chmod 0700 "$docker_config"
-        echo "DOCKER_CONFIG=$docker_config" >> "$GITHUB_ENV"
-        printf '%s' "$GHCR_TOKEN" | DOCKER_CONFIG="$docker_config" \
-          docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-
     - name: Build or reuse rootfs image
       id: rootfs
       shell: bash
       env:
         DOCKERFILE: ${{ inputs.dockerfile }}
-        ROOTFS_REPOSITORY: ${{ inputs.rootfs-repository }}
+        ROOTFS_REPOSITORY: ${{ steps.repositories.outputs.local-rootfs-repository }}
       run: |
         scripts/runner-env/jobs/ensure-rootfs.sh \
           --conch-source "$RUNNER_TEMP/conch-template-source" \
@@ -79,12 +82,12 @@ runs:
         CONCH_COMMIT: ${{ inputs.conch-commit }}
         KERNEL_SHA256: ${{ inputs.kernel-sha256 }}
         ROOTFS_IMAGE_REF: ${{ steps.rootfs.outputs.rootfs-image-ref }}
-        TEMPLATE_REPOSITORY: ${{ inputs.template-repository }}
+        TEMPLATE_REPOSITORY: ${{ steps.repositories.outputs.local-template-repository }}
       run: |
         [[ "$CONCH_COMMIT" =~ ^[0-9a-f]{40}$ ]]
         [[ "$KERNEL_SHA256" =~ ^[0-9a-f]{64}$ ]]
         [[ "$ROOTFS_IMAGE_REF" =~ @sha256:[0-9a-f]{64}$ ]]
-        [[ "$TEMPLATE_REPOSITORY" =~ ^ghcr\.io/[a-z0-9_.-]+/[a-z0-9_.-]+$ ]]
+        [[ "$TEMPLATE_REPOSITORY" =~ ^localhost:5000/conch-ci/conch-[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?-template$ ]]
         recipe_sha256=$(
           {
             sha256sum "$GITHUB_ACTION_PATH/action.yml" | awk '{print $1}'
@@ -174,7 +177,6 @@ runs:
       shell: bash
       working-directory: ${{ runner.temp }}/conch-template-source
       env:
-        GHCR_TOKEN: ${{ github.token }}
         CONCH_API_TIMEOUT: 90m
         ROOTFS_IMAGE_REF: ${{ steps.rootfs.outputs.rootfs-image-ref }}
         TEMPLATE_BUILD_ID: ${{ steps.template-plan.outputs.template-build-id }}
@@ -191,8 +193,7 @@ runs:
           --kernel "$CONCH_TEMPLATE_KERNEL_PATH" \
           --initrd "$CONCH_TEMPLATE_INITRD" \
           -t "$local_tag" \
-          --username "$GITHUB_ACTOR" \
-          --password "$GHCR_TOKEN")
+          --plain-http)
         printf '%s\n' "$create_output"
         template_id=$(awk '$1 == "Template:" {print $2; exit}' <<<"$create_output")
         local_digest=$(awk '$1 == "Image" && $2 == "digest:" {print $3; exit}' <<<"$create_output")
@@ -201,13 +202,12 @@ runs:
         ./bin/conch template push \
           --config "$CONCH_TEMPLATE_CONFIG" \
           -n "$CONCH_TEMPLATE_NAMESPACE" \
-          --username "$GITHUB_ACTOR" \
-          --password "$GHCR_TOKEN" \
+          --plain-http \
           --timeout 60m \
           "$template_id" "$TEMPLATE_TAG"
         remote_digest=$("$GITHUB_ACTION_PATH/inspect-template.sh" "$TEMPLATE_TAG")
         [[ "$remote_digest" == "$local_digest" ]]
-        template_repository=${TEMPLATE_TAG%%:*}
+        template_repository=${TEMPLATE_TAG%:*}
         echo "template-image-ref=$template_repository@$remote_digest" >> "$GITHUB_OUTPUT"
 
     - name: Resolve immutable template reference
@@ -217,7 +217,7 @@ runs:
         CACHE_HIT: ${{ steps.template-plan.outputs.cache-hit }}
         CACHED_IMAGE_REF: ${{ steps.template-plan.outputs.template-image-ref }}
         PUBLISHED_IMAGE_REF: ${{ steps.template-publish.outputs.template-image-ref }}
-        TEMPLATE_REPOSITORY: ${{ inputs.template-repository }}
+        TEMPLATE_REPOSITORY: ${{ steps.repositories.outputs.local-template-repository }}
       run: |
         if [[ "$CACHE_HIT" == true ]]; then
           template_image_ref=$CACHED_IMAGE_REF
@@ -262,10 +262,6 @@ runs:
       shell: bash
       run: |
         set +e
-        if [[ -n "${DOCKER_CONFIG:-}" && -d "$DOCKER_CONFIG" ]]; then
-          docker logout ghcr.io >/dev/null 2>&1 || true
-          find "$DOCKER_CONFIG" -depth -delete
-        fi
         for path in \
           "$RUNNER_TEMP/conch-template-source" \
           "$RUNNER_TEMP/conch-template-initramfs-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \

@@ -7,6 +7,9 @@ managed_components:
   buildkit:
     version: v0.32.0
     sha256: bff1c800e765022cc498959d37250dd6101a07b8388f595d1548aaa378373e74
+  distribution_registry:
+    version: v3.1.1
+    sha256: 8167316d2b4a57e10d44f8c8a3c75fea5f3ec1c71872760bb903e5e8e52e9ad6
   erofs_utils:
     version: 1.9.1
     sha256: a9ef5ab67c4b8d2d3e9ed71f39cd008bda653142a720d8a395a36f1110d0c432

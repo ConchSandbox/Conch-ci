@@ -1,5 +1,5 @@
 name: Pull Conch template
-description: Pull an immutable published Conch template and verify its digest
+description: Pull an immutable runner-local Conch template and verify its digest
 
 inputs:
   conch-source:
@@ -12,13 +12,10 @@ inputs:
     description: containerd namespace used by conch
     required: true
   template-image-ref:
-    description: Immutable published template reference
+    description: Immutable runner-local template reference
     required: true
-  registry-username:
-    description: Registry username
-    required: true
-  registry-token:
-    description: Registry token
+  image-profile:
+    description: Workflow-owned lowercase profile used in local OCI repository names
     required: true
 
 outputs:
@@ -29,7 +26,16 @@ outputs:
 runs:
   using: composite
   steps:
-    - name: Pull and verify Conch template
+    - name: Resolve local OCI repositories
+      id: repositories
+      shell: bash
+      env:
+        IMAGE_PROFILE: ${{ inputs.image-profile }}
+      run: |
+        "$GITHUB_WORKSPACE/scripts/runner-env/lib/image_repositories.sh" \
+          "$IMAGE_PROFILE" >> "$GITHUB_OUTPUT"
+
+    - name: Pull and verify runner-local Conch template
       id: pull
       shell: bash
       working-directory: ${{ inputs.conch-source }}
@@ -37,20 +43,20 @@ runs:
         CONCH_CONFIG: ${{ inputs.config }}
         CONCH_NAMESPACE: ${{ inputs.namespace }}
         TEMPLATE_IMAGE_REF: ${{ inputs.template-image-ref }}
-        REGISTRY_USERNAME: ${{ inputs.registry-username }}
-        REGISTRY_TOKEN: ${{ inputs.registry-token }}
+        TEMPLATE_REPOSITORY: ${{ steps.repositories.outputs.local-template-repository }}
       run: |
         set -euo pipefail
         [[ -x bin/conch ]]
         [[ -f "$CONCH_CONFIG" ]]
         [[ -n "$CONCH_NAMESPACE" ]]
-        [[ "$TEMPLATE_IMAGE_REF" =~ ^ghcr\.io/[a-z0-9_.-]+/[a-z0-9_.-]+@sha256:[0-9a-f]{64}$ ]]
+        template_digest=${TEMPLATE_IMAGE_REF#"$TEMPLATE_REPOSITORY@"}
+        [[ "$TEMPLATE_IMAGE_REF" == "$TEMPLATE_REPOSITORY@$template_digest" ]]
+        [[ "$template_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
 
         pull_output=$(./bin/conch template pull \
           --config "$CONCH_CONFIG" \
           -n "$CONCH_NAMESPACE" \
-          --username "$REGISTRY_USERNAME" \
-          --password "$REGISTRY_TOKEN" \
+          --plain-http \
           "$TEMPLATE_IMAGE_REF")
         printf '%s\n' "$pull_output"
 
