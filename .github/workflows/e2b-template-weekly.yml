@@ -10,6 +10,11 @@ on:
         description: Conch ref resolved once to an immutable commit
         required: false
         default: dev
+      publish_to_ghcr:
+        description: Also publish the immutable rootfs and template images to GHCR
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -68,17 +73,44 @@ jobs:
     permissions:
       contents: read
       actions: read
-      packages: write
+    outputs:
+      rootfs-image-ref: ${{ steps.template.outputs.rootfs-image-ref }}
+      rootfs-build-id: ${{ steps.template.outputs.rootfs-build-id }}
+      template-image-ref: ${{ steps.template.outputs.template-image-ref }}
+      template-build-id: ${{ steps.template.outputs.template-build-id }}
     steps:
       - name: Checkout CI repository
         uses: actions/checkout@v4.4.0
 
       - name: Build or reuse E2B template
+        id: template
         uses: ./.github/actions/build-conch-template
         with:
           conch-commit: ${{ needs.resolve-conch.outputs.conch-commit }}
           kernel-artifact-name: ${{ needs.build-kernel.outputs.kernel-artifact-name }}
           kernel-sha256: ${{ needs.build-kernel.outputs.kernel-sha256 }}
           dockerfile: examples/e2b-rootfs/Dockerfile
-          rootfs-repository: ghcr.io/conchsandbox/conch-e2b-rootfs
-          template-repository: ghcr.io/conchsandbox/conch-e2b-template
+          image-profile: e2b
+
+  publish-ghcr:
+    name: Publish E2B images to GHCR
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_to_ghcr }}
+    needs: [resolve-conch, build-template]
+    runs-on: [self-hosted, Linux, ARM64, Huawei]
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout CI repository
+        uses: actions/checkout@v4.4.0
+
+      - name: Publish rootfs and template to GHCR
+        uses: ./.github/actions/publish-conch-template
+        with:
+          conch-commit: ${{ needs.resolve-conch.outputs.conch-commit }}
+          image-profile: e2b
+          rootfs-image-ref: ${{ needs.build-template.outputs.rootfs-image-ref }}
+          rootfs-build-id: ${{ needs.build-template.outputs.rootfs-build-id }}
+          template-image-ref: ${{ needs.build-template.outputs.template-image-ref }}
+          template-build-id: ${{ needs.build-template.outputs.template-build-id }}

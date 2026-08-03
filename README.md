@@ -13,10 +13,11 @@ before any self-hosted job starts:
   checks.
 - `conch-init-smoke.yml`: boots `conch-init` as PID 1 in a real
   cloud-hypervisor VM, then verifies vsock readiness and SDK health.
-- `e2b-template-weekly.yml`: builds or reuses the kernel and rootfs, then
-  publishes a content-addressed E2B Conch Template to GHCR.
-- `e2b-workload-smoke.yml`: consumes the same Template producer, pulls its immutable
-  published output, and optionally runs E2B SDK operations.
+- `e2b-template-weekly.yml`: builds or reuses the kernel and rootfs, publishes a
+  content-addressed E2B Conch Template to the runner-local OCI registry, and can
+  optionally mirror both images to GHCR on manual runs.
+- `e2b-workload-smoke.yml`: consumes the same Template producer from the local
+  registry and optionally runs E2B SDK operations.
 - `prepare-self-hosted-runner.yml`: verifies or installs the locked runner
   environment, and applies reviewed environment changes merged to `main`.
 
@@ -56,19 +57,27 @@ existing kernel cache. When a toolchain change must be exercised, change an
 explicit kernel input or evict the relevant Actions cache. This policy favors
 stable test reuse over strict byte-for-byte reproducibility across toolchains.
 
-The generic `build-conch-template` action first builds or reuses the rootfs OCI image. Its
-rootfs build ID is derived from the platform, exact Conch commit, selected
-Dockerfile path, and rootfs build script digest. The action then combines that
-immutable rootfs, the kernel artifact, and an initramfs produced by the shared
-`build-conch-initramfs` action into a native Conch boot index and publishes it
-to GHCR. The Template build ID contains the rootfs reference, kernel digest,
-Conch commit, and Template recipe digest. Dockerfile and rootfs/Template
-repositories are workflow inputs to the action; the common action contains no
-E2B-specific paths or repository names. Consumers receive only an immutable reference:
+The generic `build-conch-template` action first builds or reuses the rootfs OCI
+image. Its rootfs build ID is derived from the platform, exact Conch commit,
+selected Dockerfile path, and rootfs build script digest. The action then
+combines that immutable rootfs, the kernel artifact, and an initramfs produced
+by the shared `build-conch-initramfs` action into a native Conch boot index and
+publishes it to a loopback-only OCI registry managed by the runner environment.
+The Template build ID contains the rootfs reference, kernel digest, Conch
+commit, and Template recipe digest.
+
+Each workflow owns a fixed image profile and passes it to the common action;
+the profile is not exposed as a dispatch input. Repository names are derived as:
 
 ```text
-ghcr.io/conchsandbox/conch-e2b-template@sha256:<digest>
+localhost:5000/conch-ci/conch-<profile>-rootfs
+localhost:5000/conch-ci/conch-<profile>-template
 ```
+
+For the E2B workflows, `<profile>` is `e2b`. Producers and consumers exchange
+only immutable `@sha256:<digest>` references. The registry address, plain-HTTP
+mode, repository prefix, and lack of authentication are repository policy and
+are not user-configurable inputs.
 
 The rootfs build ID likewise intentionally excludes the BuildKit version and
 its host-side wrapper. It includes the source, Dockerfile, platform, and rootfs
@@ -76,12 +85,28 @@ recipe inputs that define the semantic test image. Builder changes therefore do
 not automatically invalidate an existing rootfs tag; explicitly change a
 semantic input or evict the cache when a builder change must be validated.
 
-The weekly and E2E workflows call the same Template action. A matching remote
-tag avoids rebuilding and republishing the Template; E2E pulls the published
-boot index instead of running `conch template create`. There is no runner-local
-registry, `build_rootfs` switch, or rootfs image override. Conch CNI
-configuration is copied from the exact Conch checkout into the job directory;
-only the locked CNI plugin binaries persist in the runner tool cache.
+The locked `distribution/distribution` binary, its configuration, and its data
+directory live below `${RUNNER_TOOL_CACHE}/conch-ci`. The preparation workflow
+installs and enables its systemd service on `127.0.0.1:5000`; normal CI jobs only
+verify that the declared version, configuration, service state, and `/v2/`
+health endpoint are ready. A matching local tag avoids rebuilding and
+republishing the Template, and E2E pulls the resulting boot index instead of
+running `conch template create` again.
+
+Manual runs of `e2b-template-weekly.yml` expose a `publish_to_ghcr` checkbox,
+which defaults to false. When selected, a permission-scoped job also copies the
+immutable rootfs and Template to these fixed repositories:
+
+```text
+ghcr.io/conchsandbox/conch-e2b-rootfs
+ghcr.io/conchsandbox/conch-e2b-template
+```
+
+Scheduled runs remain local-only. There is no registry-address, authentication,
+`build_rootfs`, or rootfs-image override. Conch CNI configuration is copied
+from the exact Conch checkout into the job directory; only managed environment
+data, including the registry cache and locked CNI plugin binaries, persists in
+the runner tool cache.
 
 ## AtomGit mirror sync
 
@@ -141,6 +166,10 @@ new head.
 
 `CONCH_SYNC_APP_PRIVATE_KEY` is required for normal mirroring. The GitHub App
 must be installed on `ConchSandbox/Conch`.
+
+The optional GHCR publication job uses its run-scoped `GITHUB_TOKEN` with
+`packages: write`; the local registry path needs no registry credentials. Other
+Template producer and consumer jobs do not request package permissions.
 
 The GitHub App installation must grant these repository permissions for
 `ConchSandbox/Conch`:

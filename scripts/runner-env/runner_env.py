@@ -7,9 +7,11 @@ import argparse
 import contextlib
 import datetime as dt
 import fcntl
+import grp
 import hashlib
 import json
 import os
+import pwd
 import secrets
 import shlex
 import shutil
@@ -42,13 +44,26 @@ LOCK_TIMEOUT_SECONDS = 300
 LOCK_PATH = REPO_ROOT / "runner-env.lock.yaml"
 EROFS_UTILS_BUILD_RECIPE = SCRIPT_DIR / "jobs/prepare-erofs-utils.sh"
 
-COMPONENTS = ("buildkit", "cloud_hypervisor", "cni_plugins", "erofs_utils")
+COMPONENTS = (
+    "buildkit",
+    "cloud_hypervisor",
+    "cni_plugins",
+    "distribution_registry",
+    "erofs_utils",
+)
 COMPONENT_FILES = {
     "cloud_hypervisor": ("bin/cloud-hypervisor",),
     "buildkit": ("bin/buildctl", "bin/buildkitd", "bin/buildkit-runc"),
+    "distribution_registry": ("bin/registry",),
     "erofs_utils": ("bin/mkfs.erofs",),
     "cni_plugins": ("bin/cni/bridge", "bin/cni/host-local", "bin/cni/loopback"),
 }
+
+LOCAL_REGISTRY_ENDPOINT = "localhost:5000"
+LOCAL_REGISTRY_LISTEN_ADDRESS = "127.0.0.1:5000"
+REGISTRY_SERVICE_NAME = "conch-ci-registry.service"
+REGISTRY_SERVICE_UNIT = Path("/etc/systemd/system") / REGISTRY_SERVICE_NAME
+REGISTRY_HEALTH_URL = f"http://{LOCAL_REGISTRY_LISTEN_ADDRESS}/v2/"
 
 REASON_ORDER = {
     "missing",
@@ -183,6 +198,7 @@ def verify_baseline() -> dict[str, str]:
         "rsync",
         "sed",
         "sha256sum",
+        "systemctl",
         "tar",
         "xz",
     )
@@ -292,9 +308,21 @@ def tool_paths(*, create: bool) -> dict[str, Path]:
         "locks": root / "locks",
         "lock": root / "locks/runner-env.lock",
         "staging": root / "staging",
+        "registry_dir": root / "registry",
+        "registry_config": root / "registry/config.yml",
+        "registry_data": root / "registry/data",
     }
     if create:
-        for key in ("root", "bin", "cache", "state_dir", "locks", "staging"):
+        for key in (
+            "root",
+            "bin",
+            "cache",
+            "state_dir",
+            "locks",
+            "staging",
+            "registry_dir",
+            "registry_data",
+        ):
             paths[key].mkdir(parents=True, exist_ok=True)
         os.chmod(paths["state_dir"], 0o700)
         os.chmod(paths["locks"], 0o700)
@@ -338,6 +366,12 @@ def source_url(component: str, version: str) -> str:
             "https://github.com/moby/buildkit/releases/download/"
             f"{version}/buildkit-{version}.linux-arm64.tar.gz"
         )
+    if component == "distribution_registry":
+        clean = version.removeprefix("v")
+        return (
+            "https://github.com/distribution/distribution/releases/download/"
+            f"{version}/registry_{clean}_linux_arm64.tar.gz"
+        )
     if component == "erofs_utils":
         clean = version.removeprefix("v")
         return (
@@ -357,6 +391,7 @@ def archive_name(component: str, version: str) -> str:
     suffix = {
         "cloud_hypervisor": "cloud-hypervisor-static-aarch64",
         "buildkit": f"buildkit-{version}.linux-arm64.tar.gz",
+        "distribution_registry": f"registry_{version.removeprefix('v')}_linux_arm64.tar.gz",
         "erofs_utils": f"erofs-utils-{version.removeprefix('v')}.tar.gz",
         "cni_plugins": f"cni-plugins-linux-arm64-{version}.tgz",
     }[component]
@@ -411,6 +446,7 @@ def component_smoke_commands(component: str, root: Path) -> list[list[str]]:
             [str(root / "bin/buildkitd"), "--version"],
             [str(root / "bin/buildkit-runc"), "--version"],
         ],
+        "distribution_registry": [[str(root / "bin/registry"), "--version"]],
         "erofs_utils": [[str(root / "bin/mkfs.erofs"), "--version"]],
         "cni_plugins": [[str(root / "bin/cni/bridge"), "--version"]],
     }[component]
@@ -453,6 +489,192 @@ def atomic_install(source: Path, target: Path) -> None:
             pass
 
 
+def atomic_text(path: Path, content: str, mode: int = 0o644) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, raw_temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(raw_temporary)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def registry_config_content(paths: dict[str, Path]) -> str:
+    root_directory = json.dumps(str(paths["registry_data"]))
+    return (
+        "version: 0.1\n"
+        "log:\n"
+        "  fields:\n"
+        "    service: conch-ci-registry\n"
+        "storage:\n"
+        "  filesystem:\n"
+        f"    rootdirectory: {root_directory}\n"
+        "  delete:\n"
+        "    enabled: true\n"
+        "  maintenance:\n"
+        "    uploadpurging:\n"
+        "      enabled: true\n"
+        "      age: 168h\n"
+        "      interval: 24h\n"
+        "      dryrun: false\n"
+        "http:\n"
+        f"  addr: {LOCAL_REGISTRY_LISTEN_ADDRESS}\n"
+        "  headers:\n"
+        "    X-Content-Type-Options: [nosniff]\n"
+        "health:\n"
+        "  storagedriver:\n"
+        "    enabled: true\n"
+        "    interval: 10s\n"
+        "    threshold: 3\n"
+    )
+
+
+def registry_service_content(paths: dict[str, Path]) -> str:
+    account = pwd.getpwuid(os.getuid())
+    group_name = grp.getgrgid(account.pw_gid).gr_name
+    for label, value in (("user", account.pw_name), ("group", group_name)):
+        if not value or any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for character in value):
+            raise BaselineError(f"unsupported runner {label} name for registry service: {value!r}")
+    executable = json.dumps(str(paths["root"] / "bin/registry"))
+    config = json.dumps(str(paths["registry_config"]))
+    return (
+        "[Unit]\n"
+        "Description=Conch CI local OCI registry\n"
+        "After=network.target\n"
+        "\n"
+        "[Service]\n"
+        "Type=simple\n"
+        f"User={account.pw_name}\n"
+        f"Group={group_name}\n"
+        "Environment=OTEL_TRACES_EXPORTER=none\n"
+        f"ExecStart={executable} serve {config}\n"
+        "Restart=on-failure\n"
+        "RestartSec=2s\n"
+        "NoNewPrivileges=true\n"
+        "PrivateTmp=true\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=multi-user.target\n"
+    )
+
+
+def registry_health_ok() -> bool:
+    try:
+        run(
+            [
+                "curl",
+                "--fail",
+                "--silent",
+                "--show-error",
+                "--noproxy",
+                "127.0.0.1,localhost",
+                "--max-time",
+                "5",
+                REGISTRY_HEALTH_URL,
+            ],
+            capture=True,
+        )
+        return True
+    except (OSError, subprocess.CalledProcessError):
+        return False
+
+
+def registry_runtime_reasons(paths: dict[str, Path]) -> set[str]:
+    reasons: set[str] = set()
+    try:
+        if paths["registry_config"].read_text(encoding="utf-8") != registry_config_content(paths):
+            reasons.add("configuration-mismatch")
+    except OSError:
+        reasons.add("missing")
+    try:
+        if REGISTRY_SERVICE_UNIT.read_text(encoding="utf-8") != registry_service_content(paths):
+            reasons.add("configuration-mismatch")
+    except OSError:
+        reasons.add("missing")
+    for command in (
+        ["systemctl", "is-enabled", "--quiet", REGISTRY_SERVICE_NAME],
+        ["systemctl", "is-active", "--quiet", REGISTRY_SERVICE_NAME],
+    ):
+        try:
+            run(command, capture=True)
+        except (OSError, subprocess.CalledProcessError):
+            reasons.add("runtime-mismatch")
+    if not registry_health_ok():
+        reasons.add("runtime-mismatch")
+    return reasons
+
+
+def configure_registry_service(paths: dict[str, Path]) -> None:
+    atomic_text(paths["registry_config"], registry_config_content(paths))
+    os.chmod(paths["registry_data"], 0o755)
+
+    unit_content = registry_service_content(paths)
+    unit_changed = True
+    try:
+        unit_changed = REGISTRY_SERVICE_UNIT.read_text(encoding="utf-8") != unit_content
+    except OSError:
+        pass
+    if unit_changed:
+        descriptor, raw_temporary = tempfile.mkstemp(
+            prefix="conch-ci-registry-",
+            suffix=".service",
+            dir=paths["staging"],
+        )
+        temporary = Path(raw_temporary)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                stream.write(unit_content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.chmod(temporary, 0o644)
+            run(
+                [
+                    "sudo",
+                    "-n",
+                    "install",
+                    "-o",
+                    "root",
+                    "-g",
+                    "root",
+                    "-m",
+                    "0644",
+                    str(temporary),
+                    str(REGISTRY_SERVICE_UNIT),
+                ]
+            )
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+        run(["sudo", "-n", "systemctl", "daemon-reload"])
+
+    run(["sudo", "-n", "systemctl", "enable", REGISTRY_SERVICE_NAME])
+    run(["sudo", "-n", "systemctl", "restart", REGISTRY_SERVICE_NAME])
+    for _ in range(60):
+        if registry_health_ok():
+            return
+        time.sleep(0.5)
+    try:
+        status = run(
+            ["systemctl", "status", "--no-pager", "--full", REGISTRY_SERVICE_NAME],
+            capture=True,
+        ).stdout
+    except subprocess.CalledProcessError as exc:
+        status = exc.stdout
+    raise RunnerEnvError(
+        f"local OCI registry did not become healthy at {REGISTRY_HEALTH_URL}:\n{status or ''}"
+    )
+
+
 def install_component(component: str, declaration: dict[str, str], paths: dict[str, Path]) -> None:
     version = declaration["version"]
     expected_sha256 = declaration["sha256"]
@@ -480,6 +702,12 @@ def install_component(component: str, declaration: dict[str, str], paths: dict[s
                     "bin/buildkitd": "buildkitd",
                     "bin/buildkit-runc": "buildkit-runc",
                 },
+            )
+        elif component == "distribution_registry":
+            extract_selected(
+                archive,
+                output_root / "bin",
+                {"registry": "registry"},
             )
         elif component == "erofs_utils":
             run(
@@ -551,6 +779,14 @@ def expected_component_receipt(
     }
     if component == "erofs_utils":
         receipt["build_recipe_sha256"] = erofs_utils_build_recipe_sha256()
+    if component == "distribution_registry":
+        receipt["configuration_sha256"] = hashlib.sha256(
+            registry_config_content(paths).encode("utf-8")
+        ).hexdigest()
+        receipt["service_unit_sha256"] = hashlib.sha256(
+            registry_service_content(paths).encode("utf-8")
+        ).hexdigest()
+        receipt["endpoint"] = LOCAL_REGISTRY_ENDPOINT
     return receipt
 
 
@@ -583,7 +819,10 @@ def validate_state(value: Any) -> dict[str, Any]:
     if value["platform"] != expected_platform or not isinstance(value["install_root"], str):
         raise ValidationError("state: invalid platform or install root")
     components = value["components"]
-    if not isinstance(components, dict) or set(components) != set(COMPONENTS):
+    legacy_components = set(COMPONENTS) - {"distribution_registry"}
+    if not isinstance(components, dict) or (
+        set(components) != set(COMPONENTS) and set(components) != legacy_components
+    ):
         raise ValidationError("state: invalid components")
     receipt_fields = {
         "declared_version",
@@ -596,6 +835,10 @@ def validate_state(value: Any) -> dict[str, Any]:
         expected_receipt_fields = set(receipt_fields)
         if name == "erofs_utils":
             expected_receipt_fields.add("build_recipe_sha256")
+        if name == "distribution_registry":
+            expected_receipt_fields.update(
+                {"configuration_sha256", "service_unit_sha256", "endpoint"}
+            )
         if not isinstance(receipt, dict) or set(receipt) != expected_receipt_fields:
             raise ValidationError(f"state: invalid {name} receipt")
         if not isinstance(receipt["files"], list):
@@ -608,6 +851,19 @@ def validate_state(value: Any) -> dict[str, Any]:
                 or any(character not in "0123456789abcdef" for character in recipe_sha256)
             ):
                 raise ValidationError("state: invalid erofs_utils build recipe digest")
+        if name == "distribution_registry":
+            for field in ("configuration_sha256", "service_unit_sha256"):
+                digest = receipt[field]
+                if (
+                    not isinstance(digest, str)
+                    or len(digest) != 64
+                    or any(character not in "0123456789abcdef" for character in digest)
+                ):
+                    raise ValidationError(
+                        f"state: invalid distribution_registry {field}"
+                    )
+            if receipt["endpoint"] != LOCAL_REGISTRY_ENDPOINT:
+                raise ValidationError("state: invalid distribution_registry endpoint")
     if not isinstance(value["last_changed_at"], str):
         raise ValidationError("state: invalid change timestamp")
     return value
@@ -645,6 +901,20 @@ def inspect_component(
         and receipt.get("build_recipe_sha256") != erofs_utils_build_recipe_sha256()
     ):
         reasons.add("build-recipe-mismatch")
+    if component == "distribution_registry":
+        expected_configuration_sha256 = hashlib.sha256(
+            registry_config_content(paths).encode("utf-8")
+        ).hexdigest()
+        expected_service_unit_sha256 = hashlib.sha256(
+            registry_service_content(paths).encode("utf-8")
+        ).hexdigest()
+        if (
+            receipt.get("configuration_sha256") != expected_configuration_sha256
+            or receipt.get("service_unit_sha256") != expected_service_unit_sha256
+            or receipt.get("endpoint") != LOCAL_REGISTRY_ENDPOINT
+        ):
+            reasons.add("configuration-mismatch")
+        reasons.update(registry_runtime_reasons(paths))
 
     expected_paths = [str(paths["root"] / relative) for relative in COMPONENT_FILES[component]]
     file_receipts = receipt.get("files", [])
@@ -854,6 +1124,9 @@ def ensure(lock: dict[str, Any], environment_id: str) -> None:
             return
 
         write_dirty(paths, environment_id, operations)
+        registry_changed = any(
+            operation["component"] == "distribution_registry" for operation in operations
+        )
         for operation in operations:
             component = operation["component"]
             if component == "ci_dependency_metadata":
@@ -872,6 +1145,9 @@ def ensure(lock: dict[str, Any], environment_id: str) -> None:
                     else:
                         install_component(component, lock["managed_components"][component], paths)
                         break
+
+        if registry_changed:
+            configure_registry_service(paths)
 
         components = {
             component: expected_component_receipt(

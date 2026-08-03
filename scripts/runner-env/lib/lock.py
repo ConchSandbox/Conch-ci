@@ -11,7 +11,13 @@ from pathlib import Path
 from typing import Any
 
 
-COMPONENTS = ("cloud_hypervisor", "buildkit", "erofs_utils", "cni_plugins")
+COMPONENTS = (
+    "cloud_hypervisor",
+    "buildkit",
+    "distribution_registry",
+    "erofs_utils",
+    "cni_plugins",
+)
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 EXACT_VERSION_RE = re.compile(r"[0-9]+(?:\.[0-9]+)+(?:[A-Za-z0-9.-]*)?")

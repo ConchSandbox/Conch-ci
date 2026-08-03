@@ -5,7 +5,7 @@ usage() {
   cat >&2 <<'EOF'
 usage: ensure-rootfs.sh \
   --conch-source DIR --conch-commit FULL_SHA --dockerfile REPOSITORY_RELATIVE_PATH \
-  --repository GHCR_REPOSITORY \
+  --repository LOCAL_OCI_REPOSITORY \
   --bin-dir DIR --work-dir DIR
 EOF
 }
@@ -34,16 +34,13 @@ case "/$dockerfile_relative/" in
   *"/../"*|*"/./"*|*"//"*) echo "invalid Dockerfile path: $dockerfile_relative" >&2; exit 2 ;;
 esac
 git -C "$conch_source" ls-files --error-unmatch -- "$dockerfile_relative" >/dev/null
-[[ "$repository" =~ ^ghcr\.io/[a-z0-9_.-]+/[a-z0-9_.-]+$ ]]
+[[ "$repository" =~ ^localhost:5000/conch-ci/conch-[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?-rootfs$ ]]
 [[ -x "$bin_dir/buildctl" && -x "$bin_dir/buildkitd" && -x "$bin_dir/buildkit-runc" ]]
 [[ -n "$work_dir" && "$work_dir" != / ]]
 dockerfile="$conch_source/$dockerfile_relative"
 [[ -f "$dockerfile" && ! -L "$dockerfile" ]]
 dockerfile_dir=$(dirname -- "$dockerfile")
 dockerfile_name=$(basename -- "$dockerfile")
-command -v docker >/dev/null
-docker buildx version
-
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 platform=linux/arm64
 script_sha256=$(sha256sum "${BASH_SOURCE[0]}" | awk '{print $1}')
@@ -54,17 +51,36 @@ build_id=$(python3 "$script_dir/lib/ids.py" rootfs \
   --dockerfile "$dockerfile_relative")
 tag="$repository:build-$build_id"
 manifest_json="$work_dir/manifest.json"
-inspect_text="$work_dir/inspect.txt"
+inspect_headers="$work_dir/inspect.headers"
 mkdir -p "$work_dir"
+curl --fail --silent --show-error --noproxy localhost --max-time 5 \
+  http://localhost:5000/v2/ >/dev/null
 
 inspect_image() {
-  docker buildx imagetools inspect "$tag" >"$inspect_text"
-  docker buildx imagetools inspect --raw "$tag" >"$manifest_json"
+  local repository_path=${repository#localhost:5000/}
+  if ! curl \
+    --fail \
+    --silent \
+    --show-error \
+    --noproxy localhost \
+    --dump-header "$inspect_headers" \
+    --header 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json' \
+    --output "$manifest_json" \
+    "http://localhost:5000/v2/$repository_path/manifests/build-$build_id"; then
+    return 1
+  fi
   local index_digest
-  index_digest=$(awk '$1 == "Digest:" {print $2; exit}' "$inspect_text")
-  [[ "$index_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+  index_digest=$(awk '
+    tolower($1) == "docker-content-digest:" {
+      gsub("\\r", "", $2)
+      print $2
+      exit
+    }
+  ' "$inspect_headers")
+  [[ "$index_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+  [[ "$index_digest" == "sha256:$(sha256sum "$manifest_json" | awk '{print $1}')" ]] || return 1
   local platform_digest
-  platform_digest=$(ROOTFS_MANIFEST="$manifest_json" \
+  if ! platform_digest=$(ROOTFS_MANIFEST="$manifest_json" \
   ROOTFS_BUILD_ID="$build_id" \
   ROOTFS_CONCH_COMMIT="$conch_commit" \
   ROOTFS_PLATFORM="$platform" \
@@ -110,13 +126,16 @@ if not platform_digest.startswith("sha256:") or len(platform_digest) != 71:
     raise SystemExit(f"invalid platform digest: {platform_digest!r}")
 print(platform_digest)
 PY
-  )
+  ); then
+    return 1
+  fi
+  [[ "$platform_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
   printf '%s %s\n' "$index_digest" "$platform_digest"
 }
 
 cache_hit=false
-if docker buildx imagetools inspect "$tag" >/dev/null 2>&1; then
-  read -r index_digest platform_digest < <(inspect_image)
+if inspect_result=$(inspect_image 2>/dev/null); then
+  read -r index_digest platform_digest <<<"$inspect_result"
   cache_hit=true
 else
   runtime_output="$work_dir/buildkit-output"
@@ -153,7 +172,8 @@ else
     --opt "platform=$platform" \
     --opt "build-arg:GOPROXY=https://goproxy.cn" \
     --output "$output"
-  read -r index_digest platform_digest < <(inspect_image)
+  inspect_result=$(inspect_image)
+  read -r index_digest platform_digest <<<"$inspect_result"
   cleanup_buildkit
   buildkit_pid_file=
   trap - EXIT

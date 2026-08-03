@@ -44,17 +44,23 @@ case "$mode" in
     address="unix://$socket"
     pid_file="$work_dir/buildkitd.pid"
     log_file="$work_dir/buildkitd.log"
+    config_file="$work_dir/buildkitd.toml"
+    printf '%s\n' \
+      '[registry."localhost:5000"]' \
+      '  http = true' \
+      > "$config_file"
     # The runner shell intentionally owns this job-local log file.
     # shellcheck disable=SC2024
     sudo -n env "PATH=$bin_dir:$PATH" \
       "$bin_dir/buildkitd" \
       --addr "$address" \
+      --config "$config_file" \
       --root "$work_dir/root" \
       --oci-worker-binary "$bin_dir/buildkit-runc" \
       >"$log_file" 2>&1 &
     pid=$!
     # Invoked indirectly by the EXIT trap below.
-    # shellcheck disable=SC2317
+    # shellcheck disable=SC2317,SC2329
     cleanup_failed_start() {
       local status=$?
       trap - EXIT
