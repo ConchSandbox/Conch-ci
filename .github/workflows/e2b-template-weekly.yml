@@ -6,6 +6,14 @@ on:
     - cron: "0 3 * * 1"
   workflow_dispatch:
     inputs:
+      conch_repository:
+        description: Trusted Conch source repository
+        required: false
+        type: choice
+        options:
+          - https://atomgit.com/openeuler/Conch.git
+          - https://github.com/ConchSandbox/Conch.git
+        default: https://atomgit.com/openeuler/Conch.git
       conch_ref:
         description: Conch ref resolved once to an immutable commit
         required: false
@@ -24,7 +32,7 @@ defaults:
     shell: bash
 
 env:
-  CONCH_REPOSITORY: https://github.com/ConchSandbox/Conch.git
+  CONCH_REPOSITORY: ${{ github.event.inputs.conch_repository || vars.CONCH_REPOSITORY || 'https://atomgit.com/openeuler/Conch.git' }}
   CONCH_REF: ${{ github.event.inputs.conch_ref || vars.CONCH_E2B_TEMPLATE_REF || vars.CONCH_REF || 'dev' }}
 
 jobs:
@@ -63,6 +71,7 @@ jobs:
         id: kernel
         uses: ./.github/actions/build-kernel
         with:
+          conch-repository: ${{ env.CONCH_REPOSITORY }}
           conch-commit: ${{ needs.resolve-conch.outputs.conch-commit }}
 
   build-template:
@@ -86,6 +95,7 @@ jobs:
         id: template
         uses: ./.github/actions/build-conch-template
         with:
+          conch-repository: ${{ env.CONCH_REPOSITORY }}
           conch-commit: ${{ needs.resolve-conch.outputs.conch-commit }}
           kernel-artifact-name: ${{ needs.build-kernel.outputs.kernel-artifact-name }}
           kernel-sha256: ${{ needs.build-kernel.outputs.kernel-sha256 }}
@@ -108,6 +118,7 @@ jobs:
       - name: Publish rootfs and template to GHCR
         uses: ./.github/actions/publish-conch-template
         with:
+          conch-repository: ${{ env.CONCH_REPOSITORY }}
           conch-commit: ${{ needs.resolve-conch.outputs.conch-commit }}
           image-profile: e2b
           rootfs-image-ref: ${{ needs.build-template.outputs.rootfs-image-ref }}

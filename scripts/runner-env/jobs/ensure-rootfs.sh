@@ -5,7 +5,7 @@ usage() {
   cat >&2 <<'EOF'
 usage: ensure-rootfs.sh \
   --conch-source DIR --conch-commit FULL_SHA --dockerfile REPOSITORY_RELATIVE_PATH \
-  --repository LOCAL_OCI_REPOSITORY \
+  --source-repository URL --repository LOCAL_OCI_REPOSITORY \
   --bin-dir DIR --work-dir DIR
 EOF
 }
@@ -13,6 +13,7 @@ EOF
 conch_source=
 conch_commit=
 dockerfile_relative=
+source_repository=
 repository=
 bin_dir=
 work_dir=
@@ -21,6 +22,7 @@ while (($#)); do
     --conch-source) conch_source=${2:?}; shift 2 ;;
     --conch-commit) conch_commit=${2:?}; shift 2 ;;
     --dockerfile) dockerfile_relative=${2:?}; shift 2 ;;
+    --source-repository) source_repository=${2:?}; shift 2 ;;
     --repository) repository=${2:?}; shift 2 ;;
     --bin-dir) bin_dir=${2:?}; shift 2 ;;
     --work-dir) work_dir=${2:?}; shift 2 ;;
@@ -29,6 +31,10 @@ while (($#)); do
 done
 [[ "$conch_commit" =~ ^[0-9a-f]{40}$ ]]
 [[ "$(git -C "$conch_source" rev-parse HEAD)" == "$conch_commit" ]]
+case "$source_repository" in
+  https://github.com/ConchSandbox/Conch.git|https://atomgit.com/openeuler/Conch.git) ;;
+  *) echo "unsupported Conch repository: $source_repository" >&2; exit 2 ;;
+esac
 [[ "$dockerfile_relative" =~ ^[A-Za-z0-9._/-]+$ ]]
 case "/$dockerfile_relative/" in
   *"/../"*|*"/./"*|*"//"*) echo "invalid Dockerfile path: $dockerfile_relative" >&2; exit 2 ;;
@@ -47,6 +53,7 @@ script_sha256=$(sha256sum "${BASH_SOURCE[0]}" | awk '{print $1}')
 build_id=$(python3 "$script_dir/lib/ids.py" rootfs \
   --platform "$platform" \
   --conch-commit "$conch_commit" \
+  --source-repository "$source_repository" \
   --script-sha256 "$script_sha256" \
   --dockerfile "$dockerfile_relative")
 tag="$repository:build-$build_id"
@@ -83,6 +90,7 @@ inspect_image() {
   if ! platform_digest=$(ROOTFS_MANIFEST="$manifest_json" \
   ROOTFS_BUILD_ID="$build_id" \
   ROOTFS_CONCH_COMMIT="$conch_commit" \
+  ROOTFS_SOURCE_REPOSITORY="$source_repository" \
   ROOTFS_PLATFORM="$platform" \
   ROOTFS_SCRIPT_SHA256="$script_sha256" \
   ROOTFS_DOCKERFILE="$dockerfile_relative" \
@@ -96,10 +104,10 @@ manifest = json.loads(Path(os.environ["ROOTFS_MANIFEST"]).read_text(encoding="ut
 expected = {
     "io.conch.rootfs.build-id": os.environ["ROOTFS_BUILD_ID"],
     "io.conch.rootfs.conch-commit": os.environ["ROOTFS_CONCH_COMMIT"],
+    "io.conch.rootfs.source-repository": os.environ["ROOTFS_SOURCE_REPOSITORY"],
     "io.conch.rootfs.platform": os.environ["ROOTFS_PLATFORM"],
     "io.conch.rootfs.script-sha256": os.environ["ROOTFS_SCRIPT_SHA256"],
     "io.conch.rootfs.dockerfile": os.environ["ROOTFS_DOCKERFILE"],
-    "io.conch.rootfs.source-repository": "https://github.com/ConchSandbox/Conch.git",
 }
 annotations = manifest.get("annotations", {})
 for key, value in expected.items():
@@ -155,10 +163,10 @@ else
   metadata=(
     "annotation-manifest.io.conch.rootfs.build-id=$build_id"
     "annotation-manifest.io.conch.rootfs.conch-commit=$conch_commit"
+    "annotation-manifest.io.conch.rootfs.source-repository=$source_repository"
     "annotation-manifest.io.conch.rootfs.platform=$platform"
     "annotation-manifest.io.conch.rootfs.script-sha256=$script_sha256"
     "annotation-manifest.io.conch.rootfs.dockerfile=$dockerfile_relative"
-    "annotation-manifest.io.conch.rootfs.source-repository=https://github.com/ConchSandbox/Conch.git"
   )
   output="type=image,name=$tag,push=true,oci-mediatypes=true"
   for item in "${metadata[@]}"; do
@@ -202,6 +210,7 @@ if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
     echo
     echo "- Build ID: \`$build_id\`"
     echo "- Conch commit: \`$conch_commit\`"
+    echo "- Source repository: \`$source_repository\`"
     echo "- Platform: \`$platform\`"
     echo "- Script SHA-256: \`$script_sha256\`"
     echo "- Dockerfile: \`$dockerfile_relative\`"

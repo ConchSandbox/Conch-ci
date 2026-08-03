@@ -29,6 +29,25 @@ conch_repository=<Conch source repository URL>
 conch_ref=<Conch source ref to validate>
 ```
 
+`conch_repository` defaults to the trusted AtomGit upstream; the GitHub mirror
+remains available as an explicit alternative:
+
+```text
+https://atomgit.com/openeuler/Conch.git
+https://github.com/ConchSandbox/Conch.git
+```
+
+The selected repository is used both to resolve `conch_ref` and for every
+subsequent immutable checkout. For example, an E2B run can fetch Conch entirely
+from AtomGit with:
+
+```bash
+gh workflow run e2b-workload-smoke.yml --ref main \
+  --field conch_repository=https://atomgit.com/openeuler/Conch.git \
+  --field conch_ref=dev \
+  --field run_sdk_smoke=true
+```
+
 Self-hosted jobs target the `taishan2280-oe2403sp3` runner through the
 `self-hosted`, `Linux`, `ARM64`, and `Huawei` labels. Persistent dependencies
 are declared only in [`runner-env.lock.yaml`](runner-env.lock.yaml) and
@@ -59,12 +78,13 @@ stable test reuse over strict byte-for-byte reproducibility across toolchains.
 
 The generic `build-conch-template` action first builds or reuses the rootfs OCI
 image. Its rootfs build ID is derived from the platform, exact Conch commit,
-selected Dockerfile path, and rootfs build script digest. The action then
-combines that immutable rootfs, the kernel artifact, and an initramfs produced
-by the shared `build-conch-initramfs` action into a native Conch boot index and
-publishes it to a loopback-only OCI registry managed by the runner environment.
-The Template build ID contains the rootfs reference, kernel digest, Conch
-commit, and Template recipe digest.
+selected source repository, Dockerfile path, and rootfs build script digest.
+The source repository is also recorded in the OCI manifest annotations. The
+action then combines that immutable rootfs, the kernel artifact, and an
+initramfs produced by the shared `build-conch-initramfs` action into a native
+Conch boot index and publishes it to a loopback-only OCI registry managed by the
+runner environment. The Template build ID contains the rootfs reference, kernel
+digest, Conch commit, and Template recipe digest.
 
 Each workflow owns a fixed image profile and passes it to the common action;
 the profile is not exposed as a dispatch input. Repository names are derived as:

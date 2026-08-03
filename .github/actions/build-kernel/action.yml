@@ -2,6 +2,10 @@ name: Build kernel
 description: Build or reuse the locked ARM64 kernel artifact
 
 inputs:
+  conch-repository:
+    description: Trusted Conch source repository URL
+    required: false
+    default: https://atomgit.com/openeuler/Conch.git
   conch-commit:
     description: Immutable Conch commit containing the kernel configuration
     required: true
@@ -26,7 +30,7 @@ runs:
     - name: Checkout Conch kernel configuration
       shell: bash
       env:
-        CONCH_REPOSITORY: https://github.com/ConchSandbox/Conch.git
+        CONCH_REPOSITORY: ${{ inputs.conch-repository }}
       run: |
         scripts/runner-env/jobs/checkout-conch.sh \
           --repository "$CONCH_REPOSITORY" \
