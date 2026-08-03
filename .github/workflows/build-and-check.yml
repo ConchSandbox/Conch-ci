@@ -8,9 +8,13 @@ on:
         description: External CI correlation marker
         required: false
       conch_repository:
-        description: Conch source repository URL
+        description: Trusted Conch source repository
         required: false
-        default: https://github.com/ConchSandbox/Conch.git
+        type: choice
+        options:
+          - https://atomgit.com/openeuler/Conch.git
+          - https://github.com/ConchSandbox/Conch.git
+        default: https://atomgit.com/openeuler/Conch.git
       conch_ref:
         description: Conch source ref to validate
         required: false
@@ -24,7 +28,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  CONCH_REPOSITORY: ${{ github.event.inputs.conch_repository || vars.CONCH_REPOSITORY || 'https://github.com/ConchSandbox/Conch.git' }}
+  CONCH_REPOSITORY: ${{ github.event.inputs.conch_repository || vars.CONCH_REPOSITORY || 'https://atomgit.com/openeuler/Conch.git' }}
   CONCH_REF: ${{ github.event.inputs.conch_ref || vars.CONCH_REF || 'dev' }}
 
 defaults:

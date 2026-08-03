@@ -55,14 +55,16 @@ def kernel_build_id(
 def rootfs_build_id(
     platform: str,
     conch_commit: str,
+    source_repository: str,
     script_sha256: str,
     dockerfile: str,
 ) -> str:
     return framed_digest(
-        b"conch-rootfs-build-id-v1",
+        b"conch-rootfs-build-id-v2",
         [
             ("platform", platform),
             ("conch_commit", conch_commit),
+            ("source_repository", source_repository),
             ("script_sha256", script_sha256),
             ("dockerfile", dockerfile),
         ],
@@ -132,6 +134,7 @@ def main() -> None:
     rootfs = subparsers.add_parser("rootfs")
     rootfs.add_argument("--platform", required=True)
     rootfs.add_argument("--conch-commit", required=True)
+    rootfs.add_argument("--source-repository", required=True)
     rootfs.add_argument("--script-sha256", required=True)
     rootfs.add_argument("--dockerfile", required=True)
     args = parser.parse_args()
@@ -150,6 +153,7 @@ def main() -> None:
             rootfs_build_id(
                 args.platform,
                 args.conch_commit,
+                args.source_repository,
                 args.script_sha256,
                 args.dockerfile,
             )
