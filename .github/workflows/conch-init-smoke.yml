@@ -29,6 +29,7 @@ env:
   CONCH_REF: ${{ github.event.inputs.conch_ref || vars.CONCH_REF || 'dev' }}
   CONCH_INIT_API_PORT: "4064"
   CONCH_INIT_VSOCK_PORT: "4065"
+  GOPROXY: https://goproxy.cn
 
 jobs:
   resolve-conch:
@@ -98,9 +99,10 @@ jobs:
           echo "go-version=$go_version" >> "$GITHUB_OUTPUT"
 
       - name: Set up locked Go version
-        uses: actions/setup-go@v5.6.0
+        uses: actions/setup-go@v6.4.0
         with:
           go-version: ${{ steps.go-lock.outputs.go-version }}
+          go-download-base-url: https://golang.google.cn/dl
           cache: false
 
       - name: Prepare Conch SDK

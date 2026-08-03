@@ -18,9 +18,10 @@ runs:
         echo "go-version=$go_version" >> "$GITHUB_OUTPUT"
 
     - name: Set up locked Go version
-      uses: actions/setup-go@v5.6.0
+      uses: actions/setup-go@v6.4.0
       with:
         go-version: ${{ steps.go-lock.outputs.go-version }}
+        go-download-base-url: https://golang.google.cn/dl
         cache: false
 
     - name: Configure job-local Go caches
@@ -28,7 +29,7 @@ runs:
       run: |
         mkdir -p "$RUNNER_TEMP/conch-go-modcache" "$RUNNER_TEMP/conch-go-build-cache"
         {
-          echo "GOPROXY=https://goproxy.cn,https://proxy.golang.org,direct"
+          echo "GOPROXY=https://goproxy.cn"
           echo "GOMODCACHE=$RUNNER_TEMP/conch-go-modcache"
           echo "GOCACHE=$RUNNER_TEMP/conch-go-build-cache"
           echo "GOFLAGS=${GOFLAGS:+$GOFLAGS }-buildvcs=false"

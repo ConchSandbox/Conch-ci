@@ -21,7 +21,7 @@ runs:
         CONCH_SOURCE: ${{ inputs.conch-source }}
         INITRAMFS_OUTPUT: ${{ inputs.output }}
         INITRAMFS_WORK_DIR: ${{ inputs.work-dir }}
-        GOPROXY: https://goproxy.cn,https://proxy.golang.org,direct
+        GOPROXY: https://goproxy.cn
         GOMODCACHE: ${{ runner.temp }}/conch-go-modcache
         GOCACHE: ${{ runner.temp }}/conch-go-build-cache
         GOFLAGS: -buildvcs=false

@@ -151,7 +151,7 @@ else
     --local "dockerfile=$dockerfile_dir" \
     --opt "filename=$dockerfile_name" \
     --opt "platform=$platform" \
-    --opt "build-arg:GOPROXY=https://goproxy.cn,https://proxy.golang.org,direct" \
+    --opt "build-arg:GOPROXY=https://goproxy.cn" \
     --output "$output"
   read -r index_digest platform_digest < <(inspect_image)
   cleanup_buildkit
