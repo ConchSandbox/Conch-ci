@@ -20,6 +20,8 @@ def log(message):
 
 
 REQUEST_TIMEOUT = int(os.environ.get("CONCH_E2B_SDK_HTTP_TIMEOUT", "300"))
+NETWORK_TEST_HOST = "atomgit.com"
+NETWORK_TEST_PORT = 443
 _request = requests.sessions.Session.request
 
 
@@ -108,6 +110,47 @@ def logs_stdout_text(result):
     return "\n".join(getattr(line, "text", line) for line in result.logs.stdout)
 
 
+def validate_guest_network(e2b):
+    log(
+        "validating sandbox DNS and outbound TCP connectivity: "
+        f"{NETWORK_TEST_HOST}:{NETWORK_TEST_PORT}"
+    )
+    result = e2b.run_code(
+        f"""
+import socket
+import time
+
+host = {NETWORK_TEST_HOST!r}
+port = {NETWORK_TEST_PORT}
+for attempt in range(1, 6):
+    try:
+        addresses = sorted({{
+            address[4][0]
+            for address in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        }})
+        with socket.create_connection((host, port), timeout=10) as connection:
+            peer = connection.getpeername()
+        print(
+            f"network-ok host={{host}} resolved={{','.join(addresses)}} "
+            f"peer={{peer[0]}}:{{peer[1]}}"
+        )
+        break
+    except OSError:
+        if attempt == 5:
+            raise
+        time.sleep(2)
+""",
+        language="python",
+    )
+    result_text = logs_stdout_text(result)
+    if "network-ok" not in result_text:
+        raise RuntimeError(
+            "sandbox outbound network check failed: "
+            f"stdout={result_text!r} error={getattr(result, 'error', None)!r}"
+        )
+    log(result_text.strip())
+
+
 def main():
     log(f"using e2b={version('e2b')} e2b-code-interpreter={version('e2b-code-interpreter')}")
     log("creating Conch sandbox")
@@ -135,6 +178,8 @@ def main():
     except Exception:
         dump_guest_logs(e2b)
         raise
+
+    validate_guest_network(e2b)
 
     log("validating E2B SDK file and command operations")
     base = "/tmp/conch-e2b-sdk-test"

@@ -190,6 +190,7 @@ def verify_baseline() -> dict[str, str]:
         "install",
         "libtoolize",
         "make",
+        "mount",
         "openssl",
         "pahole",
         "perl",
@@ -200,6 +201,8 @@ def verify_baseline() -> dict[str, str]:
         "sha256sum",
         "systemctl",
         "tar",
+        "umount",
+        "unshare",
         "xz",
     )
     missing = [name for name in required_commands if shutil.which(name) is None]

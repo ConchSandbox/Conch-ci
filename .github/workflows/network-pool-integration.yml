@@ -1,0 +1,147 @@
+name: Conch Network Pool Integration
+run-name: ${{ github.event.inputs.conch_pr_number || github.event.inputs.conch_ref || github.ref_name }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      conch_repository:
+        description: Trusted Conch source repository
+        required: false
+        type: choice
+        options:
+          - https://atomgit.com/openeuler/Conch.git
+          - https://github.com/ConchSandbox/Conch.git
+        default: https://atomgit.com/openeuler/Conch.git
+      conch_pr_number:
+        description: Pull request number in the selected Conch repository
+        required: false
+        type: string
+      conch_ref:
+        description: Conch source ref used when no pull request number is set
+        required: false
+        default: dev
+
+permissions:
+  contents: read
+
+concurrency:
+  group: conch-pr-ci-${{ github.workflow }}-${{ github.event.inputs.conch_repository }}-${{ github.event.inputs.conch_pr_number || github.event.inputs.conch_ref || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CONCH_REPOSITORY: ${{ github.event.inputs.conch_repository || vars.CONCH_REPOSITORY || 'https://atomgit.com/openeuler/Conch.git' }}
+  CONCH_PR_NUMBER: ${{ github.event.inputs.conch_pr_number }}
+  CONCH_REF: ${{ github.event.inputs.conch_ref || vars.CONCH_REF || 'dev' }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  resolve-conch:
+    name: Resolve Conch commit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      conch-commit: ${{ steps.resolve.outputs.conch-commit }}
+    steps:
+      - name: Checkout CI repository
+        uses: actions/checkout@v4.4.0
+
+      - name: Resolve immutable Conch commit
+        id: resolve
+        run: |
+          set -euo pipefail
+          resolve_args=(--repository "$CONCH_REPOSITORY")
+          if [[ -n "$CONCH_PR_NUMBER" ]]; then
+            resolve_args+=(--pr-number "$CONCH_PR_NUMBER")
+          else
+            resolve_args+=(--ref "$CONCH_REF")
+          fi
+          scripts/runner-env/jobs/resolve-conch-commit.sh "${resolve_args[@]}"
+
+  network-integration:
+    name: Network Pool Integration
+    needs: resolve-conch
+    runs-on: [self-hosted, Linux, ARM64, Huawei]
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout CI repository
+        uses: actions/checkout@v4.4.0
+
+      - name: Verify runner environment
+        id: runner-environment
+        uses: ./.github/actions/ensure-runner-environment
+        with:
+          mode: verify
+
+      - name: Checkout immutable Conch source
+        run: |
+          scripts/runner-env/jobs/checkout-conch.sh \
+            --repository "$CONCH_REPOSITORY" \
+            --commit "${{ needs.resolve-conch.outputs.conch-commit }}" \
+            --destination "$RUNNER_TEMP/conch-network-integration-source"
+
+      - name: Build Conch binaries
+        uses: ./.github/actions/build-conch
+        with:
+          conch-source: ${{ runner.temp }}/conch-network-integration-source
+
+      - name: Prepare network integration harness
+        id: harness
+        env:
+          CONCHD: ${{ runner.temp }}/conch-network-integration-source/bin/conchd
+        run: |
+          set -euo pipefail
+          [[ -x "$CONCHD" ]]
+          work_dir="$RUNNER_TEMP/conch-network-integration-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "work-dir=$work_dir" >> "$GITHUB_OUTPUT"
+          [[ ! -e "$work_dir" ]] || sudo -n find "$work_dir" -depth -delete
+          mkdir -p "$work_dir/bin" "$work_dir/results"
+          install -m 0755 \
+            scripts/workflows/network-pool-integration/cni-control.py \
+            "$work_dir/bin/conch-ci-control"
+          {
+            echo "conchd=$CONCHD"
+            echo "control-plugin=$work_dir/bin/conch-ci-control"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Run isolated network integration tests
+        env:
+          CNI_BIN_DIR: ${{ steps.runner-environment.outputs.binary-dir }}/cni
+          CONCHD: ${{ steps.harness.outputs.conchd }}
+          CONTROL_PLUGIN: ${{ steps.harness.outputs.control-plugin }}
+          WORK_DIR: ${{ steps.harness.outputs.work-dir }}
+        run: |
+          set -euo pipefail
+          runtime_path="$PATH:/usr/local/sbin:/usr/sbin:/sbin"
+          sudo -n env PATH="$runtime_path" \
+            unshare --mount --net --pid --fork --mount-proc \
+            "$GITHUB_WORKSPACE/scripts/workflows/network-pool-integration/run.sh" \
+              --conchd "$CONCHD" \
+              --cni-bin-dir "$CNI_BIN_DIR" \
+              --control-plugin "$CONTROL_PLUGIN" \
+              --work-dir "$WORK_DIR"
+
+      - name: Upload network integration diagnostics
+        if: ${{ always() && steps.harness.outputs.work-dir != '' }}
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: network-pool-integration-${{ needs.resolve-conch.outputs.conch-commit }}
+          path: |
+            ${{ steps.harness.outputs.work-dir }}/results
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Clean network integration files
+        if: always()
+        env:
+          CONCH_SOURCE: ${{ runner.temp }}/conch-network-integration-source
+          WORK_DIR: ${{ steps.harness.outputs.work-dir }}
+        run: |
+          set +e
+          for path in "$CONCH_SOURCE" "${WORK_DIR:-}"; do
+            [[ -z "$path" || ! -e "$path" ]] || sudo -n find "$path" -depth -delete
+          done
+          exit 0
