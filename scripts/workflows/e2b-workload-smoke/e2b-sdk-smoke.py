@@ -155,11 +155,7 @@ def main():
     log(f"using e2b={version('e2b')} e2b-code-interpreter={version('e2b-code-interpreter')}")
     log("creating Conch sandbox")
     conch_sandbox = ConchSandbox.create(
-        unix_socket="",
-        api_url=os.environ["CONCHD_API_URL"],
-        config_path=os.environ["CONCH_SDK_CONFIG"],
         template_id=os.environ["CONCH_TEMPLATE_ID"],
-        namespace=os.environ["CONCH_NAMESPACE"],
         sandbox_id=os.environ["CONCH_SANDBOX_ID"],
         vcpu_num=2,
         vcpu_max=2,

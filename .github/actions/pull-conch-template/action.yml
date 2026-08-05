@@ -8,9 +8,6 @@ inputs:
   config:
     description: conch configuration path
     required: true
-  namespace:
-    description: containerd namespace used by conch
-    required: true
   template-image-ref:
     description: Immutable runner-local template reference
     required: true
@@ -41,21 +38,18 @@ runs:
       working-directory: ${{ inputs.conch-source }}
       env:
         CONCH_CONFIG: ${{ inputs.config }}
-        CONCH_NAMESPACE: ${{ inputs.namespace }}
         TEMPLATE_IMAGE_REF: ${{ inputs.template-image-ref }}
         TEMPLATE_REPOSITORY: ${{ steps.repositories.outputs.local-template-repository }}
       run: |
         set -euo pipefail
         [[ -x bin/conch ]]
         [[ -f "$CONCH_CONFIG" ]]
-        [[ -n "$CONCH_NAMESPACE" ]]
         template_digest=${TEMPLATE_IMAGE_REF#"$TEMPLATE_REPOSITORY@"}
         [[ "$TEMPLATE_IMAGE_REF" == "$TEMPLATE_REPOSITORY@$template_digest" ]]
         [[ "$template_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
 
         pull_output=$(./bin/conch template pull \
           --config "$CONCH_CONFIG" \
-          -n "$CONCH_NAMESPACE" \
           --plain-http \
           "$TEMPLATE_IMAGE_REF")
         printf '%s\n' "$pull_output"
