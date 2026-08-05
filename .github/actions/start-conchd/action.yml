@@ -34,7 +34,7 @@ outputs:
     description: Local conchd API URL
     value: ${{ steps.runtime.outputs.api-url }}
   namespace:
-    description: Isolated containerd namespace
+    description: Containerd namespace used by Conch
     value: ${{ steps.runtime.outputs.namespace }}
 
 runs:
@@ -69,7 +69,7 @@ runs:
             print(sock.getsockname()[1])
         PY
         )
-        namespace="$RUNTIME_NAME-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+        namespace=conch
         config="$workdir/config.yaml"
         api_url="http://127.0.0.1:$port"
 
@@ -99,7 +99,6 @@ runs:
         containerd:
           root_dir: "$workdir/containerd-root"
           state_dir: "$workdir/containerd-state"
-          default_namespace: "$namespace"
         image:
           default_kernel_image: ""
         sandbox:
