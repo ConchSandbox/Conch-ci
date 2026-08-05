@@ -9,8 +9,8 @@ into GitHub `ConchSandbox/Conch`.
 The main CI workflows resolve the requested Conch ref once to a full commit
 before any self-hosted job starts:
 
-- `build-and-check.yml`: build, static checks, Go tests, Go vet, and Python SDK import
-  checks.
+- `build-and-check.yml`: build, static checks, Go tests, Go vet, and Python SDK
+  import checks.
 - `conch-init-smoke.yml`: boots `conch-init` as PID 1 in a real
   cloud-hypervisor VM, then verifies vsock readiness and SDK health.
 - `e2b-template-weekly.yml`: builds or reuses the kernel and rootfs, publishes a
@@ -21,13 +21,18 @@ before any self-hosted job starts:
 - `prepare-self-hosted-runner.yml`: verifies or installs the locked runner
   environment, and applies reviewed environment changes merged to `main`.
 
-Common dispatch inputs:
+The directly dispatched PR validation workflows accept:
 
 ```text
-ci_marker=<external correlation marker>
 conch_repository=<Conch source repository URL>
+conch_pr_number=<pull request number in the selected repository>
 conch_ref=<Conch source ref to validate>
 ```
+
+`conch_pr_number` is optional. When it is set, the workflow resolves the pull
+request head from the selected repository and ignores `conch_ref`. GitHub uses
+`refs/pull/<number>/head`, while AtomGit uses
+`refs/merge-requests/<number>/head`.
 
 `conch_repository` defaults to the trusted AtomGit upstream; the GitHub mirror
 remains available as an explicit alternative:
@@ -44,7 +49,7 @@ from AtomGit with:
 ```bash
 gh workflow run e2b-workload-smoke.yml --ref main \
   --field conch_repository=https://atomgit.com/openeuler/Conch.git \
-  --field conch_ref=dev \
+  --field conch_pr_number=104 \
   --field run_sdk_smoke=true
 ```
 
@@ -130,8 +135,9 @@ the runner tool cache.
 
 ## AtomGit mirror sync
 
-The scheduled `Conch Sync` workflow synchronizes AtomGit branches and mirrored
-pull requests. Scheduled runs do not trigger CI.
+The `Conch Sync` workflow synchronizes AtomGit branches and mirrored pull
+requests. Scheduled and manual runs only perform synchronization; they do not
+dispatch CI workflows.
 
 The schedule currently runs at:
 
@@ -139,48 +145,17 @@ The schedule currently runs at:
 0 2,8,14 * * *
 ```
 
-Manual `workflow_dispatch` runs behave the same way unless `atomgit_pr_number`
-is set.
+## Running pull request CI
 
-## Manual AtomGit PR CI
+Run `build-and-check.yml`, `conch-init-smoke.yml`, or
+`e2b-workload-smoke.yml` directly from GitHub Actions. Select the trusted
+GitHub or AtomGit repository and enter that repository's pull request number.
+Each workflow resolves the PR head once to a full commit before downstream
+self-hosted jobs start.
 
-To sync one AtomGit PR and run GitHub CI, manually run the `Conch Sync`
-workflow with:
-
-```text
-atomgit_pr_number=<AtomGit PR number>
-run_build=<checked by default>
-run_conch_init_smoke=<unchecked by default>
-run_e2b_workload_smoke=<unchecked by default>
-```
-
-`atomgit_pr_number` accepts exactly one PR number. Leave it empty to sync
-branches and mirrored pull requests without running CI.
-
-The build workflow checkbox defaults to selected, while both smoke workflow
-checkboxes default to unselected. Select either smoke workflow to include it in
-that manual dispatch. If `atomgit_pr_number` is set, at least one CI workflow
-must be selected.
-
-Manual CI dispatch always starts a new GitHub Actions run for the selected
-AtomGit PR head. Existing completed runs are not reused.
-
-When CI is enabled, the workflow:
-
-1. Mirrors the AtomGit PR head to `ConchSandbox/Conch` as `atomgit/pr-<number>`.
-2. Dispatches the selected workflows in this repository. By default this is
-   only `build-and-check.yml`; `conch-init-smoke.yml` and
-   `e2b-workload-smoke.yml` are opt-in.
-3. Waits for the GitHub Actions run to finish.
-4. Updates the GitHub mirror pull request body with the CI result and run link.
-
-`e2b-workload-smoke.yml` is named `E2B Workload Smoke` in the GitHub Actions UI. It
-pulls the immutable Template published by its producer job and, by default,
-runs the dependent SDK E2E job in the same workflow run.
-
-The CI section is kept only for the same AtomGit head SHA. If the AtomGit PR is
-updated, the next sync clears the old CI section until CI is run again for the
-new head.
+`e2b-workload-smoke.yml` is named `E2B Workload Smoke` in the GitHub Actions
+UI. It pulls the immutable Template published by its producer job and, by
+default, runs the dependent SDK E2E job in the same workflow run.
 
 ## Required secrets and permissions
 
@@ -196,7 +171,3 @@ The GitHub App installation must grant these repository permissions for
 
 - `Contents: Read and write`
 - `Pull requests: Read and write`
-
-When `atomgit_pr_number` is set, the sync workflow uses this repository's
-`GITHUB_TOKEN` with `Actions: write` permission to dispatch and watch the local
-CI workflows.

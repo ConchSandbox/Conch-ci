@@ -1,12 +1,9 @@
 name: E2B Workload Smoke
-run-name: ${{ github.event.inputs.ci_marker || github.event.inputs.conch_ref || github.ref_name }}
+run-name: ${{ github.event.inputs.conch_pr_number || github.event.inputs.conch_ref || github.ref_name }}
 
 on:
   workflow_dispatch:
     inputs:
-      ci_marker:
-        description: External CI correlation marker
-        required: false
       conch_repository:
         description: Trusted Conch source repository
         required: false
@@ -15,8 +12,12 @@ on:
           - https://atomgit.com/openeuler/Conch.git
           - https://github.com/ConchSandbox/Conch.git
         default: https://atomgit.com/openeuler/Conch.git
+      conch_pr_number:
+        description: Pull request number in the selected Conch repository
+        required: false
+        type: string
       conch_ref:
-        description: Conch ref resolved once to an immutable commit
+        description: Conch source ref used when no pull request number is set
         required: false
         default: dev
       run_sdk_smoke:
@@ -34,6 +35,7 @@ defaults:
 
 env:
   CONCH_REPOSITORY: ${{ github.event.inputs.conch_repository || vars.CONCH_REPOSITORY || 'https://atomgit.com/openeuler/Conch.git' }}
+  CONCH_PR_NUMBER: ${{ github.event.inputs.conch_pr_number }}
   CONCH_REF: ${{ github.event.inputs.conch_ref || vars.CONCH_REF || 'dev' }}
   CONCH_API_TIMEOUT: 90m
   CONCH_E2B_SDK_HTTP_TIMEOUT: "300"
@@ -52,9 +54,14 @@ jobs:
       - name: Resolve immutable Conch commit
         id: resolve
         run: |
-          scripts/runner-env/jobs/resolve-conch-commit.sh \
-            --repository "$CONCH_REPOSITORY" \
-            --ref "$CONCH_REF"
+          set -euo pipefail
+          resolve_args=(--repository "$CONCH_REPOSITORY")
+          if [[ -n "$CONCH_PR_NUMBER" ]]; then
+            resolve_args+=(--pr-number "$CONCH_PR_NUMBER")
+          else
+            resolve_args+=(--ref "$CONCH_REF")
+          fi
+          scripts/runner-env/jobs/resolve-conch-commit.sh "${resolve_args[@]}"
 
   build-kernel:
     name: Build or reuse ARM64 kernel

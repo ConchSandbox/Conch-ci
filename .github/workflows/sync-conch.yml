@@ -4,29 +4,8 @@ on:
   schedule:
     - cron: "0 2,8,14 * * *"
   workflow_dispatch:
-    inputs:
-      atomgit_pr_number:
-        description: AtomGit PR number to run CI for; empty means sync only
-        required: false
-        type: string
-      run_build:
-        description: Run Conch Build and Check
-        required: false
-        type: boolean
-        default: true
-      run_conch_init_smoke:
-        description: Run Conch Init Smoke
-        required: false
-        type: boolean
-        default: false
-      run_e2b_workload_smoke:
-        description: Run E2B Workload Smoke
-        required: false
-        type: boolean
-        default: false
 
 permissions:
-  actions: write
   contents: read
 
 concurrency:
@@ -54,35 +33,6 @@ jobs:
           repositories: Conch
           permission-contents: write
           permission-pull-requests: write
-
-      - name: Select CI workflows
-        id: ci-workflows
-        if: github.event_name == 'workflow_dispatch' && inputs.atomgit_pr_number != ''
-        env:
-          RUN_BUILD: ${{ inputs.run_build }}
-          RUN_CONCH_INIT_SMOKE: ${{ inputs.run_conch_init_smoke }}
-          RUN_E2B_WORKLOAD_SMOKE: ${{ inputs.run_e2b_workload_smoke }}
-        run: |
-          set -euo pipefail
-
-          workflows=()
-          if [ "$RUN_BUILD" = "true" ]; then
-            workflows+=("build-and-check.yml")
-          fi
-          if [ "$RUN_CONCH_INIT_SMOKE" = "true" ]; then
-            workflows+=("conch-init-smoke.yml")
-          fi
-          if [ "$RUN_E2B_WORKLOAD_SMOKE" = "true" ]; then
-            workflows+=("e2b-workload-smoke.yml")
-          fi
-
-          if [ "${#workflows[@]}" -eq 0 ]; then
-            echo "::error::atomgit_pr_number was set, but no CI workflows were selected" >&2
-            exit 1
-          fi
-
-          IFS=,
-          echo "workflows=${workflows[*]}" >> "$GITHUB_OUTPUT"
 
       - name: Sync base branches
         env:
@@ -113,7 +63,6 @@ jobs:
       - name: Mirror AtomGit pull requests
         env:
           GITHUB_TOKEN: ${{ steps.sync-token.outputs.token }}
-          CI_GITHUB_TOKEN: ${{ github.token }}
           ATOMGIT_OWNER: openeuler
           ATOMGIT_REPO: Conch
           ATOMGIT_SOURCE_REPO: https://atomgit.com/openeuler/Conch.git
@@ -121,13 +70,4 @@ jobs:
           GITHUB_TARGET_REPO_NAME: Conch
           GITHUB_TARGET_REPO: github.com/ConchSandbox/Conch.git
           MIRROR_BASE_BRANCHES: dev
-          CI_ENABLED: ${{ github.event_name == 'workflow_dispatch' && inputs.atomgit_pr_number != '' }}
-          CI_GITHUB_OWNER: ConchSandbox
-          CI_GITHUB_REPO: Conch-ci
-          CI_GITHUB_REF: main
-          CI_WORKFLOWS: ${{ steps.ci-workflows.outputs.workflows || '' }}
-          CI_CONCH_REPOSITORY: https://github.com/ConchSandbox/Conch.git
-          CI_WAIT_FOR_COMPLETION: ${{ github.event_name == 'workflow_dispatch' && inputs.atomgit_pr_number != '' }}
-          CI_ATOMGIT_PR_NUMBER: ${{ github.event_name == 'workflow_dispatch' && inputs.atomgit_pr_number || '' }}
-          CI_RERUN_EXISTING_STATUSES: ${{ github.event_name == 'workflow_dispatch' && inputs.atomgit_pr_number != '' }}
         run: python3 scripts/sync_atomgit_prs.py
