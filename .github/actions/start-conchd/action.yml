@@ -9,7 +9,7 @@ inputs:
     description: Runner binary directory containing CNI plugins
     required: true
   runtime-name:
-    description: Name used for the job-local directory and containerd namespace
+    description: Name used for the job-local runtime directory
     required: true
   app-name:
     description: Application name written to the conchd configuration
@@ -33,9 +33,6 @@ outputs:
   api-url:
     description: Local conchd API URL
     value: ${{ steps.runtime.outputs.api-url }}
-  namespace:
-    description: Containerd namespace used by Conch
-    value: ${{ steps.runtime.outputs.namespace }}
 
 runs:
   using: composite
@@ -69,7 +66,6 @@ runs:
             print(sock.getsockname()[1])
         PY
         )
-        namespace=conch
         config="$workdir/config.yaml"
         api_url="http://127.0.0.1:$port"
 
@@ -113,7 +109,6 @@ runs:
           echo "work-dir=$workdir"
           echo "config=$config"
           echo "api-url=$api_url"
-          echo "namespace=$namespace"
         } >> "$GITHUB_OUTPUT"
 
     - name: Start conchd and wait for API
@@ -123,7 +118,6 @@ runs:
         API_TIMEOUT: ${{ inputs.api-timeout }}
         API_URL: ${{ steps.runtime.outputs.api-url }}
         CONFIG: ${{ steps.runtime.outputs.config }}
-        NAMESPACE: ${{ steps.runtime.outputs.namespace }}
         WORK_DIR: ${{ steps.runtime.outputs.work-dir }}
       run: |
         set -euo pipefail
@@ -145,7 +139,7 @@ runs:
         for _ in $(seq 1 120); do
           if curl -fsS -X POST "$API_URL/api/template/list" \
             -H 'Content-Type: application/json' \
-            -d "{\"namespace\":\"$NAMESPACE\"}" >/dev/null 2>&1; then
+            -d '{}' >/dev/null 2>&1; then
             exit 0
           fi
           kill -0 "$(<"$WORK_DIR/conchd.pid")" 2>/dev/null || {

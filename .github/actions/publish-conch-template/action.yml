@@ -96,7 +96,6 @@ runs:
         GHCR_TOKEN: ${{ github.token }}
         CONCH_API_TIMEOUT: 90m
         CONCH_CONFIG: ${{ steps.conchd.outputs.config }}
-        CONCH_NAMESPACE: ${{ steps.conchd.outputs.namespace }}
         LOCAL_ROOTFS_REPOSITORY: ${{ steps.repositories.outputs.local-rootfs-repository }}
         LOCAL_TEMPLATE_REPOSITORY: ${{ steps.repositories.outputs.local-template-repository }}
         GHCR_ROOTFS_REPOSITORY: ${{ steps.repositories.outputs.ghcr-rootfs-repository }}
@@ -118,14 +117,12 @@ runs:
 
         ./bin/conch image pull \
           --config "$CONCH_CONFIG" \
-          -n "$CONCH_NAMESPACE" \
           --plain-http \
           --skip-unpack \
           "$ROOTFS_IMAGE_REF"
         ghcr_rootfs_tag="$GHCR_ROOTFS_REPOSITORY:build-$ROOTFS_BUILD_ID"
         ./bin/conch image push \
           --config "$CONCH_CONFIG" \
-          -n "$CONCH_NAMESPACE" \
           --username "$GITHUB_ACTOR" \
           --password "$GHCR_TOKEN" \
           --timeout 60m \
@@ -136,7 +133,6 @@ runs:
 
         pull_output=$(./bin/conch template pull \
           --config "$CONCH_CONFIG" \
-          -n "$CONCH_NAMESPACE" \
           --plain-http \
           "$TEMPLATE_IMAGE_REF")
         printf '%s\n' "$pull_output"
@@ -149,7 +145,6 @@ runs:
         ghcr_template_tag="$GHCR_TEMPLATE_REPOSITORY:build-$TEMPLATE_BUILD_ID"
         ./bin/conch template push \
           --config "$CONCH_CONFIG" \
-          -n "$CONCH_NAMESPACE" \
           --username "$GITHUB_ACTOR" \
           --password "$GHCR_TOKEN" \
           --timeout 60m \

@@ -188,13 +188,11 @@ runs:
         TEMPLATE_BUILD_ID: ${{ steps.template-plan.outputs.template-build-id }}
         TEMPLATE_TAG: ${{ steps.template-plan.outputs.template-tag }}
         CONCH_TEMPLATE_CONFIG: ${{ steps.conchd.outputs.config }}
-        CONCH_TEMPLATE_NAMESPACE: ${{ steps.conchd.outputs.namespace }}
         CONCH_TEMPLATE_INITRD: ${{ runner.temp }}/conch-template-initramfs-${{ github.run_id }}-${{ github.run_attempt }}/conch-init-initramfs.cpio.gz
       run: |
         local_tag="localhost/conch/template:build-$TEMPLATE_BUILD_ID"
         create_output=$(./bin/conch template create \
           --config "$CONCH_TEMPLATE_CONFIG" \
-          -n "$CONCH_TEMPLATE_NAMESPACE" \
           --source "$ROOTFS_IMAGE_REF" \
           --kernel "$CONCH_TEMPLATE_KERNEL_PATH" \
           --initrd "$CONCH_TEMPLATE_INITRD" \
@@ -207,7 +205,6 @@ runs:
         [[ "$local_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
         ./bin/conch template push \
           --config "$CONCH_TEMPLATE_CONFIG" \
-          -n "$CONCH_TEMPLATE_NAMESPACE" \
           --plain-http \
           --timeout 60m \
           "$template_id" "$TEMPLATE_TAG"
