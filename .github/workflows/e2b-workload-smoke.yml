@@ -168,7 +168,7 @@ jobs:
           template-image-ref: ${{ needs.build-template.outputs.template-image-ref }}
           image-profile: e2b
 
-      - name: Boot sandbox and validate E2B SDK operations
+      - name: Boot sandbox and validate E2B SDK and network operations
         if: ${{ github.event.inputs.run_sdk_smoke != 'false' }}
         timeout-minutes: 20
         working-directory: ${{ runner.temp }}/conch-e2b-workload-source

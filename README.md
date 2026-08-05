@@ -19,7 +19,7 @@ before any self-hosted job starts:
   content-addressed E2B Conch Template to the runner-local OCI registry, and can
   optionally mirror both images to GHCR on manual runs.
 - `e2b-workload-smoke.yml`: consumes the same Template producer from the local
-  registry and optionally runs E2B SDK operations.
+  registry and optionally runs E2B SDK and sandbox network operations.
 - `prepare-self-hosted-runner.yml`: verifies or installs the locked runner
   environment, and applies reviewed environment changes merged to `main`.
 
@@ -167,7 +167,9 @@ full commit before downstream self-hosted jobs start.
 
 `e2b-workload-smoke.yml` is named `E2B Workload Smoke` in the GitHub Actions
 UI. It pulls the immutable Template published by its producer job and, by
-default, runs the dependent SDK E2E job in the same workflow run.
+default, runs the dependent SDK E2E job in the same workflow run. The guest
+resolves `atomgit.com` and opens a TCP connection to port 443 to validate DNS,
+the default route, bridge forwarding, and outbound NAT.
 
 ## Required secrets and permissions
 
