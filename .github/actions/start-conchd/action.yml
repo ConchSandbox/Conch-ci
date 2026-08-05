@@ -108,6 +108,7 @@ runs:
           request_timeout: 120s
           default_vmm_name: cloud-hypervisor
         YAML
+        chmod 0600 "$config"
 
         {
           echo "work-dir=$workdir"

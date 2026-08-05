@@ -174,6 +174,7 @@ sandbox:
   request_timeout: 10s
   default_vmm_name: cloud-hypervisor
 YAML
+  chmod 0600 "$result_dir/config.yaml"
 }
 
 # Poll readiness and observable pool state without assuming fixed daemon timing.
