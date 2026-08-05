@@ -165,7 +165,6 @@ network:
 containerd:
   root_dir: "$runtime_dir/containerd-root"
   state_dir: "$runtime_dir/containerd-state"
-  default_namespace: conch-ci-$name
 image:
   default_kernel_image: unused
 sandbox:
