@@ -88,17 +88,14 @@ runs:
         state:
           path: "$workdir/state.db"
         network:
-          pool_size: 1
-          dynamic_reservation: false
+          warm_pool_size: 1
           tap_ip: 192.168.100.2
           tap_mask: 24
           cni:
             plugin_bin_dirs:
               - "$BINARY_DIR/cni"
             plugin_conf_dir: "$workdir/cni/net.d"
-            plugin_max_conf: 1
             if_name: eth0
-            setup_serially: true
         containerd:
           root_dir: "$workdir/containerd-root"
           state_dir: "$workdir/containerd-state"

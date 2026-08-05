@@ -11,6 +11,8 @@ before any self-hosted job starts:
 
 - `build-and-check.yml`: build, static checks, Go tests, Go vet, and Python SDK
   import checks.
+- `network-pool-integration.yml`: privileged network-pool integration tests on
+  the ARM64 self-hosted runner.
 - `conch-init-smoke.yml`: boots `conch-init` as PID 1 in a real
   cloud-hypervisor VM, then verifies vsock readiness and SDK health.
 - `e2b-template-weekly.yml`: builds or reuses the kernel and rootfs, publishes a
@@ -60,6 +62,16 @@ installed under `${RUNNER_TOOL_CACHE}/conch-ci`; host OS, KVM, Docker, sudo,
 network, and compiler capabilities are checked but never installed by this
 repository. Workflow-only dependencies live with their owning workflow under
 `scripts/workflows/` and are installed only by that workflow.
+
+The network-pool integration workflow builds and exercises `conchd` as a black
+box without adding Go tests or build tags to Conch. A workflow-local script
+runs isolated initial-prefill, continuous-refill, retry, cancellation, and
+concurrent-close scenarios. It mounts job-local tmpfs instances over
+`/run/conch` and `/var/lib/cni` inside a private mount and network namespace. A
+workflow-local CNI wrapper injects deterministic ADD failures and blocking
+operations while delegating successful operations to the locked bridge plugin.
+The runner must provide `mount`, `umount`, and `unshare` in addition to the
+existing sudo, `ip`, and `iptables` prerequisites.
 
 ## Kernel and Template producers
 
@@ -147,11 +159,11 @@ The schedule currently runs at:
 
 ## Running pull request CI
 
-Run `build-and-check.yml`, `conch-init-smoke.yml`, or
-`e2b-workload-smoke.yml` directly from GitHub Actions. Select the trusted
-GitHub or AtomGit repository and enter that repository's pull request number.
-Each workflow resolves the PR head once to a full commit before downstream
-self-hosted jobs start.
+Run `build-and-check.yml`, `network-pool-integration.yml`,
+`conch-init-smoke.yml`, or `e2b-workload-smoke.yml` directly from GitHub
+Actions. Select the trusted GitHub or AtomGit repository and enter that
+repository's pull request number. Each workflow resolves the PR head once to a
+full commit before downstream self-hosted jobs start.
 
 `e2b-workload-smoke.yml` is named `E2B Workload Smoke` in the GitHub Actions
 UI. It pulls the immutable Template published by its producer job and, by
