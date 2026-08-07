@@ -168,8 +168,9 @@ full commit before downstream self-hosted jobs start.
 `e2b-workload-smoke.yml` is named `E2B Workload Smoke` in the GitHub Actions
 UI. It pulls the immutable Template published by its producer job and, by
 default, runs the dependent SDK E2E job in the same workflow run. The guest
-resolves `atomgit.com` and opens a TCP connection to port 443 to validate DNS,
-the default route, bridge forwarding, and outbound NAT.
+opens a TCP connection to Alibaba Cloud Public DNS at the hard-coded address
+`223.5.5.5:443` to validate the default route, bridge forwarding, and outbound
+NAT without depending on DNS resolution.
 
 ## Required secrets and permissions
 
