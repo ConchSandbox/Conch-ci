@@ -95,8 +95,6 @@ runs:
         containerd:
           root_dir: "$workdir/containerd-root"
           state_dir: "$workdir/containerd-state"
-        image:
-          default_kernel_image: ""
         sandbox:
           vsock_signal_retry: 10ms
           vsock_signal_timeout: 90s

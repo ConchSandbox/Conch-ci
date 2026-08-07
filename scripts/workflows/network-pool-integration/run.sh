@@ -165,8 +165,6 @@ network:
 containerd:
   root_dir: "$runtime_dir/containerd-root"
   state_dir: "$runtime_dir/containerd-state"
-image:
-  default_kernel_image: unused
 sandbox:
   vsock_signal_retry: 10ms
   vsock_signal_timeout: 5s
