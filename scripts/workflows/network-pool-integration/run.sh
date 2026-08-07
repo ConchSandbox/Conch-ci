@@ -32,6 +32,8 @@ done
 for plugin in bridge host-local loopback; do
   [[ -x "$cni_bin_dir/$plugin" ]]
 done
+vmm_binary_dir=$(dirname -- "$cni_bin_dir")
+[[ -x "$vmm_binary_dir/cloud-hypervisor" ]]
 [[ "$work_dir" != / && "$work_dir" != /run && "$work_dir" != /var ]]
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
@@ -165,6 +167,9 @@ network:
 containerd:
   root_dir: "$runtime_dir/containerd-root"
   state_dir: "$runtime_dir/containerd-state"
+vmm:
+  cloud_hypervisor:
+    binary: "$vmm_binary_dir/cloud-hypervisor"
 sandbox:
   vsock_signal_retry: 10ms
   vsock_signal_timeout: 5s
