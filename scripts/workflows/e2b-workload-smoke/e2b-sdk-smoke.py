@@ -20,7 +20,7 @@ def log(message):
 
 
 REQUEST_TIMEOUT = int(os.environ.get("CONCH_E2B_SDK_HTTP_TIMEOUT", "300"))
-NETWORK_TEST_HOST = "atomgit.com"
+NETWORK_TEST_IP = "223.5.5.5"  # Alibaba Cloud Public DNS
 NETWORK_TEST_PORT = 443
 _request = requests.sessions.Session.request
 
@@ -112,27 +112,24 @@ def logs_stdout_text(result):
 
 def validate_guest_network(e2b):
     log(
-        "validating sandbox DNS and outbound TCP connectivity: "
-        f"{NETWORK_TEST_HOST}:{NETWORK_TEST_PORT}"
+        "validating sandbox outbound TCP connectivity: "
+        f"{NETWORK_TEST_IP}:{NETWORK_TEST_PORT}"
     )
     result = e2b.run_code(
         f"""
 import socket
 import time
 
-host = {NETWORK_TEST_HOST!r}
+ip = {NETWORK_TEST_IP!r}
 port = {NETWORK_TEST_PORT}
 for attempt in range(1, 6):
     try:
-        addresses = sorted({{
-            address[4][0]
-            for address in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-        }})
-        with socket.create_connection((host, port), timeout=10) as connection:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as connection:
+            connection.settimeout(10)
+            connection.connect((ip, port))
             peer = connection.getpeername()
         print(
-            f"network-ok host={{host}} resolved={{','.join(addresses)}} "
-            f"peer={{peer[0]}}:{{peer[1]}}"
+            f"network-ok target={{ip}}:{{port}} peer={{peer[0]}}:{{peer[1]}}"
         )
         break
     except OSError:
