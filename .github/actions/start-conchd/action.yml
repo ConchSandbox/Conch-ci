@@ -85,8 +85,6 @@ runs:
           path: "$workdir/state.db"
         network:
           warm_pool_size: 1
-          tap_ip: 192.168.100.2
-          tap_mask: 24
           cni:
             plugin_bin_dirs:
               - "$BINARY_DIR/cni"

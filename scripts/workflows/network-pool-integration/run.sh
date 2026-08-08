@@ -156,8 +156,6 @@ state:
   path: "$runtime_dir/state.db"
 network:
   warm_pool_size: $warm_pool_size
-  tap_ip: 192.168.100.2
-  tap_mask: 24
   cni:
     plugin_bin_dirs:
       - "$(dirname "$control_plugin")"
