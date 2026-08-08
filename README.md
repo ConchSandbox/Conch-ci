@@ -169,12 +169,13 @@ full commit before downstream self-hosted jobs start.
 UI. It pulls the immutable Template published by its producer job and, by
 default, runs the dependent SDK E2E job in the same workflow run. The job adds
 the fixed nameserver `223.5.5.5` to the job-local Conch CNI configuration, then
-verifies that it reaches the guest's `/etc/resolv.conf` and resolves
-`example.com`. The guest also opens a TCP connection to `223.5.5.5:443` to
-validate the default route, bridge forwarding, and outbound NAT independently
-of DNS. Finally, the runner connects to a one-shot TCP listener inside the
-sandbox to validate runner-to-sandbox inbound connectivity. This last check
-does not expose the sandbox for inbound connections from the public Internet.
+accesses `https://example.com/` from the guest to validate DNS and Internet
+connectivity together. The guest also opens a TCP connection to
+`223.5.5.5:443` to validate the default route, bridge forwarding, and outbound
+NAT independently of DNS. Finally, the runner connects to a one-shot TCP
+listener inside the sandbox to validate runner-to-sandbox inbound connectivity.
+This last check does not expose the sandbox for inbound connections from the
+public Internet.
 
 ## Required secrets and permissions
 

@@ -22,8 +22,9 @@ def log(message):
 
 
 REQUEST_TIMEOUT = int(os.environ.get("CONCH_E2B_SDK_HTTP_TIMEOUT", "300"))
-DNS_NAMESERVER = os.environ.get("CONCH_E2B_DNS_NAMESERVER", "223.5.5.5")
-DNS_TEST_HOST = os.environ.get("CONCH_E2B_DNS_TEST_HOST", "example.com")
+NETWORK_TEST_URL = os.environ.get(
+    "CONCH_E2B_NETWORK_TEST_URL", "https://example.com/"
+)
 NETWORK_TEST_IP = "223.5.5.5"  # Alibaba Cloud Public DNS
 NETWORK_TEST_PORT = 443
 INBOUND_REQUEST = b"conch-e2b-inbound-ping\n"
@@ -116,49 +117,36 @@ def logs_stdout_text(result):
     return "\n".join(getattr(line, "text", line) for line in result.logs.stdout)
 
 
-def validate_guest_dns(e2b):
-    log(
-        "validating sandbox DNS configuration and resolution: "
-        f"nameserver={DNS_NAMESERVER} host={DNS_TEST_HOST}"
-    )
+def validate_guest_url_access(e2b):
+    log(f"validating sandbox URL access with DNS: {NETWORK_TEST_URL}")
     result = e2b.run_code(
         f"""
-import socket
+import time
+import urllib.request
 
-nameserver = {DNS_NAMESERVER!r}
-host = {DNS_TEST_HOST!r}
-with open("/etc/resolv.conf", encoding="utf-8") as resolv_file:
-    resolver_lines = {{line.strip() for line in resolv_file}}
-expected_resolver = f"nameserver {{nameserver}}"
-if expected_resolver not in resolver_lines:
-    raise RuntimeError(
-        f"missing {{expected_resolver!r}} in /etc/resolv.conf: "
-        f"{{sorted(resolver_lines)!r}}"
-    )
-addresses = sorted(
-    {{
-        address[4][0]
-        for address in socket.getaddrinfo(
-            host,
-            443,
-            family=socket.AF_INET,
-            type=socket.SOCK_STREAM,
-        )
-    }}
-)
-if not addresses:
-    raise RuntimeError(f"DNS resolution returned no IPv4 addresses for {{host}}")
-print(
-    f"dns-ok host={{host}} nameserver={{nameserver}} "
-    f"addresses={{','.join(addresses)}}"
-)
+url = {NETWORK_TEST_URL!r}
+for attempt in range(1, 6):
+    try:
+        with urllib.request.urlopen(url, timeout=10) as response:
+            status = response.status
+            body = response.read(4096)
+        if status != 200:
+            raise RuntimeError(f"{{url}} returned HTTP {{status}}")
+        if not body:
+            raise RuntimeError(f"{{url}} returned an empty response")
+        print(f"url-ok url={{url}} status={{status}} bytes={{len(body)}}")
+        break
+    except Exception:
+        if attempt == 5:
+            raise
+        time.sleep(2)
 """,
         language="python",
     )
     result_text = logs_stdout_text(result)
-    if "dns-ok" not in result_text:
+    if "url-ok" not in result_text:
         raise RuntimeError(
-            "sandbox DNS check failed: "
+            "sandbox URL access check failed: "
             f"stdout={result_text!r} error={getattr(result, 'error', None)!r}"
         )
     log(result_text.strip())
@@ -303,7 +291,7 @@ def main():
         dump_guest_logs(e2b)
         raise
 
-    validate_guest_dns(e2b)
+    validate_guest_url_access(e2b)
     validate_guest_outbound_network(e2b)
     validate_guest_inbound_network(e2b, sandbox_ip)
 
