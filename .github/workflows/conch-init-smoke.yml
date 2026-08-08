@@ -258,39 +258,7 @@ jobs:
           exit 1
 
       - name: Verify vsock readiness signal
-        run: |
-          python3 - <<'PY'
-          import os
-          import socket
-          import time
-
-          deadline = time.monotonic() + 120
-          last_error = None
-          while time.monotonic() < deadline:
-              try:
-                  with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-                      sock.settimeout(5)
-                      sock.connect(os.environ["CONCH_INIT_VSOCK_SOCKET"])
-                      sock.sendall(f"CONNECT {os.environ['CONCH_INIT_VSOCK_PORT']}\n".encode())
-                      if b"OK" not in sock.recv(1024):
-                          raise RuntimeError("VMM vsock proxy did not acknowledge CONNECT")
-                      payload = (
-                          f"I AM SANDBOX_ID:{os.environ['CONCH_INIT_SANDBOX_ID']}\n"
-                          f"AGENT_TOKEN:{os.environ['CONCH_INIT_TOKEN']}\n"
-                      ).encode()
-                      sock.sendall(payload)
-                      response = sock.recv(1024).decode(errors="replace")
-                      print(response)
-                      if "OK" in response and "READY:" in response:
-                          raise SystemExit(0)
-                      last_error = RuntimeError(response)
-              except SystemExit:
-                  raise
-              except Exception as exc:
-                  last_error = exc
-              time.sleep(1)
-          raise SystemExit(f"timed out waiting for conch-init READY: {last_error}")
-          PY
+        run: scripts/workflows/conch-init-smoke/verify_vsock_ready.py
 
       - name: Verify current Conch SDK health client
         env:
