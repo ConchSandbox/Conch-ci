@@ -1,4 +1,6 @@
 import os
+import re
+import socket
 import sys
 import time
 import urllib.request
@@ -20,8 +22,13 @@ def log(message):
 
 
 REQUEST_TIMEOUT = int(os.environ.get("CONCH_E2B_SDK_HTTP_TIMEOUT", "300"))
+NETWORK_TEST_URL = os.environ.get(
+    "CONCH_E2B_NETWORK_TEST_URL", "https://example.com/"
+)
 NETWORK_TEST_IP = "223.5.5.5"  # Alibaba Cloud Public DNS
 NETWORK_TEST_PORT = 443
+INBOUND_REQUEST = b"conch-e2b-inbound-ping\n"
+INBOUND_RESPONSE = b"conch-e2b-inbound-ok\n"
 _request = requests.sessions.Session.request
 
 
@@ -110,7 +117,42 @@ def logs_stdout_text(result):
     return "\n".join(getattr(line, "text", line) for line in result.logs.stdout)
 
 
-def validate_guest_network(e2b):
+def validate_guest_url_access(e2b):
+    log(f"validating sandbox URL access with DNS: {NETWORK_TEST_URL}")
+    result = e2b.run_code(
+        f"""
+import time
+import urllib.request
+
+url = {NETWORK_TEST_URL!r}
+for attempt in range(1, 6):
+    try:
+        with urllib.request.urlopen(url, timeout=10) as response:
+            status = response.status
+            body = response.read(4096)
+        if status != 200:
+            raise RuntimeError(f"{{url}} returned HTTP {{status}}")
+        if not body:
+            raise RuntimeError(f"{{url}} returned an empty response")
+        print(f"url-ok url={{url}} status={{status}} bytes={{len(body)}}")
+        break
+    except Exception:
+        if attempt == 5:
+            raise
+        time.sleep(2)
+""",
+        language="python",
+    )
+    result_text = logs_stdout_text(result)
+    if "url-ok" not in result_text:
+        raise RuntimeError(
+            "sandbox URL access check failed: "
+            f"stdout={result_text!r} error={getattr(result, 'error', None)!r}"
+        )
+    log(result_text.strip())
+
+
+def validate_guest_outbound_network(e2b):
     log(
         "validating sandbox outbound TCP connectivity: "
         f"{NETWORK_TEST_IP}:{NETWORK_TEST_PORT}"
@@ -148,6 +190,83 @@ for attempt in range(1, 6):
     log(result_text.strip())
 
 
+def validate_guest_inbound_network(e2b, sandbox_ip):
+    log("starting one-shot sandbox TCP listener for runner-to-sandbox validation")
+    result = e2b.run_code(
+        f"""
+import socket
+import threading
+
+expected_request = {INBOUND_REQUEST!r}
+response = {INBOUND_RESPONSE!r}
+listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+listener.bind(("0.0.0.0", 0))
+listener.listen(1)
+listener_port = listener.getsockname()[1]
+
+def serve_runner_connection():
+    with listener:
+        listener.settimeout(30)
+        connection, _ = listener.accept()
+        with connection:
+            connection.settimeout(10)
+            request = b""
+            while len(request) < len(expected_request):
+                chunk = connection.recv(len(expected_request) - len(request))
+                if not chunk:
+                    break
+                request += chunk
+            if request != expected_request:
+                connection.sendall(b"unexpected-request\\n")
+                return
+            connection.sendall(response)
+
+threading.Thread(target=serve_runner_connection, daemon=True).start()
+print(f"inbound-listener-ready port={{listener_port}}")
+""",
+        language="python",
+    )
+    result_text = logs_stdout_text(result)
+    match = re.search(r"(?m)^inbound-listener-ready port=([0-9]+)$", result_text)
+    if match is None:
+        raise RuntimeError(
+            "sandbox inbound listener did not start: "
+            f"stdout={result_text!r} error={getattr(result, 'error', None)!r}"
+        )
+    listener_port = int(match.group(1))
+
+    deadline = time.monotonic() + 30
+    last_error = None
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection(
+                (sandbox_ip, listener_port), timeout=5
+            ) as connection:
+                connection.settimeout(5)
+                connection.sendall(INBOUND_REQUEST)
+                response = b""
+                while len(response) < len(INBOUND_RESPONSE):
+                    chunk = connection.recv(len(INBOUND_RESPONSE) - len(response))
+                    if not chunk:
+                        break
+                    response += chunk
+            if response != INBOUND_RESPONSE:
+                raise RuntimeError(
+                    "sandbox inbound listener returned unexpected response: "
+                    f"{response!r}"
+                )
+            log(f"inbound-ok source=runner target={sandbox_ip}:{listener_port}")
+            return
+        except OSError as exc:
+            last_error = exc
+            time.sleep(1)
+    raise RuntimeError(
+        f"runner could not reach sandbox TCP listener at "
+        f"{sandbox_ip}:{listener_port}: {last_error}"
+    )
+
+
 def main():
     log(f"using e2b={version('e2b')} e2b-code-interpreter={version('e2b-code-interpreter')}")
     log("creating Conch sandbox")
@@ -172,7 +291,9 @@ def main():
         dump_guest_logs(e2b)
         raise
 
-    validate_guest_network(e2b)
+    validate_guest_url_access(e2b)
+    validate_guest_outbound_network(e2b)
+    validate_guest_inbound_network(e2b, sandbox_ip)
 
     log("validating E2B SDK file and command operations")
     base = "/tmp/conch-e2b-sdk-test"
