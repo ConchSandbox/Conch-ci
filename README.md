@@ -167,10 +167,14 @@ full commit before downstream self-hosted jobs start.
 
 `e2b-workload-smoke.yml` is named `E2B Workload Smoke` in the GitHub Actions
 UI. It pulls the immutable Template published by its producer job and, by
-default, runs the dependent SDK E2E job in the same workflow run. The guest
-opens a TCP connection to Alibaba Cloud Public DNS at the hard-coded address
-`223.5.5.5:443` to validate the default route, bridge forwarding, and outbound
-NAT without depending on DNS resolution.
+default, runs the dependent SDK E2E job in the same workflow run. The job adds
+the fixed nameserver `223.5.5.5` to the job-local Conch CNI configuration, then
+verifies that it reaches the guest's `/etc/resolv.conf` and resolves
+`example.com`. The guest also opens a TCP connection to `223.5.5.5:443` to
+validate the default route, bridge forwarding, and outbound NAT independently
+of DNS. Finally, the runner connects to a one-shot TCP listener inside the
+sandbox to validate runner-to-sandbox inbound connectivity. This last check
+does not expose the sandbox for inbound connections from the public Internet.
 
 ## Required secrets and permissions
 
