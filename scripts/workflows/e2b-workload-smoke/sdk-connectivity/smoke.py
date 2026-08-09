@@ -1,10 +1,7 @@
-import base64
-import http.client
 import os
 import re
 import socket
 import sys
-import threading
 import time
 import urllib.request
 from importlib.metadata import version
@@ -21,7 +18,7 @@ from packaging.version import Version
 
 
 def log(message):
-    print(f"[e2b-workload-smoke] {message}", flush=True)
+    print(f"[e2b-sdk-connectivity] {message}", flush=True)
 
 
 REQUEST_TIMEOUT = int(os.environ.get("CONCH_E2B_SDK_HTTP_TIMEOUT", "300"))
@@ -71,7 +68,10 @@ def wait_http(url, expected_body=None, timeout=180):
 
 
 def wait_conch_health(sandbox, timeout=180):
-    log(f"waiting for Conch agent health: sandbox_id={sandbox.sandbox_id} ip={sandbox.ip}")
+    log(
+        "waiting for Conch agent health: "
+        f"sandbox_id={sandbox.sandbox_id} ip={sandbox.ip}"
+    )
     deadline = time.monotonic() + timeout
     last_health = None
     while time.monotonic() < deadline:
@@ -270,143 +270,11 @@ print(f"inbound-listener-ready port={{listener_port}}")
     )
 
 
-def validate_network_policy(sandbox, e2b):
-    response_body = b"conch-network-policy-ok"
-    guest_http_port = 49983
-    allow_ip = os.environ["CONCH_NETWORK_TEST_ALLOW_IP"]
-    deny_ip = os.environ["CONCH_NETWORK_TEST_DENY_IP"]
-    stop_server = threading.Event()
-    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    listener.bind(("0.0.0.0", 0))
-    listener.listen(8)
-    listener.settimeout(1)
-    http_port = listener.getsockname()[1]
-
-    def serve_http():
-        response = (
-            b"HTTP/1.1 200 OK\r\n"
-            + f"Content-Length: {len(response_body)}\r\n".encode()
-            + b"Connection: close\r\n\r\n"
-            + response_body
-        )
-        while not stop_server.is_set():
-            try:
-                connection, _ = listener.accept()
-            except socket.timeout:
-                continue
-            except OSError:
-                if stop_server.is_set():
-                    return
-                raise
-            with connection:
-                connection.settimeout(3)
-                try:
-                    connection.recv(4096)
-                    connection.sendall(response)
-                except OSError:
-                    pass
-
-    def update_network(description, **policy):
-        if not sandbox.update_network(**policy):
-            raise RuntimeError(f"{description} network update failed")
-
-    def guest_http(address, should_succeed):
-        url = f"http://{address}:{http_port}/"
-        code = (
-            "import urllib.request; "
-            f"print(urllib.request.urlopen({url!r}, timeout=3).read().decode())"
-        )
-        encoded = base64.b64encode(code.encode()).decode()
-        result = e2b.commands.run(
-            f'python -c "import base64; exec(base64.b64decode(\'{encoded}\'))"'
-        )
-        marker = response_body.decode()
-        succeeded = result.exit_code == 0 and marker in result.stdout
-        if succeeded != should_succeed:
-            raise RuntimeError(
-                f"guest HTTP expectation failed for {url}: "
-                f"expected success={should_succeed}, exit={result.exit_code}, "
-                f"stdout={result.stdout!r}, stderr={result.stderr!r}"
-            )
-
-    def host_http(source_ip, should_succeed):
-        connection = http.client.HTTPConnection(
-            sandbox.ip,
-            guest_http_port,
-            timeout=3,
-            source_address=(source_ip, 0),
-        )
-        succeeded = False
-        detail = ""
-        try:
-            connection.request("GET", "/health")
-            response = connection.getresponse()
-            response.read()
-            succeeded = response.status in (200, 204)
-            detail = f"HTTP {response.status}"
-        except OSError as exc:
-            detail = repr(exc)
-        finally:
-            connection.close()
-        if succeeded != should_succeed:
-            raise RuntimeError(
-                f"host HTTP expectation failed from {source_ip} to "
-                f"{sandbox.ip}:{guest_http_port}: "
-                f"expected success={should_succeed}, got {detail}"
-            )
-
-    def assert_persisted_network(sandbox_id, expected):
-        actual = ConchSandbox.get(sandbox_id).network or {}
-        if actual != expected:
-            raise RuntimeError(f"persisted network policy is {actual!r}, want {expected!r}")
-
-    server_thread = threading.Thread(target=serve_http, daemon=True)
-    server_thread.start()
-    try:
-        policy = {"denyOut": [deny_ip]}
-        log("validating creation-time network policy")
-        assert_persisted_network(sandbox.sandbox_id, policy)
-        guest_http(allow_ip, True)
-        guest_http(deny_ip, False)
-
-        log("validating live egress policy replacement")
-        update_network("egress replacement", deny_out=[allow_ip])
-        guest_http(allow_ip, False)
-        guest_http(deny_ip, True)
-
-        log("validating ingress allow and deny rules")
-        update_network("ingress", allow_in=[allow_ip], deny_in=[deny_ip])
-        host_http(allow_ip, True)
-        host_http(deny_ip, False)
-
-        log("validating allow_internet_access=false")
-        update_network("disable internet access", allow_internet_access=False)
-        guest_http(allow_ip, False)
-        guest_http(deny_ip, False)
-
-        log("validating policy updates while suspended and restoration on resume")
-        if not sandbox.suspend():
-            raise RuntimeError("sandbox suspend failed")
-        update_network("suspended", deny_out=[deny_ip])
-        if not sandbox.resume():
-            raise RuntimeError("sandbox resume failed")
-        wait_conch_health(sandbox)
-        wait_http(f"http://{sandbox.ip}:{guest_http_port}/health")
-        e2b = new_code_interpreter_sandbox(
-            f"http://{sandbox.ip}:{guest_http_port}",
-            sandbox.ip,
-        )
-        guest_http(allow_ip, True)
-        guest_http(deny_ip, False)
-    finally:
-        stop_server.set()
-        listener.close()
-        server_thread.join(timeout=5)
-
-
 def main():
-    log(f"using e2b={version('e2b')} e2b-code-interpreter={version('e2b-code-interpreter')}")
+    log(
+        f"using e2b={version('e2b')} "
+        f"e2b-code-interpreter={version('e2b-code-interpreter')}"
+    )
     log("creating Conch sandbox")
     conch_sandbox = ConchSandbox.create(
         template_id=os.environ["CONCH_TEMPLATE_ID"],
@@ -414,9 +282,11 @@ def main():
         vcpu_num=2,
         vcpu_max=2,
         ram_mb=2048,
-        network={"denyOut": [os.environ["CONCH_NETWORK_TEST_DENY_IP"]]},
     )
-    log(f"created Conch sandbox: sandbox_id={conch_sandbox.sandbox_id} ip={conch_sandbox.ip}")
+    log(
+        "created Conch sandbox: "
+        f"sandbox_id={conch_sandbox.sandbox_id} ip={conch_sandbox.ip}"
+    )
     wait_conch_health(conch_sandbox)
 
     sandbox_ip = conch_sandbox.ip
@@ -425,7 +295,10 @@ def main():
     wait_http(f"{envd_url}/health")
     e2b = new_code_interpreter_sandbox(envd_url, sandbox_ip)
     try:
-        wait_http(f"{code_interpreter_url}/health", expected_body=("OK", '"OK"'))
+        wait_http(
+            f"{code_interpreter_url}/health",
+            expected_body=("OK", '"OK"'),
+        )
     except Exception:
         dump_guest_logs(e2b)
         raise
@@ -447,7 +320,8 @@ def main():
     command = e2b.commands.run("pwd && printf '\\ncommand-ok'")
     if command.exit_code != 0:
         raise RuntimeError(
-            f"E2B command failed: exit={command.exit_code} stdout={command.stdout!r} stderr={command.stderr!r}"
+            f"E2B command failed: exit={command.exit_code} "
+            f"stdout={command.stdout!r} stderr={command.stderr!r}"
         )
     if "command-ok" not in command.stdout:
         raise RuntimeError(f"E2B command stdout missing marker: {command.stdout!r}")
@@ -464,17 +338,22 @@ def main():
     stateful = e2b.run_code("print(stateful_value + 1)", language="python")
     stateful_text = logs_stdout_text(stateful)
     if "42" not in stateful_text:
-        raise RuntimeError(f"code interpreter did not preserve state: {stateful_text!r}")
+        raise RuntimeError(
+            f"code interpreter did not preserve state: {stateful_text!r}"
+        )
 
     e2b.files.write(f"{base}/shared.txt", "shared-through-envd")
-    shared = e2b.run_code(f"print(open('{base}/shared.txt').read())", language="python")
+    shared = e2b.run_code(
+        f"print(open('{base}/shared.txt').read())",
+        language="python",
+    )
     shared_text = logs_stdout_text(shared)
     if "shared-through-envd" not in shared_text:
-        raise RuntimeError(f"code interpreter cannot read envd-written file: {shared_text!r}")
+        raise RuntimeError(
+            f"code interpreter cannot read envd-written file: {shared_text!r}"
+        )
 
-    validate_network_policy(conch_sandbox, e2b)
-
-    log("conch e2b workload smoke ok")
+    log("E2B SDK and guest connectivity smoke ok")
 
 
 if __name__ == "__main__":

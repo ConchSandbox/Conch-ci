@@ -19,7 +19,8 @@ before any self-hosted job starts:
   content-addressed E2B Conch Template to the runner-local OCI registry, and can
   optionally mirror both images to GHCR on manual runs.
 - `e2b-workload-smoke.yml`: consumes the same Template producer from the local
-  registry and optionally runs E2B SDK and sandbox network operations.
+  registry, then separates E2B SDK/connectivity checks from sandbox
+  network-policy and slot-reuse regressions.
 - `prepare-self-hosted-runner.yml`: verifies or installs the locked runner
   environment, and applies reviewed environment changes merged to `main`.
 
@@ -165,22 +166,33 @@ Actions. Select the trusted GitHub or AtomGit repository and enter that
 repository's pull request number. Each workflow resolves the PR head once to a
 full commit before downstream self-hosted jobs start.
 
-`e2b-workload-smoke.yml` is named `E2B Workload Smoke` in the GitHub Actions
-UI. It pulls the immutable Template published by its producer job and, by
-default, runs the dependent SDK E2E job in the same workflow run. The job adds
-the fixed nameserver `223.5.5.5` to the job-local Conch CNI configuration, then
+`e2b-workload-smoke.yml` is named `E2B SDK and Network Policy` in the GitHub
+Actions UI. It pulls the immutable Template published by its producer job and
+uses two explicitly named consumer jobs. `E2B SDK and Guest Connectivity` adds
+the fixed nameserver `223.5.5.5` to its job-local Conch CNI configuration, then
 accesses `https://example.com/` from the guest to validate DNS and Internet
 connectivity together. The guest also opens a TCP connection to
 `223.5.5.5:443` to validate the default route, bridge forwarding, and outbound
 NAT independently of DNS. Finally, the runner connects to a one-shot TCP
 listener inside the sandbox to validate runner-to-sandbox inbound connectivity.
 This last check does not expose the sandbox for inbound connections from the
-public Internet. The SDK smoke test also assigns two benchmark-network addresses
-to the runner loopback interface and uses them to verify network-policy behavior
-at sandbox creation and during live updates. It covers outbound deny-rule
-replacement, inbound allow and deny rules, disabling Internet access, and policy
-restoration after a suspend/resume cycle; the workflow removes both addresses in
-its always-run cleanup.
+public Internet.
+
+`Network Policy and Cross-Sandbox Conntrack` runs after the SDK/connectivity
+job and owns the additional privileged test setup. It assigns two
+benchmark-network addresses to the runner loopback interface and verifies
+creation-time policies, live replacement, inbound allow and deny rules,
+disabling Internet access, and policy restoration after suspend/resume. It then
+pauses background warm-pool
+refill so a second sandbox deterministically reuses the first sandbox's network
+slot. A bidirectional UDP flow with a fixed source port seeds conntrack before
+the first sandbox is deleted; the replacement repeats the same tuple under a
+matching `denyOut` rule to catch stale conntrack state bypassing the new policy.
+This job requires the host's `nsenter` command and conntrack procfs interface,
+which it uses read-only for slot identification and diagnostics. Its always-run
+cleanup releases the blocked refill, removes both sandbox IDs and loopback
+addresses, and tears down the isolated runtime. Setting `run_sdk_smoke=false`
+skips sandbox operations in the SDK job and skips the network-policy job.
 
 ## Required secrets and permissions
 
