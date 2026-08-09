@@ -175,7 +175,12 @@ connectivity together. The guest also opens a TCP connection to
 NAT independently of DNS. Finally, the runner connects to a one-shot TCP
 listener inside the sandbox to validate runner-to-sandbox inbound connectivity.
 This last check does not expose the sandbox for inbound connections from the
-public Internet.
+public Internet. The SDK smoke test also assigns two benchmark-network addresses
+to the runner loopback interface and uses them to verify network-policy behavior
+at sandbox creation and during live updates. It covers outbound deny-rule
+replacement, inbound allow and deny rules, disabling Internet access, and policy
+restoration after a suspend/resume cycle; the workflow removes both addresses in
+its always-run cleanup.
 
 ## Required secrets and permissions
 
