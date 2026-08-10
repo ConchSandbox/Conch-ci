@@ -27,6 +27,8 @@ defaults:
     shell: bash
 
 jobs:
+  # Verifies the locked persistent runner environment on request, or installs
+  # and repairs it only for an explicit ensure run or a reviewed main change.
   prepare:
     name: ${{ github.event_name == 'push' && 'Ensure' || inputs.mode }}
     runs-on: [self-hosted, Linux, ARM64, Huawei]

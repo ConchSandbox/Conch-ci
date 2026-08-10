@@ -38,6 +38,8 @@ defaults:
     shell: bash
 
 jobs:
+  # Builds the selected Conch source and runs formatting, static analysis,
+  # unit tests, and Python SDK import checks on a hosted runner.
   ci:
     name: Conch Build and Check
     runs-on: ubuntu-24.04

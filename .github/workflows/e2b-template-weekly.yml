@@ -36,6 +36,7 @@ env:
   CONCH_REF: ${{ github.event.inputs.conch_ref || vars.CONCH_E2B_TEMPLATE_REF || vars.CONCH_REF || 'dev' }}
 
 jobs:
+  # Pins the configured Conch ref to one full commit for all produced images.
   resolve-conch:
     name: Resolve Conch commit
     runs-on: ubuntu-latest
@@ -52,6 +53,8 @@ jobs:
             --repository "$CONCH_REPOSITORY" \
             --ref "$CONCH_REF"
 
+  # Builds or restores the content-addressed ARM64 kernel required by the E2B
+  # template image.
   build-kernel:
     name: Build or reuse ARM64 kernel
     needs: resolve-conch
@@ -74,6 +77,8 @@ jobs:
           conch-repository: ${{ env.CONCH_REPOSITORY }}
           conch-commit: ${{ needs.resolve-conch.outputs.conch-commit }}
 
+  # Builds or reuses immutable E2B rootfs and template images from the resolved
+  # Conch commit and kernel artifact.
   build-template:
     name: Build or reuse E2B template
     needs: [resolve-conch, build-kernel]
@@ -102,6 +107,8 @@ jobs:
           dockerfile: examples/e2b-rootfs/Dockerfile
           image-profile: e2b
 
+  # Optionally mirrors the immutable rootfs and template images to GHCR when a
+  # manual run explicitly requests publication.
   publish-ghcr:
     name: Publish E2B images to GHCR
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_to_ghcr }}
