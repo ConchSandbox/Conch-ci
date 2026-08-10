@@ -178,8 +178,8 @@ listener inside the sandbox to validate runner-to-sandbox inbound connectivity.
 This last check does not expose the sandbox for inbound connections from the
 public Internet.
 
-`Network Policy and Cross-Sandbox Conntrack` runs after the SDK/connectivity
-job and owns the additional privileged test setup. It assigns two
+`Network Policy` runs after the SDK/connectivity job and owns the additional
+privileged test setup. It assigns two
 benchmark-network addresses to the runner loopback interface and verifies
 creation-time policies, live replacement, inbound allow and deny rules,
 disabling Internet access, and policy restoration after suspend/resume. It then
@@ -188,11 +188,14 @@ refill so a second sandbox deterministically reuses the first sandbox's network
 slot. A bidirectional UDP flow with a fixed source port seeds conntrack before
 the first sandbox is deleted; the replacement repeats the same tuple under a
 matching `denyOut` rule to catch stale conntrack state bypassing the new policy.
-This job requires the host's `nsenter` command and conntrack procfs interface,
-which it uses read-only for slot identification and diagnostics. Its always-run
-cleanup releases the blocked refill, removes both sandbox IDs and loopback
-addresses, and tears down the isolated runtime. Setting `run_sdk_smoke=false`
-skips sandbox operations in the SDK job and skips the network-policy job.
+On runners with active firewalld, the job temporarily assigns `cni-conch0` to
+the runtime `trusted` zone so sandbox requests can reach the loopback test
+server, then restores the interface's previous zone assignment. This job also
+requires the host's `nsenter` command and conntrack procfs interface. Its
+always-run cleanup releases the blocked refill, restores the firewall, removes
+both sandbox IDs and loopback addresses, and tears down the isolated runtime.
+Setting `run_sdk_smoke=false` skips sandbox operations in the SDK job and skips
+the network-policy job.
 
 ## Required secrets and permissions
 

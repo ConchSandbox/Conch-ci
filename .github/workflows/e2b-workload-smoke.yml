@@ -391,6 +391,29 @@ jobs:
             ram_mb: 2048
           YAML
 
+      - name: Allow sandbox requests to runner test server
+        env:
+          FIREWALL_STATE: ${{ runner.temp }}/conch-e2b-network-policy-firewall-${{ github.run_id }}-${{ github.run_attempt }}.txt
+        run: |
+          set -euo pipefail
+          install -m 0600 /dev/null "$FIREWALL_STATE"
+          if ! command -v firewall-cmd >/dev/null 2>&1 || \
+            ! sudo -n firewall-cmd --state >/dev/null 2>&1; then
+            echo inactive > "$FIREWALL_STATE"
+            exit 0
+          fi
+
+          sudo -n ip link show dev cni-conch0 >/dev/null
+          previous_zone=$(sudo -n firewall-cmd \
+            --get-zone-of-interface=cni-conch0 2>/dev/null || true)
+          if [[ -z "$previous_zone" || "$previous_zone" == "no zone" ]]; then
+            echo unassigned > "$FIREWALL_STATE"
+          else
+            [[ "$previous_zone" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]]
+            printf 'zone:%s\n' "$previous_zone" > "$FIREWALL_STATE"
+          fi
+          sudo -n firewall-cmd --zone=trusted --change-interface=cni-conch0
+
       - name: Validate network policies and cross-sandbox slot reuse
         timeout-minutes: 25
         working-directory: ${{ runner.temp }}/conch-e2b-network-policy-source
@@ -440,6 +463,35 @@ jobs:
           set +e
           [[ -z "${CNI_CONTROL_DIR:-}" || ! -d "$CNI_CONTROL_DIR" ]] || \
             touch "$CNI_CONTROL_DIR/release-refill"
+          exit 0
+
+      - name: Restore runner firewall
+        if: always()
+        env:
+          FIREWALL_STATE: ${{ runner.temp }}/conch-e2b-network-policy-firewall-${{ github.run_id }}-${{ github.run_attempt }}.txt
+        run: |
+          set +e
+          [[ -f "$FIREWALL_STATE" ]] || exit 0
+          firewall_state=$(<"$FIREWALL_STATE")
+          if ! command -v firewall-cmd >/dev/null 2>&1 || \
+            ! sudo -n firewall-cmd --state >/dev/null 2>&1; then
+            exit 0
+          fi
+          case "$firewall_state" in
+            inactive)
+              ;;
+            unassigned)
+              sudo -n firewall-cmd \
+                --zone=trusted --remove-interface=cni-conch0 || true
+              ;;
+            zone:*)
+              previous_zone=${firewall_state#zone:}
+              if [[ "$previous_zone" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]]; then
+                sudo -n firewall-cmd \
+                  --zone="$previous_zone" --change-interface=cni-conch0 || true
+              fi
+              ;;
+          esac
           exit 0
 
       - name: Delete network-policy sandboxes
@@ -497,6 +549,7 @@ jobs:
           for path in \
             "$RUNNER_TEMP/conch-e2b-network-policy-cni-tools-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
             "$loopback_state" \
+            "$RUNNER_TEMP/conch-e2b-network-policy-firewall-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.txt" \
             "$RUNNER_TEMP/conch-e2b-network-policy-source" \
             "$RUNNER_TEMP/conch-e2b-network-policy-sdk-venv" \
             "$RUNNER_TEMP/conch-e2b-network-policy-sdk-config-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.yaml"; do

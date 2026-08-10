@@ -139,16 +139,44 @@ def validate_network_policy(sandbox, e2b):
 
     def guest_http(address, should_succeed):
         url = f"http://{address}:{http_port}/"
-        code = (
-            "import urllib.request; "
-            f"print(urllib.request.urlopen({url!r}, timeout=3).read().decode())"
-        )
+        success_prefix = "guest-http-success="
+        error_prefix = "guest-http-error="
+        code = f"""
+import urllib.request
+
+try:
+    body = urllib.request.urlopen({url!r}, timeout=3).read().decode()
+except OSError as exc:
+    print({error_prefix!r} + f"{{type(exc).__name__}}: {{exc}}")
+else:
+    print({success_prefix!r} + body)
+"""
         encoded = base64.b64encode(code.encode()).decode()
         result = e2b.commands.run(
             f'python -c "import base64; exec(base64.b64decode(\'{encoded}\'))"'
         )
         marker = response_body.decode()
-        succeeded = result.exit_code == 0 and marker in result.stdout
+        success_lines = [
+            line for line in result.stdout.splitlines() if line.startswith(success_prefix)
+        ]
+        error_lines = [
+            line for line in result.stdout.splitlines() if line.startswith(error_prefix)
+        ]
+        if success_lines:
+            if success_lines[-1] != success_prefix + marker:
+                raise RuntimeError(
+                    f"guest HTTP returned an unexpected body for {url}: "
+                    f"stdout={result.stdout!r}"
+                )
+            succeeded = True
+        elif error_lines:
+            succeeded = False
+        else:
+            raise RuntimeError(
+                f"guest HTTP returned no recognized result for {url}: "
+                f"exit={result.exit_code}, stdout={result.stdout!r}, "
+                f"stderr={result.stderr!r}"
+            )
         if succeeded != should_succeed:
             raise RuntimeError(
                 f"guest HTTP expectation failed for {url}: "
