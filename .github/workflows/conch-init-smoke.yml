@@ -38,6 +38,8 @@ env:
   GOPROXY: https://goproxy.cn
 
 jobs:
+  # Pins the requested branch or pull request to one full commit so every
+  # downstream job validates the same immutable Conch source.
   resolve-conch:
     name: Resolve Conch commit
     runs-on: ubuntu-latest
@@ -59,6 +61,8 @@ jobs:
           fi
           scripts/runner-env/jobs/resolve-conch-commit.sh "${resolve_args[@]}"
 
+  # Builds or restores the content-addressed ARM64 kernel artifact used by the
+  # real-VM conch-init smoke test.
   build-kernel:
     name: Build or reuse ARM64 kernel
     needs: resolve-conch
@@ -81,6 +85,8 @@ jobs:
           conch-repository: ${{ env.CONCH_REPOSITORY }}
           conch-commit: ${{ needs.resolve-conch.outputs.conch-commit }}
 
+  # Boots conch-init as PID 1 in a cloud-hypervisor VM, then verifies its vsock
+  # readiness signal and the current SDK health client.
   conch-init-smoke:
     name: Conch Init Smoke
     needs: [resolve-conch, build-kernel]

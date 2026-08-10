@@ -13,6 +13,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Mirrors AtomGit's dev branch and pull requests into GitHub without
+  # dispatching any Conch validation workflows.
   sync:
     name: Sync AtomGit branches and PRs
     runs-on: ubuntu-latest

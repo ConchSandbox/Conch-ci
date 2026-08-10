@@ -46,6 +46,8 @@ env:
   GOPROXY: https://goproxy.cn
 
 jobs:
+  # Pins the requested branch or pull request to one full commit so all E2B
+  # jobs validate the same immutable Conch source.
   resolve-conch:
     name: Resolve Conch commit
     runs-on: ubuntu-latest
@@ -67,6 +69,8 @@ jobs:
           fi
           scripts/runner-env/jobs/resolve-conch-commit.sh "${resolve_args[@]}"
 
+  # Builds or restores the content-addressed ARM64 kernel required by the E2B
+  # template consumed later in this workflow.
   build-kernel:
     name: Build or reuse ARM64 kernel
     needs: resolve-conch
@@ -89,6 +93,8 @@ jobs:
           conch-repository: ${{ env.CONCH_REPOSITORY }}
           conch-commit: ${{ needs.resolve-conch.outputs.conch-commit }}
 
+  # Builds or reuses an immutable E2B template from the resolved Conch commit
+  # and kernel artifact, then exports its digest reference to consumer jobs.
   build-template:
     name: Build or reuse E2B template
     needs: [resolve-conch, build-kernel]
@@ -114,6 +120,8 @@ jobs:
           dockerfile: examples/e2b-rootfs/Dockerfile
           image-profile: e2b
 
+  # Exercises an E2B sandbox without a network policy through the current SDK,
+  # covering guest commands, DNS, outbound routing, inbound access, and delete.
   sdk-connectivity:
     name: E2B SDK and Guest Connectivity
     needs: [resolve-conch, build-template]
@@ -274,6 +282,8 @@ jobs:
           done
           exit 0
 
+  # Validates network-policy lifecycle behavior and proves a reused network
+  # slot cannot inherit stale conntrack state from the previous sandbox.
   network-policy:
     name: Network Policy
     if: ${{ github.event.inputs.run_sdk_smoke != 'false' }}

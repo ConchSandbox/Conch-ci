@@ -38,6 +38,8 @@ defaults:
     shell: bash
 
 jobs:
+  # Pins the requested branch or pull request to one full commit before the
+  # privileged self-hosted integration test starts.
   resolve-conch:
     name: Resolve Conch commit
     runs-on: ubuntu-24.04
@@ -60,6 +62,8 @@ jobs:
           fi
           scripts/runner-env/jobs/resolve-conch-commit.sh "${resolve_args[@]}"
 
+  # Runs conchd and a controlled CNI plugin in isolation to cover initial
+  # prefill, continuous refill, retries, cancellation, and concurrent close.
   network-integration:
     name: Network Pool Integration
     needs: resolve-conch
