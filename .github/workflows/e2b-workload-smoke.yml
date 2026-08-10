@@ -1,4 +1,4 @@
-name: E2B Workload Smoke
+name: E2B SDK and Network Policy
 run-name: ${{ github.event.inputs.conch_pr_number || github.event.inputs.conch_ref || github.ref_name }}
 
 on:
@@ -21,7 +21,7 @@ on:
         required: false
         default: dev
       run_sdk_smoke:
-        description: Run E2B SDK operations after pulling the published template
+        description: Run SDK connectivity and network-policy jobs
         required: false
         type: boolean
         default: true
@@ -41,6 +41,9 @@ env:
   CONCH_E2B_DNS_NAMESERVER: "223.5.5.5"
   CONCH_E2B_NETWORK_TEST_URL: https://example.com/
   CONCH_E2B_SDK_HTTP_TIMEOUT: "300"
+  CONCH_CNI_REFILL_PLUGIN: conch-e2b-refill-control
+  CONCH_NETWORK_TEST_ALLOW_IP: 198.18.0.1
+  CONCH_NETWORK_TEST_DENY_IP: 198.18.0.2
   GOPROXY: https://goproxy.cn
 
 jobs:
@@ -112,8 +115,8 @@ jobs:
           dockerfile: examples/e2b-rootfs/Dockerfile
           image-profile: e2b
 
-  workload-smoke:
-    name: E2B Workload Smoke
+  sdk-connectivity:
+    name: E2B SDK and Guest Connectivity
     needs: [resolve-conch, build-template]
     runs-on: [self-hosted, Linux, ARM64, Huawei]
     timeout-minutes: 150
@@ -134,27 +137,27 @@ jobs:
           scripts/runner-env/jobs/checkout-conch.sh \
             --repository "$CONCH_REPOSITORY" \
             --commit "${{ needs.resolve-conch.outputs.conch-commit }}" \
-            --destination "$RUNNER_TEMP/conch-e2b-workload-source"
+            --destination "$RUNNER_TEMP/conch-e2b-sdk-source"
 
       - name: Prepare Conch SDK
         id: sdk
         uses: ./.github/actions/prepare-conch-sdk
         with:
-          conch-source: ${{ runner.temp }}/conch-e2b-workload-source
-          venv: ${{ runner.temp }}/conch-e2b-workload-sdk-venv
+          conch-source: ${{ runner.temp }}/conch-e2b-sdk-source
+          venv: ${{ runner.temp }}/conch-e2b-sdk-venv
           requirements: scripts/workflows/e2b-workload-smoke/requirements.lock.txt
 
       - name: Build Conch binaries
         uses: ./.github/actions/build-conch
         with:
-          conch-source: ${{ runner.temp }}/conch-e2b-workload-source
+          conch-source: ${{ runner.temp }}/conch-e2b-sdk-source
 
       - name: Configure E2B CNI DNS
         env:
-          CNI_CONFIG: ${{ runner.temp }}/conch-e2b-workload-source/config/cni/net.d/10-conch.conf
+          CNI_CONFIG: ${{ runner.temp }}/conch-e2b-sdk-source/config/cni/net.d/10-conch.conf
         run: |
           set -euo pipefail
-          python3 scripts/workflows/e2b-workload-smoke/configure-cni-dns.py \
+          python3 scripts/workflows/e2b-workload-smoke/sdk-connectivity/configure-cni-dns.py \
             --config "$CNI_CONFIG" \
             --nameserver "$CONCH_E2B_DNS_NAMESERVER"
 
@@ -162,10 +165,10 @@ jobs:
         id: conchd
         uses: ./.github/actions/start-conchd
         with:
-          conch-source: ${{ runner.temp }}/conch-e2b-workload-source
+          conch-source: ${{ runner.temp }}/conch-e2b-sdk-source
           binary-dir: ${{ steps.runner-environment.outputs.binary-dir }}
-          runtime-name: conch-e2b-workload
-          app-name: conch-e2b-workload
+          runtime-name: conch-e2b-sdk
+          app-name: conch-e2b-sdk
           log-level: debug
           api-timeout: ${{ env.CONCH_API_TIMEOUT }}
 
@@ -173,7 +176,7 @@ jobs:
         id: template
         uses: ./.github/actions/pull-conch-template
         with:
-          conch-source: ${{ runner.temp }}/conch-e2b-workload-source
+          conch-source: ${{ runner.temp }}/conch-e2b-sdk-source
           config: ${{ steps.conchd.outputs.config }}
           template-image-ref: ${{ needs.build-template.outputs.template-image-ref }}
           image-profile: e2b
@@ -182,7 +185,7 @@ jobs:
         if: ${{ github.event.inputs.run_sdk_smoke != 'false' }}
         env:
           CONCHD_API_URL: ${{ steps.conchd.outputs.api-url }}
-          CONCH_SDK_CONFIG: ${{ runner.temp }}/conch-e2b-workload-sdk-config-${{ github.run_id }}-${{ github.run_attempt }}.yaml
+          CONCH_SDK_CONFIG: ${{ runner.temp }}/conch-e2b-sdk-config-${{ github.run_id }}-${{ github.run_attempt }}.yaml
         run: |
           set -euo pipefail
           install -m 0600 /dev/null "$CONCH_SDK_CONFIG"
@@ -197,19 +200,20 @@ jobs:
             ram_mb: 2048
           YAML
 
-      - name: Boot sandbox and validate E2B SDK and network operations
+      - name: Validate E2B SDK and guest connectivity
         if: ${{ github.event.inputs.run_sdk_smoke != 'false' }}
         timeout-minutes: 20
-        working-directory: ${{ runner.temp }}/conch-e2b-workload-source
+        working-directory: ${{ runner.temp }}/conch-e2b-sdk-source
         env:
           CONCH_SDK_PYTHON: ${{ steps.sdk.outputs.python }}
-          CONCH_SANDBOX_ID: sandbox_e2b_${{ github.run_id }}_${{ github.run_attempt }}
-          CONCH_SDK_CONFIG: ${{ runner.temp }}/conch-e2b-workload-sdk-config-${{ github.run_id }}-${{ github.run_attempt }}.yaml
+          CONCH_SANDBOX_ID: sandbox_e2b_sdk_${{ github.run_id }}_${{ github.run_attempt }}
+          CONCH_SDK_CONFIG: ${{ runner.temp }}/conch-e2b-sdk-config-${{ github.run_id }}-${{ github.run_attempt }}.yaml
           CONCH_TEMPLATE_ID: ${{ steps.template.outputs.template-id }}
         run: |
+          set -euo pipefail
           timeout --foreground --kill-after=30s 15m \
             "$CONCH_SDK_PYTHON" -u \
-              "$GITHUB_WORKSPACE/scripts/workflows/e2b-workload-smoke/e2b-sdk-smoke.py"
+              "$GITHUB_WORKSPACE/scripts/workflows/e2b-workload-smoke/sdk-connectivity/smoke.py"
 
       - name: Dump conchd and network diagnostics on failure
         if: failure()
@@ -217,7 +221,7 @@ jobs:
           START_CONCHD_WORK_DIR: ${{ steps.conchd.outputs.work-dir }}
         run: |
           set +e
-          START_CONCHD_WORK_DIR=${START_CONCHD_WORK_DIR:-$RUNNER_TEMP/conch-e2b-workload-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}}
+          START_CONCHD_WORK_DIR=${START_CONCHD_WORK_DIR:-$RUNNER_TEMP/conch-e2b-sdk-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}}
           [[ ! -f "$START_CONCHD_WORK_DIR/conchd.log" ]] || \
             sed -n '1,600p' "$START_CONCHD_WORK_DIR/conchd.log"
           sudo -n ip addr show
@@ -229,8 +233,8 @@ jobs:
         if: ${{ always() && github.event.inputs.run_sdk_smoke != 'false' }}
         env:
           CONCH_SDK_PYTHON: ${{ steps.sdk.outputs.python }}
-          CONCH_SANDBOX_ID: sandbox_e2b_${{ github.run_id }}_${{ github.run_attempt }}
-          CONCH_SDK_CONFIG: ${{ runner.temp }}/conch-e2b-workload-sdk-config-${{ github.run_id }}-${{ github.run_attempt }}.yaml
+          CONCH_SANDBOX_ID: sandbox_e2b_sdk_${{ github.run_id }}_${{ github.run_attempt }}
+          CONCH_SDK_CONFIG: ${{ runner.temp }}/conch-e2b-sdk-config-${{ github.run_id }}-${{ github.run_attempt }}.yaml
         run: |
           set +e
           if [[ -n "${CONCH_SDK_PYTHON:-}" && -x "$CONCH_SDK_PYTHON" && -n "${CONCH_SDK_CONFIG:-}" ]]; then
@@ -253,16 +257,244 @@ jobs:
         if: always()
         uses: ./.github/actions/cleanup-conch-runtime
         with:
-          runtime-name: conch-e2b-workload
+          runtime-name: conch-e2b-sdk
 
       - name: Clean workload files
         if: always()
         run: |
           set +e
           for path in \
-            "$RUNNER_TEMP/conch-e2b-workload-source" \
-            "$RUNNER_TEMP/conch-e2b-workload-sdk-venv" \
-            "$RUNNER_TEMP/conch-e2b-workload-sdk-config-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.yaml"; do
+            "$RUNNER_TEMP/conch-e2b-sdk-source" \
+            "$RUNNER_TEMP/conch-e2b-sdk-venv" \
+            "$RUNNER_TEMP/conch-e2b-sdk-config-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.yaml"; do
+            [[ -z "$path" || ! -e "$path" ]] || sudo -n find "$path" -depth -delete
+          done
+          exit 0
+
+  network-policy:
+    name: Network Policy and Cross-Sandbox Conntrack
+    if: ${{ github.event.inputs.run_sdk_smoke != 'false' }}
+    needs: [resolve-conch, build-template, sdk-connectivity]
+    runs-on: [self-hosted, Linux, ARM64, Huawei]
+    timeout-minutes: 150
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout CI repository
+        uses: actions/checkout@v4.4.0
+
+      - name: Verify runner environment
+        id: runner-environment
+        uses: ./.github/actions/ensure-runner-environment
+        with:
+          mode: verify
+
+      - name: Checkout immutable Conch source
+        run: |
+          scripts/runner-env/jobs/checkout-conch.sh \
+            --repository "$CONCH_REPOSITORY" \
+            --commit "${{ needs.resolve-conch.outputs.conch-commit }}" \
+            --destination "$RUNNER_TEMP/conch-e2b-network-policy-source"
+
+      - name: Prepare Conch SDK
+        id: sdk
+        uses: ./.github/actions/prepare-conch-sdk
+        with:
+          conch-source: ${{ runner.temp }}/conch-e2b-network-policy-source
+          venv: ${{ runner.temp }}/conch-e2b-network-policy-sdk-venv
+          requirements: scripts/workflows/e2b-workload-smoke/requirements.lock.txt
+
+      - name: Build Conch binaries
+        uses: ./.github/actions/build-conch
+        with:
+          conch-source: ${{ runner.temp }}/conch-e2b-network-policy-source
+
+      - name: Prepare controlled CNI tools
+        id: cni-tools
+        env:
+          MANAGED_BINARY_DIR: ${{ steps.runner-environment.outputs.binary-dir }}
+        run: |
+          set -euo pipefail
+          admin_path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+          sudo -n env PATH="$admin_path" sh -c 'command -v nsenter >/dev/null'
+          tools_dir="$RUNNER_TEMP/conch-e2b-network-policy-cni-tools-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          control_dir="$tools_dir/control"
+          mkdir -p "$tools_dir/cni" "$control_dir"
+          for plugin in "$MANAGED_BINARY_DIR/cni/"*; do
+            [[ -f "$plugin" && -x "$plugin" ]] || continue
+            ln -s "$plugin" "$tools_dir/cni/$(basename "$plugin")"
+          done
+          ln -s "$MANAGED_BINARY_DIR/cloud-hypervisor" "$tools_dir/cloud-hypervisor"
+          install -m 0755 \
+            scripts/workflows/e2b-workload-smoke/network-policy/cni-refill-control.py \
+            "$tools_dir/cni/$CONCH_CNI_REFILL_PLUGIN"
+          {
+            echo "binary-dir=$tools_dir"
+            echo "control-dir=$control_dir"
+            echo "real-bridge=$MANAGED_BINARY_DIR/cni/bridge"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Configure controlled CNI network
+        env:
+          CNI_CONFIG: ${{ runner.temp }}/conch-e2b-network-policy-source/config/cni/net.d/10-conch.conf
+          CNI_CONTROL_DIR: ${{ steps.cni-tools.outputs.control-dir }}
+          CNI_REAL_BRIDGE: ${{ steps.cni-tools.outputs.real-bridge }}
+        run: |
+          set -euo pipefail
+          python3 scripts/workflows/e2b-workload-smoke/network-policy/configure-cni.py \
+            --config "$CNI_CONFIG" \
+            --nameserver "$CONCH_E2B_DNS_NAMESERVER" \
+            --control-dir "$CNI_CONTROL_DIR" \
+            --control-plugin "$CONCH_CNI_REFILL_PLUGIN" \
+            --real-bridge "$CNI_REAL_BRIDGE"
+
+      - name: Start isolated conchd
+        id: conchd
+        uses: ./.github/actions/start-conchd
+        with:
+          conch-source: ${{ runner.temp }}/conch-e2b-network-policy-source
+          binary-dir: ${{ steps.cni-tools.outputs.binary-dir }}
+          runtime-name: conch-e2b-network-policy
+          app-name: conch-e2b-network-policy
+          log-level: debug
+          api-timeout: ${{ env.CONCH_API_TIMEOUT }}
+
+      - name: Pull runner-local Conch template
+        id: template
+        uses: ./.github/actions/pull-conch-template
+        with:
+          conch-source: ${{ runner.temp }}/conch-e2b-network-policy-source
+          config: ${{ steps.conchd.outputs.config }}
+          template-image-ref: ${{ needs.build-template.outputs.template-image-ref }}
+          image-profile: e2b
+
+      - name: Configure Conch SDK
+        env:
+          CONCHD_API_URL: ${{ steps.conchd.outputs.api-url }}
+          CONCH_SDK_CONFIG: ${{ runner.temp }}/conch-e2b-network-policy-sdk-config-${{ github.run_id }}-${{ github.run_attempt }}.yaml
+        run: |
+          set -euo pipefail
+          install -m 0600 /dev/null "$CONCH_SDK_CONFIG"
+          cat > "$CONCH_SDK_CONFIG" <<YAML
+          sandbox:
+            unix_socket: ""
+            api_url: "$CONCHD_API_URL"
+            sandbox_id: ""
+          image:
+            vcpu_num: 2
+            vcpu_max: 2
+            ram_mb: 2048
+          YAML
+
+      - name: Validate network policies and cross-sandbox slot reuse
+        timeout-minutes: 25
+        working-directory: ${{ runner.temp }}/conch-e2b-network-policy-source
+        env:
+          CONCH_SDK_PYTHON: ${{ steps.sdk.outputs.python }}
+          CONCH_SANDBOX_ID: sandbox_network_policy_a_${{ github.run_id }}_${{ github.run_attempt }}
+          CONCH_REUSE_SANDBOX_ID: sandbox_network_policy_b_${{ github.run_id }}_${{ github.run_attempt }}
+          CONCH_SDK_CONFIG: ${{ runner.temp }}/conch-e2b-network-policy-sdk-config-${{ github.run_id }}-${{ github.run_attempt }}.yaml
+          CONCH_TEMPLATE_ID: ${{ steps.template.outputs.template-id }}
+          CONCH_CNI_CONTROL_DIR: ${{ steps.cni-tools.outputs.control-dir }}
+        run: |
+          set -euo pipefail
+          loopback_state="$RUNNER_TEMP/conch-e2b-network-policy-loopback-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.txt"
+          install -m 0600 /dev/null "$loopback_state"
+          for address in "$CONCH_NETWORK_TEST_ALLOW_IP" "$CONCH_NETWORK_TEST_DENY_IP"; do
+            if sudo -n ip -o -4 address show dev lo | \
+              awk -v cidr="$address/32" '$4 == cidr { found = 1 } END { exit !found }'; then
+              echo "preserving pre-existing loopback address: $address/32"
+            else
+              sudo -n ip address add "$address/32" dev lo
+              printf '%s\n' "$address" >> "$loopback_state"
+            fi
+          done
+          timeout --foreground --kill-after=30s 20m \
+            "$CONCH_SDK_PYTHON" -u \
+              "$GITHUB_WORKSPACE/scripts/workflows/e2b-workload-smoke/network-policy/validate-network-policy-and-slot-reuse.py"
+
+      - name: Dump conchd and network diagnostics on failure
+        if: failure()
+        env:
+          START_CONCHD_WORK_DIR: ${{ steps.conchd.outputs.work-dir }}
+        run: |
+          set +e
+          START_CONCHD_WORK_DIR=${START_CONCHD_WORK_DIR:-$RUNNER_TEMP/conch-e2b-network-policy-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}}
+          [[ ! -f "$START_CONCHD_WORK_DIR/conchd.log" ]] || \
+            sed -n '1,600p' "$START_CONCHD_WORK_DIR/conchd.log"
+          sudo -n ip addr show
+          sudo -n ip route show
+          sudo -n ip netns list
+          sudo -n iptables -t nat -S
+
+      - name: Release blocked CNI refill
+        if: always()
+        env:
+          CNI_CONTROL_DIR: ${{ steps.cni-tools.outputs.control-dir }}
+        run: |
+          set +e
+          [[ -z "${CNI_CONTROL_DIR:-}" || ! -d "$CNI_CONTROL_DIR" ]] || \
+            touch "$CNI_CONTROL_DIR/release-refill"
+          exit 0
+
+      - name: Delete network-policy sandboxes
+        if: always()
+        env:
+          CONCH_SDK_PYTHON: ${{ steps.sdk.outputs.python }}
+          CONCH_SANDBOX_ID: sandbox_network_policy_a_${{ github.run_id }}_${{ github.run_attempt }}
+          CONCH_REUSE_SANDBOX_ID: sandbox_network_policy_b_${{ github.run_id }}_${{ github.run_attempt }}
+          CONCH_SDK_CONFIG: ${{ runner.temp }}/conch-e2b-network-policy-sdk-config-${{ github.run_id }}-${{ github.run_attempt }}.yaml
+        run: |
+          set +e
+          if [[ -n "${CONCH_SDK_PYTHON:-}" && -x "$CONCH_SDK_PYTHON" && -n "${CONCH_SDK_CONFIG:-}" ]]; then
+            for sandbox_id in "$CONCH_SANDBOX_ID" "$CONCH_REUSE_SANDBOX_ID"; do
+              [[ -n "$sandbox_id" ]] || continue
+              timeout --foreground --kill-after=5s 60s \
+                "$CONCH_SDK_PYTHON" - "$sandbox_id" <<'PY'
+          import sys
+          import time
+          from conch import Sandbox
+          sandbox_id = sys.argv[1]
+          try:
+              Sandbox.delete_sandbox(sandbox_id)
+              time.sleep(5)
+          except Exception as exc:
+              print(f"warning: sandbox cleanup failed for {sandbox_id}: {exc}")
+          PY
+              status=$?
+              if (( status != 0 )); then
+                echo "warning: sandbox cleanup timed out or failed for $sandbox_id (exit=$status)"
+              fi
+            done
+          fi
+          exit 0
+
+      - name: Clean Conch runtime
+        if: always()
+        uses: ./.github/actions/cleanup-conch-runtime
+        with:
+          runtime-name: conch-e2b-network-policy
+
+      - name: Clean network-policy files
+        if: always()
+        run: |
+          set +e
+          loopback_state="$RUNNER_TEMP/conch-e2b-network-policy-loopback-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.txt"
+          if [[ -f "$loopback_state" ]]; then
+            while IFS= read -r address; do
+              case "$address" in
+                "$CONCH_NETWORK_TEST_ALLOW_IP"|"$CONCH_NETWORK_TEST_DENY_IP")
+                  sudo -n ip address delete "$address/32" dev lo >/dev/null 2>&1 || true
+                  ;;
+              esac
+            done < "$loopback_state"
+          fi
+          for path in \
+            "$RUNNER_TEMP/conch-e2b-network-policy-cni-tools-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            "$loopback_state" \
+            "$RUNNER_TEMP/conch-e2b-network-policy-source" \
+            "$RUNNER_TEMP/conch-e2b-network-policy-sdk-venv" \
+            "$RUNNER_TEMP/conch-e2b-network-policy-sdk-config-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.yaml"; do
             [[ -z "$path" || ! -e "$path" ]] || sudo -n find "$path" -depth -delete
           done
           exit 0

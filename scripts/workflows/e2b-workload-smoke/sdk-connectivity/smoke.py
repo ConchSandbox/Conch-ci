@@ -18,7 +18,7 @@ from packaging.version import Version
 
 
 def log(message):
-    print(f"[e2b-workload-smoke] {message}", flush=True)
+    print(f"[e2b-sdk-connectivity] {message}", flush=True)
 
 
 REQUEST_TIMEOUT = int(os.environ.get("CONCH_E2B_SDK_HTTP_TIMEOUT", "300"))
@@ -68,7 +68,10 @@ def wait_http(url, expected_body=None, timeout=180):
 
 
 def wait_conch_health(sandbox, timeout=180):
-    log(f"waiting for Conch agent health: sandbox_id={sandbox.sandbox_id} ip={sandbox.ip}")
+    log(
+        "waiting for Conch agent health: "
+        f"sandbox_id={sandbox.sandbox_id} ip={sandbox.ip}"
+    )
     deadline = time.monotonic() + timeout
     last_health = None
     while time.monotonic() < deadline:
@@ -268,7 +271,10 @@ print(f"inbound-listener-ready port={{listener_port}}")
 
 
 def main():
-    log(f"using e2b={version('e2b')} e2b-code-interpreter={version('e2b-code-interpreter')}")
+    log(
+        f"using e2b={version('e2b')} "
+        f"e2b-code-interpreter={version('e2b-code-interpreter')}"
+    )
     log("creating Conch sandbox")
     conch_sandbox = ConchSandbox.create(
         template_id=os.environ["CONCH_TEMPLATE_ID"],
@@ -277,7 +283,10 @@ def main():
         vcpu_max=2,
         ram_mb=2048,
     )
-    log(f"created Conch sandbox: sandbox_id={conch_sandbox.sandbox_id} ip={conch_sandbox.ip}")
+    log(
+        "created Conch sandbox: "
+        f"sandbox_id={conch_sandbox.sandbox_id} ip={conch_sandbox.ip}"
+    )
     wait_conch_health(conch_sandbox)
 
     sandbox_ip = conch_sandbox.ip
@@ -286,7 +295,10 @@ def main():
     wait_http(f"{envd_url}/health")
     e2b = new_code_interpreter_sandbox(envd_url, sandbox_ip)
     try:
-        wait_http(f"{code_interpreter_url}/health", expected_body=("OK", '"OK"'))
+        wait_http(
+            f"{code_interpreter_url}/health",
+            expected_body=("OK", '"OK"'),
+        )
     except Exception:
         dump_guest_logs(e2b)
         raise
@@ -308,7 +320,8 @@ def main():
     command = e2b.commands.run("pwd && printf '\\ncommand-ok'")
     if command.exit_code != 0:
         raise RuntimeError(
-            f"E2B command failed: exit={command.exit_code} stdout={command.stdout!r} stderr={command.stderr!r}"
+            f"E2B command failed: exit={command.exit_code} "
+            f"stdout={command.stdout!r} stderr={command.stderr!r}"
         )
     if "command-ok" not in command.stdout:
         raise RuntimeError(f"E2B command stdout missing marker: {command.stdout!r}")
@@ -325,15 +338,22 @@ def main():
     stateful = e2b.run_code("print(stateful_value + 1)", language="python")
     stateful_text = logs_stdout_text(stateful)
     if "42" not in stateful_text:
-        raise RuntimeError(f"code interpreter did not preserve state: {stateful_text!r}")
+        raise RuntimeError(
+            f"code interpreter did not preserve state: {stateful_text!r}"
+        )
 
     e2b.files.write(f"{base}/shared.txt", "shared-through-envd")
-    shared = e2b.run_code(f"print(open('{base}/shared.txt').read())", language="python")
+    shared = e2b.run_code(
+        f"print(open('{base}/shared.txt').read())",
+        language="python",
+    )
     shared_text = logs_stdout_text(shared)
     if "shared-through-envd" not in shared_text:
-        raise RuntimeError(f"code interpreter cannot read envd-written file: {shared_text!r}")
+        raise RuntimeError(
+            f"code interpreter cannot read envd-written file: {shared_text!r}"
+        )
 
-    log("conch e2b workload smoke ok")
+    log("E2B SDK and guest connectivity smoke ok")
 
 
 if __name__ == "__main__":
