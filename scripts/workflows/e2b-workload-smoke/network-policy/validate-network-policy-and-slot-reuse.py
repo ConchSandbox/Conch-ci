@@ -81,6 +81,25 @@ def wait_conch_health(sandbox, timeout=180):
     raise RuntimeError(f"timed out waiting for Conch health check: {last_health}")
 
 
+def wait_e2b_commands(e2b, sandbox_ip, timeout=30):
+    log(f"waiting for E2B command API: sandbox_ip={sandbox_ip}")
+    deadline = time.monotonic() + timeout
+    last_error = None
+    while time.monotonic() < deadline:
+        try:
+            result = e2b.commands.run("true")
+            if result.exit_code == 0:
+                return
+            last_error = RuntimeError(
+                f"command exited {result.exit_code}: "
+                f"stdout={result.stdout!r}, stderr={result.stderr!r}"
+            )
+        except Exception as exc:
+            last_error = exc
+        time.sleep(1)
+    raise RuntimeError(f"timed out waiting for E2B command API: {last_error}")
+
+
 def new_code_interpreter_sandbox(envd_url, sandbox_ip):
     config = ConnectionConfig(debug=True, sandbox_url=envd_url)
     sandbox = CodeInterpreterSandbox(
@@ -365,7 +384,7 @@ finally:
                 return path
         raise RuntimeError(f"cannot find network slot for sandbox IP {sandbox_ip}")
 
-    def conntrack_has_tuple(netns_path):
+    def conntrack_has_established_tuple(netns_path):
         entries = run_root(
             "nsenter", f"--net={netns_path}", "cat", "/proc/net/nf_conntrack"
         )
@@ -373,18 +392,19 @@ finally:
             rf"\budp\b.*\bdst={re.escape(target_ip)} "
             rf"sport={source_port} dport={target_port}\b"
         )
+        # A replied UDP flow can match ctstate ESTABLISHED without being ASSURED.
         return any(
-            pattern.search(line) and "[ASSURED]" in line
+            pattern.search(line) and "[UNREPLIED]" not in line
             for line in entries.splitlines()
         )
 
-    def wait_for_conntrack(netns_path, expected, timeout=5):
+    def wait_for_established_conntrack(netns_path, timeout=5):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            if conntrack_has_tuple(netns_path) == expected:
+            if conntrack_has_established_tuple(netns_path):
                 return True
             time.sleep(0.1)
-        return conntrack_has_tuple(netns_path) == expected
+        return conntrack_has_established_tuple(netns_path)
 
     def wait_for_path(path, timeout=5):
         deadline = time.monotonic() + timeout
@@ -411,9 +431,9 @@ finally:
             )
 
         slot_netns = find_slot_netns(sandbox_ip)
-        if not wait_for_conntrack(slot_netns, True):
+        if not wait_for_established_conntrack(slot_netns):
             raise RuntimeError(
-                f"conntrack seed tuple not found in {slot_netns}: "
+                f"established conntrack seed tuple not found in {slot_netns}: "
                 f"target={target_ip}:{target_port} source_port={source_port}"
             )
         wait_for_path(
@@ -422,10 +442,12 @@ finally:
 
         if not ConchSandbox.delete_sandbox(sandbox.sandbox_id):
             raise RuntimeError("sandbox A deletion failed")
-        stale_conntrack = not wait_for_conntrack(slot_netns, False)
-        log(
-            f"released {slot_netns}: stale_conntrack_after_release={stale_conntrack}"
-        )
+        if conntrack_has_established_tuple(slot_netns):
+            raise RuntimeError(
+                f"conntrack seed tuple remained in {slot_netns} after sandbox A deletion: "
+                f"target={target_ip}:{target_port} source_port={source_port}"
+            )
+        log(f"released {slot_netns}: conntrack seed cleared")
 
         replacement = ConchSandbox.create(
             template_id=os.environ["CONCH_TEMPLATE_ID"],
@@ -455,22 +477,14 @@ finally:
             f"http://{replacement.ip}:49983",
             replacement.ip,
         )
-        if stale_conntrack and not conntrack_has_tuple(slot_netns):
-            raise RuntimeError(
-                "stale conntrack seed expired before sandbox B probe; "
-                "regression coverage lost"
-            )
+        wait_e2b_commands(replacement_e2b, replacement.ip)
         bypassed, result = guest_udp(replacement_e2b, b"sandbox-b")
         if bypassed:
             raise RuntimeError(
-                "network slot reuse let sandbox B bypass denyOut with sandbox A's tuple: "
-                f"stale_after_release={stale_conntrack}, deny_out_bypassed={bypassed}, "
+                "network slot reuse let sandbox B bypass denyOut: "
                 f"stdout={result.stdout!r}, stderr={result.stderr!r}"
             )
-        log(
-            "replacement sandbox denyOut blocked the reused UDP tuple: "
-            f"stale_after_release={stale_conntrack}"
-        )
+        log("replacement sandbox denyOut blocked the reused UDP tuple")
     finally:
         stop_server.set()
         server.close()
