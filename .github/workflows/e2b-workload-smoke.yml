@@ -41,7 +41,6 @@ env:
   CONCH_E2B_DNS_NAMESERVER: "223.5.5.5"
   CONCH_E2B_NETWORK_TEST_URL: https://example.com/
   CONCH_E2B_SDK_HTTP_TIMEOUT: "300"
-  CONCH_CNI_REFILL_PLUGIN: conch-e2b-refill-control
   CONCH_NETWORK_TEST_ALLOW_IP: 198.18.0.1
   CONCH_NETWORK_TEST_DENY_IP: 198.18.0.2
   GOPROXY: https://goproxy.cn
@@ -201,6 +200,7 @@ jobs:
           YAML
 
       - name: Validate E2B SDK and guest connectivity
+        id: sdk_validation
         if: ${{ github.event.inputs.run_sdk_smoke != 'false' }}
         timeout-minutes: 20
         working-directory: ${{ runner.temp }}/conch-e2b-sdk-source
@@ -229,8 +229,8 @@ jobs:
           sudo -n ip netns list
           sudo -n iptables -t nat -S
 
-      - name: Delete E2B sandbox
-        if: ${{ always() && github.event.inputs.run_sdk_smoke != 'false' }}
+      - name: Best-effort delete E2B sandbox after failure
+        if: ${{ always() && github.event.inputs.run_sdk_smoke != 'false' && steps.sdk_validation.outcome != 'success' }}
         env:
           CONCH_SDK_PYTHON: ${{ steps.sdk.outputs.python }}
           CONCH_SANDBOX_ID: sandbox_e2b_sdk_${{ github.run_id }}_${{ github.run_attempt }}
@@ -248,7 +248,10 @@ jobs:
                   Sandbox.delete_sandbox(sandbox_id)
                   time.sleep(5)
               except Exception as exc:
-                  print(f"warning: sandbox cleanup failed: {exc}")
+                  if "Sandbox not found" in str(exc):
+                      print(f"sandbox already absent: {sandbox_id}")
+                  else:
+                      print(f"warning: sandbox cleanup failed for {sandbox_id}: {exc}")
           PY
           fi
           exit 0
@@ -272,7 +275,7 @@ jobs:
           exit 0
 
   network-policy:
-    name: Network Policy and Cross-Sandbox Conntrack
+    name: Network Policy
     if: ${{ github.event.inputs.run_sdk_smoke != 'false' }}
     needs: [resolve-conch, build-template, sdk-connectivity]
     runs-on: [self-hosted, Linux, ARM64, Huawei]
@@ -319,19 +322,22 @@ jobs:
           sudo -n env PATH="$admin_path" sh -c 'command -v nsenter >/dev/null'
           tools_dir="$RUNNER_TEMP/conch-e2b-network-policy-cni-tools-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           control_dir="$tools_dir/control"
+          real_bridge="$MANAGED_BINARY_DIR/cni/bridge"
+          [[ -f "$real_bridge" && -x "$real_bridge" ]]
           mkdir -p "$tools_dir/cni" "$control_dir"
           for plugin in "$MANAGED_BINARY_DIR/cni/"*; do
             [[ -f "$plugin" && -x "$plugin" ]] || continue
+            [[ "$(basename "$plugin")" != bridge ]] || continue
             ln -s "$plugin" "$tools_dir/cni/$(basename "$plugin")"
           done
           ln -s "$MANAGED_BINARY_DIR/cloud-hypervisor" "$tools_dir/cloud-hypervisor"
           install -m 0755 \
             scripts/workflows/e2b-workload-smoke/network-policy/cni-refill-control.py \
-            "$tools_dir/cni/$CONCH_CNI_REFILL_PLUGIN"
+            "$tools_dir/cni/bridge"
           {
             echo "binary-dir=$tools_dir"
             echo "control-dir=$control_dir"
-            echo "real-bridge=$MANAGED_BINARY_DIR/cni/bridge"
+            echo "real-bridge=$real_bridge"
           } >> "$GITHUB_OUTPUT"
 
       - name: Configure controlled CNI network
@@ -345,7 +351,6 @@ jobs:
             --config "$CNI_CONFIG" \
             --nameserver "$CONCH_E2B_DNS_NAMESERVER" \
             --control-dir "$CNI_CONTROL_DIR" \
-            --control-plugin "$CONCH_CNI_REFILL_PLUGIN" \
             --real-bridge "$CNI_REAL_BRIDGE"
 
       - name: Start isolated conchd

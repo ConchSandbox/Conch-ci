@@ -73,6 +73,8 @@ def run() -> int:
         return cni_error(f"invalid CNI configuration: {exc}", code=7)
     if not isinstance(config, dict):
         return cni_error("CNI configuration must be an object", code=7)
+    if config.get("type") != "bridge":
+        return cni_error("CNI configuration must use type bridge", code=7)
 
     control_dir = Path(str(config.get(CONTROL_DIR_FIELD, "")))
     real_bridge = Path(str(config.get(REAL_BRIDGE_FIELD, "")))
