@@ -270,6 +270,30 @@ print(f"inbound-listener-ready port={{listener_port}}")
     )
 
 
+def delete_sandbox_and_assert_absent(sandbox_id):
+    network = ConchSandbox.get(sandbox_id).network or {}
+    if network:
+        raise RuntimeError(
+            f"expected sandbox without a network policy: "
+            f"sandbox_id={sandbox_id} network={network!r}"
+        )
+
+    log(f"deleting sandbox without a network policy: sandbox_id={sandbox_id}")
+    if not ConchSandbox.delete_sandbox(sandbox_id):
+        raise RuntimeError(f"sandbox deletion returned false: {sandbox_id}")
+
+    try:
+        ConchSandbox.get(sandbox_id)
+    except RuntimeError as exc:
+        if "Sandbox not found" not in str(exc):
+            raise RuntimeError(
+                f"could not verify sandbox deletion: sandbox_id={sandbox_id}: {exc}"
+            ) from exc
+    else:
+        raise RuntimeError(f"deleted sandbox is still present: {sandbox_id}")
+    log(f"sandbox deletion verified: sandbox_id={sandbox_id}")
+
+
 def main():
     log(
         f"using e2b={version('e2b')} "
@@ -353,6 +377,7 @@ def main():
             f"code interpreter cannot read envd-written file: {shared_text!r}"
         )
 
+    delete_sandbox_and_assert_absent(conch_sandbox.sandbox_id)
     log("E2B SDK and guest connectivity smoke ok")
 
 

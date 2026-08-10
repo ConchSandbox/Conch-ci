@@ -3,6 +3,7 @@
 import argparse
 import ipaddress
 import json
+import os
 from pathlib import Path
 
 
@@ -13,7 +14,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--nameserver", required=True)
     parser.add_argument("--control-dir", required=True, type=Path)
-    parser.add_argument("--control-plugin", required=True)
     parser.add_argument("--real-bridge", required=True, type=Path)
     return parser.parse_args()
 
@@ -31,17 +31,18 @@ def configure(
     config_path: Path,
     nameserver: str,
     control_dir: Path,
-    control_plugin: str,
     real_bridge: Path,
 ) -> None:
     if not config_path.is_file():
         raise FileNotFoundError(f"CNI config does not exist: {config_path}")
     if not control_dir.is_absolute() or not control_dir.is_dir():
         raise ValueError(f"CNI control directory must be an absolute directory: {control_dir}")
-    if not real_bridge.is_absolute() or not real_bridge.is_file():
-        raise ValueError(f"real CNI bridge must be an absolute file: {real_bridge}")
-    if not control_plugin or "/" in control_plugin:
-        raise ValueError(f"invalid CNI control plugin name: {control_plugin!r}")
+    if (
+        not real_bridge.is_absolute()
+        or not real_bridge.is_file()
+        or not os.access(real_bridge, os.X_OK)
+    ):
+        raise ValueError(f"real CNI bridge must be an executable absolute file: {real_bridge}")
 
     try:
         config = json.loads(config_path.read_text(encoding="utf-8"))
@@ -49,13 +50,14 @@ def configure(
         raise ValueError(f"invalid CNI JSON in {config_path}: {exc}") from exc
     if not isinstance(config, dict):
         raise ValueError(f"CNI config must contain a JSON object: {config_path}")
+    if config.get("type") != "bridge":
+        raise ValueError(f"CNI config must describe a bridge network: {config_path}")
 
     dns = config.get("dns", {})
     if not isinstance(dns, dict):
         raise ValueError(f"CNI dns field must contain a JSON object: {config_path}")
     dns["nameservers"] = [normalized_nameserver(nameserver)]
     config["dns"] = dns
-    config["type"] = control_plugin
     config["conchCIControlDir"] = str(control_dir)
     config["conchCIRealBridge"] = str(real_bridge)
 
@@ -71,7 +73,6 @@ def main() -> None:
         args.config,
         args.nameserver,
         args.control_dir,
-        args.control_plugin,
         args.real_bridge,
     )
 
