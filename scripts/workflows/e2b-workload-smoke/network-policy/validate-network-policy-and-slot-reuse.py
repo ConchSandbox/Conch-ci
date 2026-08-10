@@ -237,7 +237,7 @@ def validate_cross_sandbox_conntrack_isolation(sandbox):
     target_ip = os.environ["CONCH_NETWORK_TEST_ALLOW_IP"]
     stop_server = threading.Event()
     server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    server.bind(("0.0.0.0", 0))
+    server.bind((target_ip, 0))
     server.settimeout(1)
     target_port = server.getsockname()[1]
 
@@ -265,9 +265,10 @@ import socket
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.bind(("0.0.0.0", {source_port}))
 sock.settimeout(3)
-sock.sendto({marker!r}, ({target_ip!r}, {target_port}))
+sock.connect(({target_ip!r}, {target_port}))
+sock.send({marker!r})
 try:
-    response, _ = sock.recvfrom(4096)
+    response = sock.recv(4096)
 except (socket.timeout, OSError):
     print("conntrack-udp-blocked")
 else:
@@ -344,7 +345,10 @@ finally:
             rf"\budp\b.*\bdst={re.escape(target_ip)} "
             rf"sport={source_port} dport={target_port}\b"
         )
-        return any(pattern.search(line) for line in entries.splitlines())
+        return any(
+            pattern.search(line) and "[ASSURED]" in line
+            for line in entries.splitlines()
+        )
 
     def wait_for_conntrack(netns_path, expected, timeout=5):
         deadline = time.monotonic() + timeout
@@ -423,6 +427,11 @@ finally:
             f"http://{replacement.ip}:49983",
             replacement.ip,
         )
+        if stale_conntrack and not conntrack_has_tuple(slot_netns):
+            raise RuntimeError(
+                "stale conntrack seed expired before sandbox B probe; "
+                "regression coverage lost"
+            )
         bypassed, result = guest_udp(replacement_e2b, b"sandbox-b")
         if bypassed:
             raise RuntimeError(

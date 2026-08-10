@@ -398,11 +398,20 @@ jobs:
           CONCH_CNI_CONTROL_DIR: ${{ steps.cni-tools.outputs.control-dir }}
         run: |
           set -euo pipefail
-          sudo -n ip address replace "$CONCH_NETWORK_TEST_ALLOW_IP/32" dev lo
-          sudo -n ip address replace "$CONCH_NETWORK_TEST_DENY_IP/32" dev lo
+          loopback_state="$RUNNER_TEMP/conch-e2b-network-policy-loopback-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.txt"
+          install -m 0600 /dev/null "$loopback_state"
+          for address in "$CONCH_NETWORK_TEST_ALLOW_IP" "$CONCH_NETWORK_TEST_DENY_IP"; do
+            if sudo -n ip -o -4 address show dev lo | \
+              awk -v cidr="$address/32" '$4 == cidr { found = 1 } END { exit !found }'; then
+              echo "preserving pre-existing loopback address: $address/32"
+            else
+              sudo -n ip address add "$address/32" dev lo
+              printf '%s\n' "$address" >> "$loopback_state"
+            fi
+          done
           timeout --foreground --kill-after=30s 20m \
             "$CONCH_SDK_PYTHON" -u \
-              "$GITHUB_WORKSPACE/scripts/workflows/e2b-workload-smoke/network-policy/regression.py"
+              "$GITHUB_WORKSPACE/scripts/workflows/e2b-workload-smoke/network-policy/validate-network-policy-and-slot-reuse.py"
 
       - name: Dump conchd and network diagnostics on failure
         if: failure()
@@ -418,6 +427,16 @@ jobs:
           sudo -n ip netns list
           sudo -n iptables -t nat -S
 
+      - name: Release blocked CNI refill
+        if: always()
+        env:
+          CNI_CONTROL_DIR: ${{ steps.cni-tools.outputs.control-dir }}
+        run: |
+          set +e
+          [[ -z "${CNI_CONTROL_DIR:-}" || ! -d "$CNI_CONTROL_DIR" ]] || \
+            touch "$CNI_CONTROL_DIR/release-refill"
+          exit 0
+
       - name: Delete network-policy sandboxes
         if: always()
         env:
@@ -428,34 +447,26 @@ jobs:
         run: |
           set +e
           if [[ -n "${CONCH_SDK_PYTHON:-}" && -x "$CONCH_SDK_PYTHON" && -n "${CONCH_SDK_CONFIG:-}" ]]; then
-            "$CONCH_SDK_PYTHON" - <<'PY'
-          import os
+            for sandbox_id in "$CONCH_SANDBOX_ID" "$CONCH_REUSE_SANDBOX_ID"; do
+              [[ -n "$sandbox_id" ]] || continue
+              timeout --foreground --kill-after=5s 60s \
+                "$CONCH_SDK_PYTHON" - "$sandbox_id" <<'PY'
+          import sys
           import time
           from conch import Sandbox
-          sandbox_ids = (
-              os.environ.get("CONCH_SANDBOX_ID", ""),
-              os.environ.get("CONCH_REUSE_SANDBOX_ID", ""),
-          )
-          for sandbox_id in sandbox_ids:
-              if not sandbox_id:
-                  continue
-              try:
-                  Sandbox.delete_sandbox(sandbox_id)
-                  time.sleep(5)
-              except Exception as exc:
-                  print(f"warning: sandbox cleanup failed: {exc}")
+          sandbox_id = sys.argv[1]
+          try:
+              Sandbox.delete_sandbox(sandbox_id)
+              time.sleep(5)
+          except Exception as exc:
+              print(f"warning: sandbox cleanup failed for {sandbox_id}: {exc}")
           PY
+              status=$?
+              if (( status != 0 )); then
+                echo "warning: sandbox cleanup timed out or failed for $sandbox_id (exit=$status)"
+              fi
+            done
           fi
-          exit 0
-
-      - name: Release blocked CNI refill
-        if: always()
-        env:
-          CNI_CONTROL_DIR: ${{ steps.cni-tools.outputs.control-dir }}
-        run: |
-          set +e
-          [[ -z "${CNI_CONTROL_DIR:-}" || ! -d "$CNI_CONTROL_DIR" ]] || \
-            touch "$CNI_CONTROL_DIR/release-refill"
           exit 0
 
       - name: Clean Conch runtime
@@ -468,10 +479,19 @@ jobs:
         if: always()
         run: |
           set +e
-          sudo -n ip address delete "$CONCH_NETWORK_TEST_ALLOW_IP/32" dev lo >/dev/null 2>&1 || true
-          sudo -n ip address delete "$CONCH_NETWORK_TEST_DENY_IP/32" dev lo >/dev/null 2>&1 || true
+          loopback_state="$RUNNER_TEMP/conch-e2b-network-policy-loopback-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.txt"
+          if [[ -f "$loopback_state" ]]; then
+            while IFS= read -r address; do
+              case "$address" in
+                "$CONCH_NETWORK_TEST_ALLOW_IP"|"$CONCH_NETWORK_TEST_DENY_IP")
+                  sudo -n ip address delete "$address/32" dev lo >/dev/null 2>&1 || true
+                  ;;
+              esac
+            done < "$loopback_state"
+          fi
           for path in \
             "$RUNNER_TEMP/conch-e2b-network-policy-cni-tools-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            "$loopback_state" \
             "$RUNNER_TEMP/conch-e2b-network-policy-source" \
             "$RUNNER_TEMP/conch-e2b-network-policy-sdk-venv" \
             "$RUNNER_TEMP/conch-e2b-network-policy-sdk-config-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.yaml"; do

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CNI bridge wrapper that can pause warm-pool refills after initial prefill."""
+"""CNI bridge wrapper that pauses warm-pool refills after a successful prefill."""
 
 from __future__ import annotations
 
@@ -24,20 +24,32 @@ def cni_error(message: str, code: int = 11) -> int:
     return 1
 
 
-def next_add_attempt(control_dir: Path) -> int:
-    lock_path = control_dir / "lock"
-    counter_path = control_dir / "add-count"
-    with lock_path.open("a+b") as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        try:
-            count = int(counter_path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            count = 0
-        count += 1
-        temporary = counter_path.with_name(f".{counter_path.name}.{os.getpid()}.tmp")
-        temporary.write_text(f"{count}\n", encoding="utf-8")
-        os.replace(temporary, counter_path)
-        return count
+def successful_add_count(control_dir: Path) -> int:
+    counter_path = control_dir / "successful-add-count"
+    try:
+        return int(counter_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return 0
+
+
+def record_successful_add(control_dir: Path, count: int) -> None:
+    counter_path = control_dir / "successful-add-count"
+    temporary = counter_path.with_name(f".{counter_path.name}.{os.getpid()}.tmp")
+    temporary.write_text(f"{count}\n", encoding="utf-8")
+    os.replace(temporary, counter_path)
+
+
+def delegate(
+    real_bridge: Path, config: dict[str, object]
+) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(
+        [str(real_bridge)],
+        input=json.dumps(config, separators=(",", ":")).encode(),
+        env=os.environ.copy(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
 
 
 def run() -> int:
@@ -69,24 +81,24 @@ def run() -> int:
     if not real_bridge.is_absolute() or not os.access(real_bridge, os.X_OK):
         return cni_error(f"invalid real CNI bridge plugin: {real_bridge}", code=7)
 
-    if command == "ADD" and next_add_attempt(control_dir) > 1:
-        release_path = control_dir / RELEASE_FILE
-        (control_dir / BLOCKED_FILE).touch()
-        while not release_path.exists():
-            time.sleep(0.02)
-
     delegated_config = dict(config)
     delegated_config.pop(CONTROL_DIR_FIELD, None)
     delegated_config.pop(REAL_BRIDGE_FIELD, None)
     delegated_config["type"] = "bridge"
-    completed = subprocess.run(
-        [str(real_bridge)],
-        input=json.dumps(delegated_config, separators=(",", ":")).encode(),
-        env=os.environ.copy(),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
+    if command == "ADD":
+        with (control_dir / "lock").open("a+b") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            count = successful_add_count(control_dir)
+            if count > 0:
+                release_path = control_dir / RELEASE_FILE
+                (control_dir / BLOCKED_FILE).touch()
+                while not release_path.exists():
+                    time.sleep(0.02)
+            completed = delegate(real_bridge, delegated_config)
+            if completed.returncode == 0:
+                record_successful_add(control_dir, count + 1)
+    else:
+        completed = delegate(real_bridge, delegated_config)
     sys.stdout.buffer.write(completed.stdout)
     sys.stderr.buffer.write(completed.stderr)
     return completed.returncode
