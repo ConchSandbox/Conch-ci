@@ -250,8 +250,13 @@ jobs:
           import os
           import time
           from conch import Sandbox
-          sandbox_id = os.environ.get("CONCH_SANDBOX_ID", "")
-          if sandbox_id:
+          base_sandbox_id = os.environ.get("CONCH_SANDBOX_ID", "")
+          sandbox_ids = [
+              base_sandbox_id,
+              f"{base_sandbox_id}_invalid_env",
+              f"{base_sandbox_id}_oversized_env",
+          ] if base_sandbox_id else []
+          for sandbox_id in sandbox_ids:
               try:
                   Sandbox.delete_sandbox(sandbox_id)
                   time.sleep(5)
