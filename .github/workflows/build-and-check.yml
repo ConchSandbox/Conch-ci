@@ -191,3 +191,9 @@ jobs:
           assert Sandbox
           assert generate_random_id().startswith("sandbox_")
           PY
+
+      - name: Run Python SDK create-payload unit tests
+        working-directory: conch-src
+        run: |
+          set -euo pipefail
+          python -m pytest sdk/tests/test_create.py -k build_create_payload

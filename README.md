@@ -9,8 +9,8 @@ into GitHub `ConchSandbox/Conch`.
 The main CI workflows resolve the requested Conch ref once to a full commit
 before any self-hosted job starts:
 
-- `build-and-check.yml`: build, static checks, Go tests, Go vet, and Python SDK
-  import checks.
+- `build-and-check.yml`: build, static checks, Go tests, Go vet, Python SDK
+  import checks, and create-payload unit tests.
 - `network-pool-integration.yml`: privileged network-pool integration tests on
   the ARM64 self-hosted runner.
 - `conch-init-smoke.yml`: boots `conch-init` as PID 1 in a real
@@ -169,9 +169,12 @@ full commit before downstream self-hosted jobs start.
 `e2b-workload-smoke.yml` is named `E2B SDK and Network Policy` in the GitHub
 Actions UI. It pulls the immutable Template published by its producer job and
 uses two explicitly named consumer jobs. `E2B SDK and Guest Connectivity` adds
-the fixed nameserver `223.5.5.5` to its job-local Conch CNI configuration, then
-accesses `https://example.com/` from the guest to validate DNS and Internet
-connectivity together. The guest also opens a TCP connection to
+the fixed nameserver `223.5.5.5` to its job-local Conch CNI configuration. It
+rejects malformed and oversized creation-time environments, then verifies a
+valid environment through the Conch command API, E2B commands, and the code
+interpreter without leaking per-command overrides. It accesses
+`https://example.com/` from the guest to validate DNS and Internet connectivity
+together. The guest also opens a TCP connection to
 `223.5.5.5:443` to validate the default route, bridge forwarding, and outbound
 NAT independently of DNS. Finally, the runner connects to a one-shot TCP
 listener inside the sandbox to validate runner-to-sandbox inbound connectivity.

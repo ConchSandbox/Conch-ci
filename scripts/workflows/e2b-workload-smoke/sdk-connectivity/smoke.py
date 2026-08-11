@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import socket
@@ -29,6 +30,7 @@ NETWORK_TEST_IP = "223.5.5.5"  # Alibaba Cloud Public DNS
 NETWORK_TEST_PORT = 443
 INBOUND_REQUEST = b"conch-e2b-inbound-ping\n"
 INBOUND_RESPONSE = b"conch-e2b-inbound-ok\n"
+ENV_RESULT_MARKER = "conch-e2e-sandbox-env="
 _request = requests.sessions.Session.request
 
 
@@ -118,6 +120,144 @@ def dump_guest_logs(e2b):
 
 def logs_stdout_text(result):
     return "\n".join(getattr(line, "text", line) for line in result.logs.stdout)
+
+
+def environment_from_command_output(output):
+    environment = {}
+    for line in output.splitlines():
+        key, separator, value = line.partition("=")
+        if separator:
+            environment[key] = value
+    return environment
+
+
+def assert_expected_environment(actual, expected, source):
+    missing = sorted(key for key in expected if key not in actual)
+    mismatched = {
+        key: {"actual": actual.get(key), "expected": value}
+        for key, value in expected.items()
+        if key in actual and actual[key] != value
+    }
+    if missing or mismatched:
+        raise RuntimeError(
+            f"sandbox environment mismatch through {source}: "
+            f"missing={missing!r} mismatched={mismatched!r}"
+        )
+    log(f"sandbox environment verified through {source}")
+
+
+def assert_sandbox_absent(sandbox_id):
+    try:
+        ConchSandbox.get(sandbox_id)
+    except RuntimeError as exc:
+        if "Sandbox not found" not in str(exc):
+            raise RuntimeError(
+                f"could not verify rejected sandbox absence: "
+                f"sandbox_id={sandbox_id}: {exc}"
+            ) from exc
+    else:
+        raise RuntimeError(f"rejected sandbox is still present: {sandbox_id}")
+
+
+def validate_environment_rejections(template_id, base_sandbox_id):
+    cases = (
+        (
+            "invalid environment key",
+            f"{base_sandbox_id}_invalid_env",
+            {"BAD=KEY": "value"},
+            ("invalid sandbox environment", "invalid environment key"),
+        ),
+        (
+            "oversized environment",
+            f"{base_sandbox_id}_oversized_env",
+            {"CONCH_E2E_OVERSIZED_ENV": "x" * (20 << 10)},
+            ("payload", "maximum"),
+        ),
+    )
+    for name, sandbox_id, environment, expected_errors in cases:
+        log(f"validating rejection of {name}: sandbox_id={sandbox_id}")
+        try:
+            unexpected = ConchSandbox.create(
+                template_id=template_id,
+                sandbox_id=sandbox_id,
+                vcpu_num=2,
+                vcpu_max=2,
+                ram_mb=2048,
+                env=environment,
+            )
+        except RuntimeError as exc:
+            message = str(exc)
+            if not all(fragment in message for fragment in expected_errors):
+                raise RuntimeError(
+                    f"{name} returned unexpected error: {message}"
+                ) from exc
+        else:
+            try:
+                unexpected.delete()
+            except Exception as exc:
+                log(f"warning: unexpected sandbox cleanup failed: {exc}")
+            raise RuntimeError(f"{name} unexpectedly created sandbox {sandbox_id}")
+        assert_sandbox_absent(sandbox_id)
+        log(f"rejection verified for {name}: sandbox_id={sandbox_id}")
+
+
+def validate_sandbox_environment(conch_sandbox, e2b, expected):
+    direct = conch_sandbox.commands.run(cmd="env")
+    assert_expected_environment(
+        environment_from_command_output(direct.stdout),
+        expected,
+        "Conch command API",
+    )
+
+    override_key = "CONCH_E2E_SANDBOX_ENV"
+    override_value = "command-override"
+    overridden = conch_sandbox.commands.run(
+        cmd="env",
+        env={override_key: override_value},
+    )
+    assert_expected_environment(
+        environment_from_command_output(overridden.stdout),
+        {override_key: override_value},
+        "Conch per-command override",
+    )
+    after_override = conch_sandbox.commands.run(cmd="env")
+    assert_expected_environment(
+        environment_from_command_output(after_override.stdout),
+        expected,
+        "Conch command API after override",
+    )
+
+    command = e2b.commands.run("env")
+    if command.exit_code != 0:
+        raise RuntimeError(
+            f"E2B environment command failed: exit={command.exit_code} "
+            f"stdout={command.stdout!r} stderr={command.stderr!r}"
+        )
+    assert_expected_environment(
+        environment_from_command_output(command.stdout),
+        expected,
+        "E2B command API",
+    )
+
+    keys = sorted(expected)
+    result = e2b.run_code(
+        "import json, os\n"
+        f"keys = {keys!r}\n"
+        f"print({ENV_RESULT_MARKER!r} + json.dumps("
+        "{key: os.environ[key] for key in keys}, sort_keys=True))",
+        language="python",
+    )
+    result_text = logs_stdout_text(result)
+    for line in result_text.splitlines():
+        if line.startswith(ENV_RESULT_MARKER):
+            actual = json.loads(line.removeprefix(ENV_RESULT_MARKER))
+            assert_expected_environment(actual, expected, "code interpreter")
+            break
+    else:
+        raise RuntimeError(
+            "code interpreter environment probe produced no result: "
+            f"stdout={result_text!r} error={getattr(result, 'error', None)!r}"
+        )
 
 
 def validate_guest_url_access(e2b):
@@ -299,13 +439,22 @@ def main():
         f"using e2b={version('e2b')} "
         f"e2b-code-interpreter={version('e2b-code-interpreter')}"
     )
-    log("creating Conch sandbox")
+    template_id = os.environ["CONCH_TEMPLATE_ID"]
+    sandbox_id = os.environ["CONCH_SANDBOX_ID"]
+    validate_environment_rejections(template_id, sandbox_id)
+
+    expected_environment = {
+        "CONCH_E2E_SANDBOX_ENV": f"value for {sandbox_id} with spaces=preserved",
+        "CONCH_E2E_EMPTY_ENV": "",
+    }
+    log("creating Conch sandbox with its initial environment")
     conch_sandbox = ConchSandbox.create(
-        template_id=os.environ["CONCH_TEMPLATE_ID"],
-        sandbox_id=os.environ["CONCH_SANDBOX_ID"],
+        template_id=template_id,
+        sandbox_id=sandbox_id,
         vcpu_num=2,
         vcpu_max=2,
         ram_mb=2048,
+        env=expected_environment,
     )
     log(
         "created Conch sandbox: "
@@ -327,6 +476,7 @@ def main():
         dump_guest_logs(e2b)
         raise
 
+    validate_sandbox_environment(conch_sandbox, e2b, expected_environment)
     validate_guest_url_access(e2b)
     validate_guest_outbound_network(e2b)
     validate_guest_inbound_network(e2b, sandbox_ip)
