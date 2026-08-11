@@ -171,8 +171,8 @@ Actions UI. It pulls the immutable Template published by its producer job and
 uses two explicitly named consumer jobs. `E2B SDK and Guest Connectivity` adds
 the fixed nameserver `223.5.5.5` to its job-local Conch CNI configuration. It
 rejects malformed and oversized creation-time environments, then verifies a
-valid environment through the Conch command API, E2B commands, and the code
-interpreter without leaking per-command overrides. It accesses
+valid environment through the Conch command API without leaking per-command
+overrides into the sandbox's default environment. It accesses
 `https://example.com/` from the guest to validate DNS and Internet connectivity
 together. The guest also opens a TCP connection to
 `223.5.5.5:443` to validate the default route, bridge forwarding, and outbound

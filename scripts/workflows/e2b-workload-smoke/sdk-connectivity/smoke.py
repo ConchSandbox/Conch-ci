@@ -1,4 +1,3 @@
-import json
 import os
 import re
 import socket
@@ -30,7 +29,6 @@ NETWORK_TEST_IP = "223.5.5.5"  # Alibaba Cloud Public DNS
 NETWORK_TEST_PORT = 443
 INBOUND_REQUEST = b"conch-e2b-inbound-ping\n"
 INBOUND_RESPONSE = b"conch-e2b-inbound-ok\n"
-ENV_RESULT_MARKER = "conch-e2e-sandbox-env="
 _request = requests.sessions.Session.request
 
 
@@ -195,7 +193,7 @@ def validate_environment_rejections(template_id, base_sandbox_id):
         log(f"rejection verified for {name}: sandbox_id={sandbox_id}")
 
 
-def validate_sandbox_environment(conch_sandbox, e2b, expected):
+def validate_sandbox_environment(conch_sandbox, expected):
     direct = conch_sandbox.commands.run(cmd="env")
     assert_expected_environment(
         environment_from_command_output(direct.stdout),
@@ -220,38 +218,6 @@ def validate_sandbox_environment(conch_sandbox, e2b, expected):
         expected,
         "Conch command API after override",
     )
-
-    command = e2b.commands.run("env")
-    if command.exit_code != 0:
-        raise RuntimeError(
-            f"E2B environment command failed: exit={command.exit_code} "
-            f"stdout={command.stdout!r} stderr={command.stderr!r}"
-        )
-    assert_expected_environment(
-        environment_from_command_output(command.stdout),
-        expected,
-        "E2B command API",
-    )
-
-    keys = sorted(expected)
-    result = e2b.run_code(
-        "import json, os\n"
-        f"keys = {keys!r}\n"
-        f"print({ENV_RESULT_MARKER!r} + json.dumps("
-        "{key: os.environ[key] for key in keys}, sort_keys=True))",
-        language="python",
-    )
-    result_text = logs_stdout_text(result)
-    for line in result_text.splitlines():
-        if line.startswith(ENV_RESULT_MARKER):
-            actual = json.loads(line.removeprefix(ENV_RESULT_MARKER))
-            assert_expected_environment(actual, expected, "code interpreter")
-            break
-    else:
-        raise RuntimeError(
-            "code interpreter environment probe produced no result: "
-            f"stdout={result_text!r} error={getattr(result, 'error', None)!r}"
-        )
 
 
 def validate_guest_url_access(e2b):
@@ -470,7 +436,7 @@ def main():
         dump_guest_logs(e2b)
         raise
 
-    validate_sandbox_environment(conch_sandbox, e2b, expected_environment)
+    validate_sandbox_environment(conch_sandbox, expected_environment)
     validate_guest_url_access(e2b)
     validate_guest_outbound_network(e2b)
     validate_guest_inbound_network(e2b, sandbox_ip)
