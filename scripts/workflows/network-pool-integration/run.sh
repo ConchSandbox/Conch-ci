@@ -29,6 +29,10 @@ for path in "$conchd" "$cni_bin_dir" "$control_plugin" "$work_dir"; do
 done
 [[ -x "$conchd" ]]
 [[ -x "$control_plugin" ]]
+[[ "${control_plugin##*/}" == bridge ]] || {
+  echo "control plugin must be installed as bridge: $control_plugin" >&2
+  exit 2
+}
 for plugin in bridge host-local loopback; do
   [[ -x "$cni_bin_dir/$plugin" ]]
 done
@@ -48,9 +52,14 @@ mkdir -p "$results_dir" "$scenarios_dir"
 # The EXIT trap uses this state to stop only the daemon and mounts created by
 # the currently active scenario runner.
 run_conch_mounted=false
-cni_state_mounted=false
 active_pid=
 active_name=
+
+clear_conch_cni_state() {
+  if [[ -e /var/lib/conch/cni || -L /var/lib/conch/cni ]]; then
+    find /var/lib/conch/cni -depth -delete
+  fi
+}
 
 process_is_running() {
   [[ -n "$1" ]] && kill -0 "$1" 2>/dev/null
@@ -88,20 +97,24 @@ cleanup() {
   fi
   terminate_active_process
   chmod -R a+rX "$results_dir" 2>/dev/null
-  [[ "$cni_state_mounted" != true ]] || umount -R -l /var/lib/cni
+  clear_conch_cni_state
+  cni_cleanup_status=$?
   [[ "$run_conch_mounted" != true ]] || umount -R -l /run/conch
+  if ((status == 0 && cni_cleanup_status != 0)); then
+    status=$cni_cleanup_status
+  fi
   exit "$status"
 }
 trap cleanup EXIT
 
 # The workflow starts this script in private mount, network, and PID namespaces.
-# Make propagation private before hiding host CNI state behind job-local tmpfs.
+# Keep namespace handles job-local. libcni and host-local state use Conch's
+# system directory and are cleared before and after this serial runner test.
 mount --make-rprivate /
-mkdir -p /run/conch /var/lib/cni
+clear_conch_cni_state
+mkdir -p /run/conch
 mount -t tmpfs -o mode=0700,nosuid,nodev tmpfs /run/conch
 run_conch_mounted=true
-mount -t tmpfs -o mode=0700,nosuid,nodev tmpfs /var/lib/cni
-cni_state_mounted=true
 ip link set lo up
 
 prepare_scenario() {
@@ -129,12 +142,13 @@ prepare_scenario() {
 {
   "cniVersion": "1.0.0",
   "name": "conch-ci-$name",
-  "type": "conch-ci-control",
+  "type": "bridge",
   "bridge": "$bridge",
   "isGateway": true,
   "ipMasq": true,
   "ipam": {
     "type": "host-local",
+    "dataDir": "/var/lib/conch/cni/networks",
     "subnet": "$subnet",
     "routes": [{"dst": "0.0.0.0/0"}]
   },

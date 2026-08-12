@@ -39,13 +39,14 @@ runs:
         sudo -n python3 "$GITHUB_ACTION_PATH/cleanup.py" --work-dir "$workdir"
         workdir_cleanup_status=$?
 
-        # Runner-hygiene fallback: remove standard named-netns entries and
-        # host-local CNI state when the tested conchd or CNI teardown did not.
+        # Runner-hygiene fallback: remove standard named-netns entries plus
+        # host-local and libcni state when conchd or CNI teardown did not.
         for namespace in $(sudo -n ip netns list | awk '/^(ns|slot)-[0-9]+([[:space:]]|$)/ {print $1}'); do
           sudo -n ip netns delete "$namespace" || true
         done
         sudo -n find /var/lib/cni/networks/conch-bridge -mindepth 1 -delete 2>/dev/null || true
         sudo -n find /var/lib/cni/results/conch-bridge -mindepth 1 -delete 2>/dev/null || true
+        sudo -n find /var/lib/conch/cni -depth -delete 2>/dev/null || true
         for bridge in cni-conch0 conch_bridge; do
           sudo -n ip link delete "$bridge" >/dev/null 2>&1 || true
         done

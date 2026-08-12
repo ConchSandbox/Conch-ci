@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 
 
 NETWORK_NAMESPACE_DIR = Path("/run/conch/netns")
-CNI_NETWORK_STATE_DIR = Path("/var/lib/cni/networks")
+DEFAULT_CNI_NETWORK_STATE_DIR = Path("/var/lib/cni/networks")
 BOOT_NAMESPACE = "conch"
 MOUNT_ESCAPE_RE = re.compile(r"\\([0-7]{3})")
 SOCKET_NAME_RE = re.compile(r"^[0-9a-f]{16}\.sock(?:\.serial)?$")
@@ -192,18 +192,31 @@ def network_namespaces() -> list[dict[str, Any]]:
     ]
 
 
-def cni_network_name(work_dir: Path) -> str:
+def cni_network_state(work_dir: Path) -> tuple[str, Path]:
     config_dir = work_dir / "cni" / "net.d"
     for path in sorted(config_dir.glob("*.conf")):
         document = json.loads(path.read_text(encoding="utf-8"))
         name = document.get("name")
         if isinstance(name, str) and name:
-            return name
+            ipam = document.get("ipam")
+            if ipam is not None and not isinstance(ipam, dict):
+                raise RuntimeError(f"CNI config has invalid ipam object: {path}")
+            raw_data_dir = ipam.get("dataDir") if isinstance(ipam, dict) else None
+            if raw_data_dir is None or raw_data_dir == "":
+                state_dir = DEFAULT_CNI_NETWORK_STATE_DIR
+            elif isinstance(raw_data_dir, str):
+                state_dir = require_absolute_safe_path(
+                    Path(raw_data_dir),
+                    "CNI network state directory",
+                )
+            else:
+                raise RuntimeError(f"CNI config has invalid ipam.dataDir: {path}")
+            return name, state_dir
     raise RuntimeError(f"no named CNI config found below {config_dir}")
 
 
-def cni_allocations(network_name: str) -> list[str]:
-    state_dir = CNI_NETWORK_STATE_DIR / network_name
+def cni_allocations(state_root: Path, network_name: str) -> list[str]:
+    state_dir = state_root / network_name
     if not state_dir.exists():
         return []
     allocations: list[str] = []
@@ -349,10 +362,10 @@ def prepare(args: argparse.Namespace) -> None:
         lambda: len(network_namespaces()) >= 2,
         timeout=120,
     )
-    network_name = cni_network_name(work_dir)
+    network_name, cni_state_dir = cni_network_state(work_dir)
     wait_for(
         "two CNI allocations for the sandbox and warm slot",
-        lambda: len(cni_allocations(network_name)) >= 2,
+        lambda: len(cni_allocations(cni_state_dir, network_name)) >= 2,
         timeout=120,
     )
     wait_for(
@@ -395,8 +408,12 @@ def prepare(args: argparse.Namespace) -> None:
         "api_url": args.api_url,
         "boot_dir": str(boot_dir),
         "boot_mounts": boot_mounts,
-        "cni_allocations_before_crash": cni_allocations(network_name),
+        "cni_allocations_before_crash": cni_allocations(
+            cni_state_dir,
+            network_name,
+        ),
         "cni_network_name": network_name,
+        "cni_network_state_dir": str(cni_state_dir),
         "config_path": str(config_path),
         "config_sha256": sha256_file(config_path),
         "fixture_root": str(fixture_root),
@@ -534,6 +551,10 @@ def verify(args: argparse.Namespace) -> None:
     # Namespace inode numbers can be reused after teardown. Verify recovery by
     # requiring the restarted warm pool and its CNI state to converge instead.
     network_name = manifest["cni_network_name"]
+    cni_state_dir = require_absolute_safe_path(
+        Path(manifest["cni_network_state_dir"]),
+        "CNI network state directory",
+    )
     wait_for(
         "warm network pool convergence",
         lambda: len(network_namespaces()) == 1,
@@ -541,7 +562,7 @@ def verify(args: argparse.Namespace) -> None:
     )
     wait_for(
         "warm CNI allocation convergence",
-        lambda: len(cni_allocations(network_name)) == 1,
+        lambda: len(cni_allocations(cni_state_dir, network_name)) == 1,
         timeout=120,
     )
     replacement = create_sandbox(manifest["template_id"], sandbox_id)
@@ -563,14 +584,15 @@ def verify(args: argparse.Namespace) -> None:
     )
     wait_for(
         "warm pool stabilization after replacement deletion",
-        lambda: len(network_namespaces()) == 1 and len(cni_allocations(network_name)) == 1,
+        lambda: len(network_namespaces()) == 1
+        and len(cni_allocations(cni_state_dir, network_name)) == 1,
         timeout=120,
     )
 
     manifest["verified"] = True
     manifest["verified_at_unix"] = int(time.time())
     manifest["network_namespaces_after"] = network_namespaces()
-    manifest["cni_allocations_after"] = cni_allocations(network_name)
+    manifest["cni_allocations_after"] = cni_allocations(cni_state_dir, network_name)
     write_json(args.manifest, manifest)
     log("crash release and same-ID reuse verified")
 

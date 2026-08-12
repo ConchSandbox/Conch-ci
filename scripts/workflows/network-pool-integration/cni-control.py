@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Controllable CNI wrapper used by Conch network integration tests."""
+"""Controllable bridge wrapper used by Conch network integration tests."""
 
 from __future__ import annotations
 
