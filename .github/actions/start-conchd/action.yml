@@ -121,7 +121,6 @@ runs:
             plugin_bin_dirs:
               - "$BINARY_DIR/cni"
             plugin_conf_dir: "$workdir/cni/net.d"
-            if_name: eth0
         containerd:
           root_dir: "$workdir/containerd-root"
           state_dir: "$workdir/containerd-state"
