@@ -117,6 +117,22 @@ mount -t tmpfs -o mode=0700,nosuid,nodev tmpfs /run/conch
 run_conch_mounted=true
 ip link set lo up
 
+# Conch configures explicit FORWARD rules between its CNI bridge and the
+# host's default egress interface. Provide that host prerequisite inside this
+# otherwise empty private network namespace; no real outbound traffic is used.
+egress_interface=conch-egress0
+egress_address=192.0.2.2/24
+egress_gateway=192.0.2.1
+ip link add "$egress_interface" type dummy
+ip address add "$egress_address" dev "$egress_interface"
+ip link set "$egress_interface" up
+ip route add default via "$egress_gateway" dev "$egress_interface"
+read -r route_type route_via route_gateway route_dev route_interface _ \
+  < <(ip -4 route show default)
+[[ "$route_type" == default && "$route_via" == via && \
+  "$route_gateway" == "$egress_gateway" && "$route_dev" == dev && \
+  "$route_interface" == "$egress_interface" ]]
+
 prepare_scenario() {
   local name=$1
   local warm_pool_size=$2
