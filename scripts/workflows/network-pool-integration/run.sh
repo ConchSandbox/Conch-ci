@@ -161,7 +161,6 @@ network:
       - "$(dirname "$control_plugin")"
       - "$cni_bin_dir"
     plugin_conf_dir: "$conf_dir"
-    if_name: eth0
 containerd:
   root_dir: "$runtime_dir/containerd-root"
   state_dir: "$runtime_dir/containerd-state"
