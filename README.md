@@ -69,12 +69,13 @@ repository. Workflow-only dependencies live with their owning workflow under
 The network-pool integration workflow builds and exercises `conchd` as a black
 box without adding Go tests or build tags to Conch. A workflow-local script
 runs isolated initial-prefill, continuous-refill, retry, cancellation, and
-concurrent-close scenarios. It mounts job-local tmpfs instances over
-`/run/conch` and `/var/lib/cni` inside a private mount and network namespace. A
-workflow-local CNI wrapper injects deterministic ADD failures and blocking
-operations while delegating successful operations to the locked bridge plugin.
-The runner must provide `mount`, `umount`, and `unshare` in addition to the
-existing sudo, `ip`, and `iptables` prerequisites.
+concurrent-close scenarios. It mounts a job-local tmpfs instance over
+`/run/conch` inside a private mount and network namespace. The serial test uses
+Conch's system CNI state directory at `/var/lib/conch/cni` and clears it before
+and after the scenarios. A workflow-local bridge wrapper injects deterministic
+ADD failures and blocking operations while delegating successful operations to
+the locked bridge plugin. The runner must provide `mount`, `umount`, and
+`unshare` in addition to the existing sudo, `ip`, and `iptables` prerequisites.
 
 The `Conchd Crash Release` workflow uses a real E2B sandbox to leave VMM,
 socket, boot-layout, network-namespace, CNI, and persistent sandbox state

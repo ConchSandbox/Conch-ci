@@ -144,11 +144,16 @@ def assert_expected_environment(actual, expected, source):
     log(f"sandbox environment verified through {source}")
 
 
+def is_sandbox_not_found_error(exc):
+    error_code, separator, _ = str(exc).partition(":")
+    return separator == ":" and error_code.strip() == "sandbox.not_found"
+
+
 def assert_sandbox_absent(sandbox_id):
     try:
         ConchSandbox.get(sandbox_id)
     except RuntimeError as exc:
-        if "Sandbox not found" not in str(exc):
+        if not is_sandbox_not_found_error(exc):
             raise RuntimeError(
                 f"could not verify rejected sandbox absence: "
                 f"sandbox_id={sandbox_id}: {exc}"
@@ -385,7 +390,7 @@ def delete_sandbox_and_assert_absent(sandbox_id):
     try:
         ConchSandbox.get(sandbox_id)
     except RuntimeError as exc:
-        if "Sandbox not found" not in str(exc):
+        if not is_sandbox_not_found_error(exc):
             raise RuntimeError(
                 f"could not verify sandbox deletion: sandbox_id={sandbox_id}: {exc}"
             ) from exc

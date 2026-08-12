@@ -103,12 +103,14 @@ jobs:
           echo "work-dir=$work_dir" >> "$GITHUB_OUTPUT"
           [[ ! -e "$work_dir" ]] || sudo -n find "$work_dir" -depth -delete
           mkdir -p "$work_dir/bin" "$work_dir/results"
+          # libcni resolves the executable from the configured plugin type.
+          # Shadow bridge job-locally, then delegate successful calls below.
           install -m 0755 \
             scripts/workflows/network-pool-integration/cni-control.py \
-            "$work_dir/bin/conch-ci-control"
+            "$work_dir/bin/bridge"
           {
             echo "conchd=$CONCHD"
-            echo "control-plugin=$work_dir/bin/conch-ci-control"
+            echo "control-plugin=$work_dir/bin/bridge"
           } >> "$GITHUB_OUTPUT"
 
       - name: Run isolated network integration tests
