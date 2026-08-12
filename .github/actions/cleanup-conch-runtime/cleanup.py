@@ -38,8 +38,13 @@ def process_start_time(pid: int) -> int | None:
 
 def runtime_processes(workdir: Path) -> dict[int, int]:
     """Find only Conch VMM and virtiofs processes tied to this job runtime."""
-    workdir_bytes = os.fsencode(workdir)
-    workdir_prefix = workdir_bytes + os.fsencode(os.sep)
+    workdir_variants = {
+        os.fsencode(workdir),
+        os.fsencode(workdir.resolve()),
+    }
+    workdir_prefixes = {
+        variant + os.fsencode(os.sep) for variant in workdir_variants
+    }
     processes: dict[int, int] = {}
     for entry in Path("/proc").iterdir():
         if not entry.name.isdigit():
@@ -51,7 +56,8 @@ def runtime_processes(workdir: Path) -> dict[int, int]:
             continue
         arguments = cmdline.split(b"\0")
         if not any(
-            argument == workdir_bytes or workdir_prefix in argument
+            argument in workdir_variants
+            or any(prefix in argument for prefix in workdir_prefixes)
             for argument in arguments
         ):
             continue
@@ -102,7 +108,7 @@ def decode_mount_path(value: str) -> str:
 
 def workdir_mount_targets(workdir: Path) -> set[str]:
     """Return mounts at or below workdir without relying on path traversal."""
-    workdir_text = str(workdir)
+    workdir_text = str(workdir.resolve())
     mountinfo = Path("/proc/self/mountinfo").read_text(encoding="utf-8")
     targets: set[str] = set()
     for line in mountinfo.splitlines():
@@ -167,7 +173,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     workdir = args.work_dir
-    if not workdir.is_absolute() or workdir == Path("/"):
+    if not workdir.is_absolute() or workdir.resolve() == Path("/"):
         raise SystemExit(f"work directory must be an absolute non-root path: {workdir}")
     try:
         cleanup(workdir)
