@@ -19,20 +19,29 @@ runs:
         workdir="$RUNNER_TEMP/$RUNTIME_NAME-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 
         set +e
+        # start-conchd records both the sudo launcher and the conchd service PID.
+        # Stop either one that remains before looking for detached child resources.
         for pid_file in "$workdir/conchd.pid" "$workdir/conchd-service.pid"; do
           if [[ -f "$pid_file" ]]; then
             pid=$(<"$pid_file")
             [[ "$pid" =~ ^[0-9]+$ ]] || continue
             sudo -n kill "$pid" >/dev/null 2>&1 || true
             for _ in $(seq 1 30); do
-              kill -0 "$pid" 2>/dev/null || break
+              sudo -n kill -0 "$pid" 2>/dev/null || break
               sleep 1
             done
-            kill -0 "$pid" 2>/dev/null && sudo -n kill -9 "$pid" >/dev/null 2>&1 || true
+            sudo -n kill -0 "$pid" 2>/dev/null && sudo -n kill -9 "$pid" >/dev/null 2>&1 || true
           fi
         done
 
-        for namespace in $(sudo -n ip netns list | awk '/^ns-[0-9]+([[:space:]]|$)/ {print $1}'); do
+        # Release VMM/virtiofs processes, mounts, and namespace handles. The
+        # helper fails closed when a workdir mount cannot be detached.
+        sudo -n python3 "$GITHUB_ACTION_PATH/cleanup.py" --work-dir "$workdir"
+        workdir_cleanup_safe=$?
+
+        # Runner-hygiene fallback: remove standard named-netns entries and
+        # host-local CNI state when the tested conchd or CNI teardown did not.
+        for namespace in $(sudo -n ip netns list | awk '/^(ns|slot)-[0-9]+([[:space:]]|$)/ {print $1}'); do
           sudo -n ip netns delete "$namespace" || true
         done
         sudo -n find /var/lib/cni/networks/conch-bridge -mindepth 1 -delete 2>/dev/null || true
@@ -41,5 +50,11 @@ runs:
           sudo -n ip link delete "$bridge" >/dev/null 2>&1 || true
         done
 
-        [[ ! -e "$workdir" ]] || sudo -n find "$workdir" -depth -delete
-        exit 0
+        # Never recurse through the workdir until the helper has proved that no
+        # mount below it remains; otherwise find could cross into mounted data.
+        if (( workdir_cleanup_safe == 0 )); then
+          [[ ! -e "$workdir" ]] || sudo -n find "$workdir" -depth -delete
+        else
+          echo "Conch work directory cleanup failed safely; leaving $workdir for inspection" >&2
+        fi
+        exit "$workdir_cleanup_safe"
