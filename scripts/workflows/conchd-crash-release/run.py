@@ -36,9 +36,12 @@ def log(message: str) -> None:
 
 
 def require_absolute_safe_path(path: Path, label: str) -> Path:
-    if not path.is_absolute() or path == Path("/"):
+    if not path.is_absolute():
         raise RuntimeError(f"{label} must be an absolute non-root path: {path}")
-    return path
+    resolved = path.resolve()
+    if resolved == Path("/"):
+        raise RuntimeError(f"{label} must be an absolute non-root path: {path}")
+    return resolved
 
 
 def wait_for(

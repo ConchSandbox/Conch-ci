@@ -37,7 +37,7 @@ runs:
         # Release VMM/virtiofs processes, mounts, and namespace handles. The
         # helper fails closed when a workdir mount cannot be detached.
         sudo -n python3 "$GITHUB_ACTION_PATH/cleanup.py" --work-dir "$workdir"
-        workdir_cleanup_safe=$?
+        workdir_cleanup_status=$?
 
         # Runner-hygiene fallback: remove standard named-netns entries and
         # host-local CNI state when the tested conchd or CNI teardown did not.
@@ -52,9 +52,15 @@ runs:
 
         # Never recurse through the workdir until the helper has proved that no
         # mount below it remains; otherwise find could cross into mounted data.
-        if (( workdir_cleanup_safe == 0 )); then
-          [[ ! -e "$workdir" ]] || sudo -n find "$workdir" -depth -delete
+        if (( workdir_cleanup_status == 0 )); then
+          if [[ -e "$workdir" ]]; then
+            sudo -n find "$workdir" -depth -delete
+            workdir_cleanup_status=$?
+            if (( workdir_cleanup_status != 0 )); then
+              echo "Conch work directory deletion failed; leaving $workdir for inspection" >&2
+            fi
+          fi
         else
           echo "Conch work directory cleanup failed safely; leaving $workdir for inspection" >&2
         fi
-        exit "$workdir_cleanup_safe"
+        exit "$workdir_cleanup_status"
