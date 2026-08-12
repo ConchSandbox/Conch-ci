@@ -22,6 +22,14 @@ inputs:
     description: Conch API timeout passed to conchd
     required: false
     default: 90m
+  reuse-runtime:
+    description: Reuse the existing job-local config and state instead of preparing a new runtime
+    required: false
+    default: "false"
+  log-file:
+    description: Basename of the conchd log file written below the runtime directory
+    required: false
+    default: conchd.log
 
 outputs:
   work-dir:
@@ -46,6 +54,7 @@ runs:
         RUNTIME_NAME: ${{ inputs.runtime-name }}
         APP_NAME: ${{ inputs.app-name }}
         LOG_LEVEL: ${{ inputs.log-level }}
+        REUSE_RUNTIME: ${{ inputs.reuse-runtime }}
       run: |
         set -euo pipefail
         [[ "$CONCH_SOURCE" == /* && -x "$CONCH_SOURCE/bin/conchd" ]]
@@ -53,23 +62,46 @@ runs:
         [[ "$RUNTIME_NAME" =~ ^[a-z0-9][a-z0-9-]*$ ]]
         [[ "$APP_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]
         [[ "$LOG_LEVEL" =~ ^(debug|info|warn|error)$ ]]
+        [[ "$REUSE_RUNTIME" =~ ^(true|false)$ ]]
 
         workdir="$RUNNER_TEMP/$RUNTIME_NAME-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-        [[ ! -e "$workdir" ]] || sudo -n find "$workdir" -depth -delete
-        mkdir -p "$workdir/cni/net.d"
-        install -m 0644 "$CONCH_SOURCE/config/cni/net.d/"*.conf "$workdir/cni/net.d/"
+        config="$workdir/config.yaml"
+        api_url_file="$workdir/api-url"
+        if [[ "$REUSE_RUNTIME" == true ]]; then
+          require_runtime_file() {
+            local path=$1
+            local description=$2
+            if [[ ! -f "$path" || -L "$path" ]]; then
+              echo "cannot reuse conchd runtime: $description is missing or unsafe: $path" >&2
+              exit 1
+            fi
+          }
+          if [[ ! -d "$workdir" || -L "$workdir" ]]; then
+            echo "cannot reuse conchd runtime: work directory is missing or unsafe: $workdir" >&2
+            exit 1
+          fi
+          require_runtime_file "$config" "config"
+          require_runtime_file "$workdir/state.db" "state database"
+          require_runtime_file "$api_url_file" "saved API URL"
+          api_url=$(<"$api_url_file")
+          [[ "$api_url" =~ ^http://127\.0\.0\.1:[0-9]{1,5}$ ]]
+          port=${api_url##*:}
+          ((port >= 1 && port <= 65535))
+        else
+          [[ ! -e "$workdir" ]] || sudo -n find "$workdir" -depth -delete
+          mkdir -p "$workdir/cni/net.d"
+          install -m 0644 "$CONCH_SOURCE/config/cni/net.d/"*.conf "$workdir/cni/net.d/"
 
-        port=$(python3 - <<'PY'
+          port=$(python3 - <<'PY'
         import socket
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             print(sock.getsockname()[1])
         PY
-        )
-        config="$workdir/config.yaml"
-        api_url="http://127.0.0.1:$port"
+          )
+          api_url="http://127.0.0.1:$port"
 
-        cat > "$config" <<YAML
+          cat > "$config" <<YAML
         app:
           name: $APP_NAME
         log:
@@ -96,13 +128,19 @@ runs:
         vmm:
           cloud_hypervisor:
             binary: "$BINARY_DIR/cloud-hypervisor"
+        volume:
+          virtiofs:
+            runtime_dir: "$workdir/volumes"
         sandbox:
           vsock_signal_retry: 10ms
           vsock_signal_timeout: 90s
           request_timeout: 120s
           default_vmm_name: cloud-hypervisor
         YAML
-        chmod 0600 "$config"
+          chmod 0600 "$config"
+          install -m 0600 /dev/null "$api_url_file"
+          printf '%s\n' "$api_url" > "$api_url_file"
+        fi
 
         {
           echo "work-dir=$workdir"
@@ -118,10 +156,23 @@ runs:
         API_URL: ${{ steps.runtime.outputs.api-url }}
         CONFIG: ${{ steps.runtime.outputs.config }}
         WORK_DIR: ${{ steps.runtime.outputs.work-dir }}
+        LOG_FILE: ${{ inputs.log-file }}
       run: |
         set -euo pipefail
+        [[ "$LOG_FILE" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*\.log$ ]]
+        log_path="$WORK_DIR/$LOG_FILE"
+        for pid_file in "$WORK_DIR/conchd.pid" "$WORK_DIR/conchd-service.pid"; do
+          if [[ -f "$pid_file" ]]; then
+            old_pid=$(<"$pid_file")
+            if [[ "$old_pid" =~ ^[0-9]+$ ]] && sudo -n kill -0 "$old_pid" 2>/dev/null; then
+              echo "refusing to replace live process $old_pid from $pid_file" >&2
+              exit 1
+            fi
+          fi
+          [[ ! -e "$pid_file" && ! -L "$pid_file" ]] || sudo -n unlink -- "$pid_file"
+        done
         fail_startup() {
-          sed -n '1,400p' "$WORK_DIR/conchd.log" >&2 || true
+          sed -n '1,400p' "$log_path" >&2 || true
           for pid_file in "$WORK_DIR/conchd.pid" "$WORK_DIR/conchd-service.pid"; do
             if [[ -f "$pid_file" ]]; then
               sudo -n kill "$(<"$pid_file")" >/dev/null 2>&1 || true
@@ -132,7 +183,7 @@ runs:
 
         runtime_path="$PATH:/usr/local/sbin:/usr/sbin:/sbin"
         sudo -n sh -c 'exec env PATH="$1" HOME="$2" CONCH_API_TIMEOUT="$3" ./bin/conchd -config "$4" > "$5" 2>&1' \
-          sh "$runtime_path" "$HOME" "$API_TIMEOUT" "$CONFIG" "$WORK_DIR/conchd.log" &
+          sh "$runtime_path" "$HOME" "$API_TIMEOUT" "$CONFIG" "$log_path" &
         echo "$!" > "$WORK_DIR/conchd.pid"
 
         for _ in $(seq 1 120); do
@@ -141,7 +192,7 @@ runs:
             -d '{}' >/dev/null 2>&1; then
             exit 0
           fi
-          kill -0 "$(<"$WORK_DIR/conchd.pid")" 2>/dev/null || {
+          sudo -n kill -0 "$(<"$WORK_DIR/conchd.pid")" 2>/dev/null || {
             fail_startup
           }
           sleep 1

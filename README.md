@@ -13,6 +13,8 @@ before any self-hosted job starts:
   import checks, and create-payload unit tests.
 - `network-pool-integration.yml`: privileged network-pool integration tests on
   the ARM64 self-hosted runner.
+- `conchd-crash-release.yml`: kills `conchd` with a live sandbox, restarts it
+  from the same state, and verifies stale runtime resources are released.
 - `conch-init-smoke.yml`: boots `conch-init` as PID 1 in a real
   cloud-hypervisor VM, then verifies vsock readiness and SDK health.
 - `e2b-template-weekly.yml`: builds or reuses the kernel and rootfs, publishes a
@@ -74,18 +76,30 @@ operations while delegating successful operations to the locked bridge plugin.
 The runner must provide `mount`, `umount`, and `unshare` in addition to the
 existing sudo, `ip`, and `iptables` prerequisites.
 
+The `Conchd Crash Release` workflow uses a real E2B sandbox to leave VMM,
+socket, boot-layout, network-namespace, CNI, and persistent sandbox state
+behind after sending `SIGKILL` to `conchd`. It also creates a job-local
+virtiofs-shaped process and bind mount to exercise stale volume cleanup without
+adding an unpinned host `virtiofsd` dependency. A second `conchd` process starts
+with the exact same configuration, work directory, containerd state, and Bolt
+database. The workflow verifies the old resource identities are gone before it
+creates and deletes a replacement sandbox with the same ID. The rootfs and
+Template producers use the shared `e2b` image profile, so matching runs reuse
+the runner-local content-addressed images produced by the other E2B workflows.
+
 ## Kernel and Template producers
 
-`build-and-check.yml`, the Template producer, and the E2E consumer all build Conch
-commands through the same `build-conch` action. The action reads the exact Go
-version from the lock and lets `setup-go` select the runner architecture.
+`build-and-check.yml`, the Template producer, and the Template-consuming test
+workflows all build Conch commands through the same `build-conch` action. The
+action reads the exact Go version from the lock and lets `setup-go` select the
+runner architecture.
 
-The Conch Init smoke, Template E2E, and weekly Template workflows run
-`build-kernel` first. Its build ID contains exactly the locked kernel source
-commit, the selected Conch kernel config content digest, and the normalized
-platform. A valid Actions cache hit avoids compilation, but every run still
-publishes and validates a workflow-local kernel artifact. Consumers never read
-`/opt/conch/bzImage`.
+The Conch Init smoke, Conchd Crash Release, Template E2E, and weekly Template
+workflows run `build-kernel` first. Its build ID contains exactly the locked
+kernel source commit, the selected Conch kernel config content digest, and the
+normalized platform. A valid Actions cache hit avoids compilation, but every
+run still publishes and validates a workflow-local kernel artifact. Consumers
+never read `/opt/conch/bzImage`.
 
 The kernel build ID intentionally does not include the host compiler, compiler
 flags, or other build-tool versions. Those are treated as runner infrastructure
@@ -161,10 +175,11 @@ The schedule currently runs at:
 ## Running pull request CI
 
 Run `build-and-check.yml`, `network-pool-integration.yml`,
-`conch-init-smoke.yml`, or `e2b-workload-smoke.yml` directly from GitHub
-Actions. Select the trusted GitHub or AtomGit repository and enter that
-repository's pull request number. Each workflow resolves the PR head once to a
-full commit before downstream self-hosted jobs start.
+`conchd-crash-release.yml`, `conch-init-smoke.yml`, or
+`e2b-workload-smoke.yml` directly from GitHub Actions. Select the trusted
+GitHub or AtomGit repository and enter that repository's pull request number.
+Each workflow resolves the PR head once to a full commit before downstream
+self-hosted jobs start.
 
 `e2b-workload-smoke.yml` is named `E2B SDK and Network Policy` in the GitHub
 Actions UI. It pulls the immutable Template published by its producer job and

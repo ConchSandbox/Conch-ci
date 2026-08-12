@@ -1,0 +1,371 @@
+name: Conchd Crash Release
+run-name: ${{ github.event.inputs.conch_pr_number || github.event.inputs.conch_ref || github.ref_name }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      conch_repository:
+        description: Trusted Conch source repository
+        required: false
+        type: choice
+        options:
+          - https://atomgit.com/openeuler/Conch.git
+          - https://github.com/ConchSandbox/Conch.git
+        default: https://atomgit.com/openeuler/Conch.git
+      conch_pr_number:
+        description: Pull request number in the selected Conch repository
+        required: false
+        type: string
+      conch_ref:
+        description: Conch source ref used when no pull request number is set
+        required: false
+        default: dev
+
+permissions:
+  contents: read
+
+concurrency:
+  group: conch-crash-release-${{ github.event.inputs.conch_repository }}-${{ github.event.inputs.conch_pr_number || github.event.inputs.conch_ref || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CONCH_REPOSITORY: ${{ github.event.inputs.conch_repository || vars.CONCH_REPOSITORY || 'https://atomgit.com/openeuler/Conch.git' }}
+  CONCH_PR_NUMBER: ${{ github.event.inputs.conch_pr_number }}
+  CONCH_REF: ${{ github.event.inputs.conch_ref || vars.CONCH_REF || 'dev' }}
+  CONCH_API_TIMEOUT: 90m
+  GOPROXY: https://goproxy.cn
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # Pins the requested branch or pull request once before any privileged job.
+  resolve-conch:
+    name: Resolve Conch commit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      conch-commit: ${{ steps.resolve.outputs.conch-commit }}
+    steps:
+      - name: Checkout CI repository
+        uses: actions/checkout@v4.4.0
+
+      - name: Resolve immutable Conch commit
+        id: resolve
+        run: |
+          set -euo pipefail
+          resolve_args=(--repository "$CONCH_REPOSITORY")
+          if [[ -n "$CONCH_PR_NUMBER" ]]; then
+            resolve_args+=(--pr-number "$CONCH_PR_NUMBER")
+          else
+            resolve_args+=(--ref "$CONCH_REF")
+          fi
+          scripts/runner-env/jobs/resolve-conch-commit.sh "${resolve_args[@]}"
+
+  # Builds or restores the content-addressed ARM64 kernel used by the template.
+  build-kernel:
+    name: Build or reuse ARM64 kernel
+    needs: resolve-conch
+    runs-on: [self-hosted, Linux, ARM64, Huawei]
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      actions: write
+    outputs:
+      kernel-sha256: ${{ steps.kernel.outputs.kernel-sha256 }}
+      kernel-artifact-name: ${{ steps.kernel.outputs.kernel-artifact-name }}
+    steps:
+      - name: Checkout CI repository
+        uses: actions/checkout@v4.4.0
+
+      - name: Build or reuse ARM64 kernel
+        id: kernel
+        uses: ./.github/actions/build-kernel
+        with:
+          conch-repository: ${{ env.CONCH_REPOSITORY }}
+          conch-commit: ${{ needs.resolve-conch.outputs.conch-commit }}
+
+  # Reuses the same immutable E2B rootfs and template cache as other E2B jobs.
+  build-template:
+    name: Build or reuse E2B template
+    needs: [resolve-conch, build-kernel]
+    runs-on: [self-hosted, Linux, ARM64, Huawei]
+    timeout-minutes: 240
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      template-image-ref: ${{ steps.template.outputs.template-image-ref }}
+    steps:
+      - name: Checkout CI repository
+        uses: actions/checkout@v4.4.0
+
+      - name: Build or reuse E2B template
+        id: template
+        uses: ./.github/actions/build-conch-template
+        with:
+          conch-repository: ${{ env.CONCH_REPOSITORY }}
+          conch-commit: ${{ needs.resolve-conch.outputs.conch-commit }}
+          kernel-artifact-name: ${{ needs.build-kernel.outputs.kernel-artifact-name }}
+          kernel-sha256: ${{ needs.build-kernel.outputs.kernel-sha256 }}
+          dockerfile: examples/e2b-rootfs/Dockerfile
+          image-profile: e2b
+
+  # SIGKILLs conchd with a live sandbox, then proves startup releases every
+  # recorded stale resource before the same sandbox ID can be reused.
+  crash-release:
+    name: Crash Release
+    needs: [resolve-conch, build-template]
+    runs-on: [self-hosted, Linux, ARM64, Huawei]
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    env:
+      CONCH_SANDBOX_ID: sandbox_crash_release_${{ github.run_id }}_${{ github.run_attempt }}
+    steps:
+      - name: Prepare job-local paths
+        run: |
+          set -euo pipefail
+          {
+            echo "CONCH_SOURCE=$RUNNER_TEMP/conch-crash-release-source-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            echo "CONCH_SDK_VENV=$RUNNER_TEMP/conch-crash-release-venv-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            echo "CONCH_SDK_CONFIG=$RUNNER_TEMP/conch-crash-release-sdk-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.yaml"
+            echo "CRASH_MANIFEST=$RUNNER_TEMP/conch-crash-release-manifest-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
+            echo "CRASH_FIXTURE_ROOT=$RUNNER_TEMP/conch-crash-release-fixture-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            echo "CRASH_RESULTS_DIR=$RUNNER_TEMP/conch-crash-release-results-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            echo "CONCHD_WORK_DIR=$RUNNER_TEMP/conch-crash-release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          } >> "$GITHUB_ENV"
+
+      - name: Checkout CI repository
+        uses: actions/checkout@v4.4.0
+
+      - name: Verify runner environment
+        id: runner-environment
+        uses: ./.github/actions/ensure-runner-environment
+        with:
+          mode: verify
+
+      - name: Checkout immutable Conch source
+        env:
+          CONCH_COMMIT: ${{ needs.resolve-conch.outputs.conch-commit }}
+        run: |
+          scripts/runner-env/jobs/checkout-conch.sh \
+            --repository "$CONCH_REPOSITORY" \
+            --commit "$CONCH_COMMIT" \
+            --destination "$CONCH_SOURCE"
+
+      - name: Prepare Conch SDK
+        id: sdk
+        uses: ./.github/actions/prepare-conch-sdk
+        with:
+          conch-source: ${{ env.CONCH_SOURCE }}
+          venv: ${{ env.CONCH_SDK_VENV }}
+
+      - name: Build Conch binaries
+        uses: ./.github/actions/build-conch
+        with:
+          conch-source: ${{ env.CONCH_SOURCE }}
+
+      - name: Start isolated conchd
+        id: conchd
+        uses: ./.github/actions/start-conchd
+        with:
+          conch-source: ${{ env.CONCH_SOURCE }}
+          binary-dir: ${{ steps.runner-environment.outputs.binary-dir }}
+          runtime-name: conch-crash-release
+          app-name: conch-crash-release
+          log-level: debug
+          api-timeout: ${{ env.CONCH_API_TIMEOUT }}
+
+      - name: Pull runner-local Conch template
+        id: template
+        uses: ./.github/actions/pull-conch-template
+        with:
+          conch-source: ${{ env.CONCH_SOURCE }}
+          config: ${{ steps.conchd.outputs.config }}
+          template-image-ref: ${{ needs.build-template.outputs.template-image-ref }}
+          image-profile: e2b
+
+      - name: Configure Conch SDK
+        env:
+          CONCHD_API_URL: ${{ steps.conchd.outputs.api-url }}
+        run: |
+          set -euo pipefail
+          install -m 0600 /dev/null "$CONCH_SDK_CONFIG"
+          cat > "$CONCH_SDK_CONFIG" <<YAML
+          sandbox:
+            unix_socket: ""
+            api_url: "$CONCHD_API_URL"
+            sandbox_id: ""
+          image:
+            vcpu_num: 2
+            vcpu_max: 2
+            ram_mb: 2048
+          YAML
+
+      - name: Prepare live crash-release fixture
+        env:
+          CONCHD_API_URL: ${{ steps.conchd.outputs.api-url }}
+          CONCH_SDK_PYTHON: ${{ steps.sdk.outputs.python }}
+          CONCH_TEMPLATE_ID: ${{ steps.template.outputs.template-id }}
+        run: |
+          set -euo pipefail
+          runtime_path="$PATH:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+          timeout --foreground --kill-after=30s 15m \
+            sudo -n env \
+              PATH="$runtime_path" \
+              HOME="$HOME" \
+              CONCH_SDK_CONFIG="$CONCH_SDK_CONFIG" \
+              "$CONCH_SDK_PYTHON" \
+                "$GITHUB_WORKSPACE/scripts/workflows/conchd-crash-release/run.py" \
+                prepare \
+                --work-dir "$CONCHD_WORK_DIR" \
+                --manifest "$CRASH_MANIFEST" \
+                --fixture-root "$CRASH_FIXTURE_ROOT" \
+                --api-url "$CONCHD_API_URL" \
+                --template-id "$CONCH_TEMPLATE_ID" \
+                --sandbox-id "$CONCH_SANDBOX_ID"
+
+      - name: SIGKILL conchd and confirm stale resources
+        env:
+          CONCH_SDK_PYTHON: ${{ steps.sdk.outputs.python }}
+        run: |
+          set -euo pipefail
+          timeout --foreground --kill-after=10s 2m \
+            sudo -n env \
+              CONCH_SDK_CONFIG="$CONCH_SDK_CONFIG" \
+              "$CONCH_SDK_PYTHON" \
+                "$GITHUB_WORKSPACE/scripts/workflows/conchd-crash-release/run.py" \
+                crash \
+                --manifest "$CRASH_MANIFEST"
+
+      - name: Restart conchd with existing runtime
+        id: restarted-conchd
+        uses: ./.github/actions/start-conchd
+        with:
+          conch-source: ${{ env.CONCH_SOURCE }}
+          binary-dir: ${{ steps.runner-environment.outputs.binary-dir }}
+          runtime-name: conch-crash-release
+          app-name: conch-crash-release
+          log-level: debug
+          api-timeout: ${{ env.CONCH_API_TIMEOUT }}
+          reuse-runtime: "true"
+          log-file: conchd-restart.log
+
+      - name: Verify stale resource release and same-ID reuse
+        env:
+          CONCH_SDK_PYTHON: ${{ steps.sdk.outputs.python }}
+        run: |
+          set -euo pipefail
+          timeout --foreground --kill-after=30s 15m \
+            sudo -n env \
+              CONCH_SDK_CONFIG="$CONCH_SDK_CONFIG" \
+              "$CONCH_SDK_PYTHON" \
+                "$GITHUB_WORKSPACE/scripts/workflows/conchd-crash-release/run.py" \
+                verify \
+                --manifest "$CRASH_MANIFEST"
+
+      - name: Dump crash-release diagnostics on failure
+        if: failure()
+        run: |
+          set +e
+          workdir=${CONCHD_WORK_DIR:-}
+          if [[ -n "${RUNNER_TEMP:-}" && "$RUNNER_TEMP" != / && \
+                "$workdir" == "$RUNNER_TEMP/"* ]]; then
+            for log_file in conchd.log conchd-restart.log; do
+              [[ ! -f "$workdir/$log_file" ]] || \
+                sed -n '1,800p' "$workdir/$log_file"
+            done
+          else
+            echo "conchd work directory is unavailable or unsafe; skipping log dump" >&2
+            workdir=
+          fi
+          sudo -n ip netns list
+          sudo -n ip addr show
+          sudo -n ip route show
+          sudo -n iptables -t nat -S
+          if [[ -n "$workdir" ]]; then
+            sudo -n findmnt -rn -o TARGET,SOURCE,FSTYPE | \
+              awk -v root="$workdir" '$1 == root || index($1, root "/") == 1 || index($1, "/run/conch/") == 1'
+          else
+            sudo -n findmnt -rn -o TARGET,SOURCE,FSTYPE | \
+              awk 'index($1, "/run/conch/") == 1'
+          fi
+          exit 0
+
+      - name: Collect crash-release diagnostics
+        if: always()
+        run: |
+          set +e
+          is_runner_temp_path() {
+            local path=$1
+            [[ -n "${RUNNER_TEMP:-}" && "$RUNNER_TEMP" != / && \
+              -n "$path" && "$path" == "$RUNNER_TEMP/"* ]]
+          }
+
+          results_dir=${CRASH_RESULTS_DIR:-}
+          if ! is_runner_temp_path "$results_dir"; then
+            echo "crash-release results directory is unavailable or unsafe" >&2
+            exit 0
+          fi
+          mkdir -p "$results_dir"
+
+          diagnostic_paths=()
+          manifest=${CRASH_MANIFEST:-}
+          if is_runner_temp_path "$manifest"; then
+            diagnostic_paths+=("$manifest")
+          fi
+          workdir=${CONCHD_WORK_DIR:-}
+          if is_runner_temp_path "$workdir"; then
+            diagnostic_paths+=(
+              "$workdir/config.yaml"
+              "$workdir/conchd.log"
+              "$workdir/conchd-restart.log"
+            )
+          fi
+          fixture_root=${CRASH_FIXTURE_ROOT:-}
+          if is_runner_temp_path "$fixture_root"; then
+            diagnostic_paths+=("$fixture_root/virtiofsd-fixture.log")
+          fi
+          for path in "${diagnostic_paths[@]}"; do
+            [[ ! -f "$path" ]] || sudo -n cp -a -- "$path" "$results_dir/"
+          done
+          { sudo -n ip netns list || true; } > "$results_dir/netns.txt" 2>&1
+          { sudo -n ip addr show || true; } > "$results_dir/ip-addresses.txt" 2>&1
+          { sudo -n ip route show || true; } > "$results_dir/ip-routes.txt" 2>&1
+          { sudo -n iptables -t nat -S || true; } > "$results_dir/iptables-nat.txt" 2>&1
+          { sudo -n findmnt -rn -o TARGET,SOURCE,FSTYPE || true; } > "$results_dir/mounts.txt" 2>&1
+          sudo -n chmod -R a+rX "$results_dir"
+          exit 0
+
+      - name: Upload crash-release diagnostics
+        if: ${{ always() && env.CRASH_RESULTS_DIR != '' }}
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: conchd-crash-release-${{ needs.resolve-conch.outputs.conch-commit }}
+          path: ${{ env.CRASH_RESULTS_DIR }}
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Clean Conch runtime
+        if: always()
+        uses: ./.github/actions/cleanup-conch-runtime
+        with:
+          runtime-name: conch-crash-release
+
+      - name: Clean crash-release files
+        if: always()
+        run: |
+          set +e
+          for path in \
+            "$CONCH_SOURCE" \
+            "$CONCH_SDK_VENV" \
+            "$CONCH_SDK_CONFIG" \
+            "$CRASH_MANIFEST" \
+            "$CRASH_FIXTURE_ROOT" \
+            "$CRASH_RESULTS_DIR"; do
+            [[ -n "$path" && "$path" == "$RUNNER_TEMP/"* && -e "$path" ]] || continue
+            sudo -n find "$path" -depth -delete
+          done
+          exit 0
