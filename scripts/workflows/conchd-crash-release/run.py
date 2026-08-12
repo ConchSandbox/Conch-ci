@@ -265,6 +265,7 @@ def create_sandbox(template_id: str, sandbox_id: str) -> Sandbox:
 
 def start_volume_fixture(
     work_dir: Path,
+    logical_work_dir: Path,
     fixture_root: Path,
     sandbox_id: str,
 ) -> dict[str, Any]:
@@ -273,7 +274,10 @@ def start_volume_fixture(
     marker = volume_source / "host-data.txt"
     marker.write_text("preserve-host-volume-data\n", encoding="utf-8")
 
+    # Mountinfo reports the resolved host path, while Conch matches stale
+    # virtiofsd processes against the runtime path written to its config.
     volume_runtime = work_dir / "volumes"
+    process_runtime = logical_work_dir / "volumes"
     sandbox_runtime = volume_runtime / sandbox_id
     volume_dir = sandbox_runtime / "volume"
     mount_target = volume_dir / "0"
@@ -288,7 +292,7 @@ def start_volume_fixture(
     output = fake_log.open("ab", buffering=0)
     code = "import time; time.sleep(3600)"
     process = subprocess.Popen(
-        ["virtiofsd", "-c", code, str(volume_runtime)],
+        ["virtiofsd", "-c", code, str(process_runtime)],
         executable=sys.executable,
         stdin=subprocess.DEVNULL,
         stdout=output,
@@ -303,7 +307,7 @@ def start_volume_fixture(
             info is not None
             and info["state"] != "Z"
             and b"virtiofsd" in info["cmdline"]
-            and os.fsencode(str(volume_runtime)) in info["cmdline"]
+            and os.fsencode(str(process_runtime)) in info["cmdline"]
             and str(mount_target) in mount_targets()
         )
 
@@ -313,6 +317,7 @@ def start_volume_fixture(
         raise RuntimeError("volume fixture process exited unexpectedly")
     return {
         "process": process_identity(info, "virtiofsd-fixture"),
+        "process_runtime_dir": str(process_runtime),
         "runtime_dir": str(volume_runtime),
         "sandbox_runtime_dir": str(sandbox_runtime),
         "mount_target": str(mount_target),
@@ -322,7 +327,8 @@ def start_volume_fixture(
 
 
 def prepare(args: argparse.Namespace) -> None:
-    work_dir = require_absolute_safe_path(args.work_dir, "work directory")
+    logical_work_dir = args.work_dir
+    work_dir = require_absolute_safe_path(logical_work_dir, "work directory")
     manifest_path = require_absolute_safe_path(args.manifest, "manifest")
     fixture_root = require_absolute_safe_path(args.fixture_root, "fixture root")
     config_path = work_dir / "config.yaml"
@@ -358,7 +364,12 @@ def prepare(args: argparse.Namespace) -> None:
     boot_dir = work_dir / "work" / "snapshot" / BOOT_NAMESPACE / args.sandbox_id
     wait_for("sandbox boot layout", boot_dir.exists, timeout=30)
     wait_for("sandbox VMM sockets", lambda: bool(socket_paths(work_dir)), timeout=30)
-    volume = start_volume_fixture(work_dir, fixture_root, args.sandbox_id)
+    volume = start_volume_fixture(
+        work_dir,
+        logical_work_dir,
+        fixture_root,
+        args.sandbox_id,
+    )
 
     service_pid = read_pid_file(work_dir / "conchd-service.pid")
     service_info = process_info(service_pid)
