@@ -27,12 +27,20 @@ runs:
     - name: Configure job-local Go caches
       shell: bash
       run: |
-        mkdir -p "$RUNNER_TEMP/conch-go-modcache" "$RUNNER_TEMP/conch-go-build-cache"
+        set -euo pipefail
+        gomodcache="$RUNNER_TEMP/conch-go-modcache"
+        gocache="$RUNNER_TEMP/conch-go-build-cache"
+
+        # A canceled job can leave partially deleted module directories. Reset
+        # both caches before reuse instead of trusting runner temp cleanup.
+        GOMODCACHE="$gomodcache" GOCACHE="$gocache" \
+          go clean -modcache -cache
+        mkdir -p "$gomodcache" "$gocache"
         {
           echo "GOPROXY=https://goproxy.cn"
-          echo "GOMODCACHE=$RUNNER_TEMP/conch-go-modcache"
-          echo "GOCACHE=$RUNNER_TEMP/conch-go-build-cache"
-          echo "GOFLAGS=${GOFLAGS:+$GOFLAGS }-buildvcs=false"
+          echo "GOMODCACHE=$gomodcache"
+          echo "GOCACHE=$gocache"
+          echo "GOFLAGS=${GOFLAGS:+$GOFLAGS }-buildvcs=false -modcacherw"
         } >> "$GITHUB_ENV"
 
     - name: Build Conch binaries
@@ -46,3 +54,13 @@ runs:
         test -x bin/conch
         test -x bin/conchd
         test -x bin/conch-init
+
+    - name: Clean job-local Go caches
+      if: always()
+      shell: bash
+      env:
+        GOMODCACHE: ${{ runner.temp }}/conch-go-modcache
+        GOCACHE: ${{ runner.temp }}/conch-go-build-cache
+      run: |
+        set -euo pipefail
+        go clean -modcache -cache
