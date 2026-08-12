@@ -24,13 +24,16 @@ runs:
         GOPROXY: https://goproxy.cn
         GOMODCACHE: ${{ runner.temp }}/conch-go-modcache
         GOCACHE: ${{ runner.temp }}/conch-go-build-cache
-        GOFLAGS: -buildvcs=false
+        GOFLAGS: -buildvcs=false -modcacherw
         GO_TAGS: exclude_graphdriver_btrfs
       run: |
         set -euo pipefail
         [[ -x "$CONCH_SOURCE/scripts/build-conch-init-initramfs.sh" ]]
         [[ -n "$INITRAMFS_OUTPUT" && "$INITRAMFS_OUTPUT" != / ]]
         [[ -n "$INITRAMFS_WORK_DIR" && "$INITRAMFS_WORK_DIR" != / ]]
+
+        # Discard incomplete cache entries left by an interrupted earlier job.
+        go clean -modcache -cache
         mkdir -p \
           "$GOMODCACHE" \
           "$GOCACHE" \
@@ -43,3 +46,13 @@ runs:
           ROOTFS_DIR="$INITRAMFS_WORK_DIR/rootfs" \
             make BIN_DIR="$INITRAMFS_WORK_DIR/bin" build-conch-init-initramfs
         )
+
+    - name: Clean job-local Go caches
+      if: always()
+      shell: bash
+      env:
+        GOMODCACHE: ${{ runner.temp }}/conch-go-modcache
+        GOCACHE: ${{ runner.temp }}/conch-go-build-cache
+      run: |
+        set -euo pipefail
+        go clean -modcache -cache
