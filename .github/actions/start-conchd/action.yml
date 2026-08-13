@@ -38,9 +38,9 @@ outputs:
   config:
     description: Generated conchd configuration path
     value: ${{ steps.runtime.outputs.config }}
-  api-url:
-    description: Local conchd API URL
-    value: ${{ steps.runtime.outputs.api-url }}
+  unix-socket:
+    description: Unix socket conchd serves its API on
+    value: ${{ steps.runtime.outputs.unix-socket }}
 
 runs:
   using: composite
@@ -66,7 +66,10 @@ runs:
 
         workdir="$RUNNER_TEMP/$RUNTIME_NAME-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
         config="$workdir/config.yaml"
-        api_url_file="$workdir/api-url"
+        # conchd serves the API on a Unix socket only, and the SDK talks to this
+        # fixed path. Jobs that start conchd must therefore be serialized on the
+        # runner; see the shared concurrency group in the calling workflows.
+        unix_socket="/var/run/conchd/conchd.sock"
         if [[ "$REUSE_RUNTIME" == true ]]; then
           require_runtime_file() {
             local path=$1
@@ -82,24 +85,10 @@ runs:
           fi
           require_runtime_file "$config" "config"
           require_runtime_file "$workdir/state.db" "state database"
-          require_runtime_file "$api_url_file" "saved API URL"
-          api_url=$(<"$api_url_file")
-          [[ "$api_url" =~ ^http://127\.0\.0\.1:[0-9]{1,5}$ ]]
-          port=${api_url##*:}
-          ((port >= 1 && port <= 65535))
         else
           [[ ! -e "$workdir" ]] || sudo -n find "$workdir" -depth -delete
           mkdir -p "$workdir/cni/net.d"
           install -m 0644 "$CONCH_SOURCE/config/cni/net.d/"*.conf "$workdir/cni/net.d/"
-
-          port=$(python3 - <<'PY'
-        import socket
-        with socket.socket() as sock:
-            sock.bind(("127.0.0.1", 0))
-            print(sock.getsockname()[1])
-        PY
-          )
-          api_url="http://127.0.0.1:$port"
 
           cat > "$config" <<YAML
         app:
@@ -108,11 +97,9 @@ runs:
           level: $LOG_LEVEL
           output: stdout
         server:
-          unix_socket: ""
+          unix_socket: "$unix_socket"
           pid_file: "$workdir/conchd-service.pid"
           work_dir: "$workdir/work"
-          host: 127.0.0.1
-          port: $port
         state:
           path: "$workdir/state.db"
         network:
@@ -135,16 +122,17 @@ runs:
           vsock_signal_timeout: 90s
           request_timeout: 120s
           default_vmm_name: cloud-hypervisor
+          default_vcpu_num: 2
+          default_vcpu_max: 2
+          default_ram_mb: 2048
         YAML
           chmod 0600 "$config"
-          install -m 0600 /dev/null "$api_url_file"
-          printf '%s\n' "$api_url" > "$api_url_file"
         fi
 
         {
           echo "work-dir=$workdir"
           echo "config=$config"
-          echo "api-url=$api_url"
+          echo "unix-socket=$unix_socket"
         } >> "$GITHUB_OUTPUT"
 
     - name: Start conchd and wait for API
@@ -152,7 +140,7 @@ runs:
       working-directory: ${{ inputs.conch-source }}
       env:
         API_TIMEOUT: ${{ inputs.api-timeout }}
-        API_URL: ${{ steps.runtime.outputs.api-url }}
+        UNIX_SOCKET: ${{ steps.runtime.outputs.unix-socket }}
         CONFIG: ${{ steps.runtime.outputs.config }}
         WORK_DIR: ${{ steps.runtime.outputs.work-dir }}
         LOG_FILE: ${{ inputs.log-file }}
@@ -170,6 +158,12 @@ runs:
           fi
           [[ ! -e "$pid_file" && ! -L "$pid_file" ]] || sudo -n unlink -- "$pid_file"
         done
+        # The API socket is shared by every job on this runner, so refuse to start
+        # if another conchd still answers on it instead of silently taking it over.
+        if sudo -n curl --unix-socket "$UNIX_SOCKET" -fsS -o /dev/null "http://localhost/health" 2>/dev/null; then
+          echo "another conchd is already serving $UNIX_SOCKET; refusing to start" >&2
+          exit 1
+        fi
         fail_startup() {
           sed -n '1,400p' "$log_path" >&2 || true
           for pid_file in "$WORK_DIR/conchd.pid" "$WORK_DIR/conchd-service.pid"; do
@@ -186,9 +180,13 @@ runs:
         echo "$!" > "$WORK_DIR/conchd.pid"
 
         for _ in $(seq 1 120); do
-          if curl -fsS -X POST "$API_URL/api/template/list" \
+          if sudo -n curl --unix-socket "$UNIX_SOCKET" -fsS -X POST "http://localhost/api/template/list" \
             -H 'Content-Type: application/json' \
             -d '{}' >/dev/null 2>&1; then
+            # conchd runs under sudo, so the socket lands as 0660 root:root. Hand it
+            # to the runner's group; the SDK and CLI run unprivileged.
+            sudo -n chgrp "$(id -gn)" "$UNIX_SOCKET"
+            sudo -n chmod 0660 "$UNIX_SOCKET"
             exit 0
           fi
           sudo -n kill -0 "$(<"$WORK_DIR/conchd.pid")" 2>/dev/null || {
