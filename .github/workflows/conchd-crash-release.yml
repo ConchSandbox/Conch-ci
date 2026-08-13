@@ -92,6 +92,9 @@ jobs:
     needs: [resolve-conch, build-kernel]
     runs-on: [self-hosted, Linux, ARM64, Huawei]
     timeout-minutes: 240
+    concurrency:
+      group: conch-ci-conchd-socket
+      cancel-in-progress: false
     permissions:
       contents: read
       actions: read
@@ -119,6 +122,9 @@ jobs:
     needs: [resolve-conch, build-template]
     runs-on: [self-hosted, Linux, ARM64, Huawei]
     timeout-minutes: 120
+    concurrency:
+      group: conch-ci-conchd-socket
+      cancel-in-progress: false
     permissions:
       contents: read
     env:
@@ -130,7 +136,6 @@ jobs:
           {
             echo "CONCH_SOURCE=$RUNNER_TEMP/conch-crash-release-source-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
             echo "CONCH_SDK_VENV=$RUNNER_TEMP/conch-crash-release-venv-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-            echo "CONCH_SDK_CONFIG=$RUNNER_TEMP/conch-crash-release-sdk-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.yaml"
             echo "CRASH_MANIFEST=$RUNNER_TEMP/conch-crash-release-manifest-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
             echo "CRASH_FIXTURE_ROOT=$RUNNER_TEMP/conch-crash-release-fixture-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
             echo "CRASH_RESULTS_DIR=$RUNNER_TEMP/conch-crash-release-results-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
@@ -187,26 +192,9 @@ jobs:
           template-image-ref: ${{ needs.build-template.outputs.template-image-ref }}
           image-profile: e2b
 
-      - name: Configure Conch SDK
-        env:
-          CONCHD_API_URL: ${{ steps.conchd.outputs.api-url }}
-        run: |
-          set -euo pipefail
-          install -m 0600 /dev/null "$CONCH_SDK_CONFIG"
-          cat > "$CONCH_SDK_CONFIG" <<YAML
-          sandbox:
-            unix_socket: ""
-            api_url: "$CONCHD_API_URL"
-            sandbox_id: ""
-          image:
-            vcpu_num: 2
-            vcpu_max: 2
-            ram_mb: 2048
-          YAML
-
       - name: Prepare live crash-release fixture
         env:
-          CONCHD_API_URL: ${{ steps.conchd.outputs.api-url }}
+          CONCHD_UNIX_SOCKET: ${{ steps.conchd.outputs.unix-socket }}
           CONCH_SDK_PYTHON: ${{ steps.sdk.outputs.python }}
           CONCH_TEMPLATE_ID: ${{ steps.template.outputs.template-id }}
         run: |
@@ -216,14 +204,13 @@ jobs:
             sudo -n env \
               PATH="$runtime_path" \
               HOME="$HOME" \
-              CONCH_SDK_CONFIG="$CONCH_SDK_CONFIG" \
               "$CONCH_SDK_PYTHON" \
                 "$GITHUB_WORKSPACE/scripts/workflows/conchd-crash-release/run.py" \
                 prepare \
                 --work-dir "$CONCHD_WORK_DIR" \
                 --manifest "$CRASH_MANIFEST" \
                 --fixture-root "$CRASH_FIXTURE_ROOT" \
-                --api-url "$CONCHD_API_URL" \
+                --unix-socket "$CONCHD_UNIX_SOCKET" \
                 --template-id "$CONCH_TEMPLATE_ID" \
                 --sandbox-id "$CONCH_SANDBOX_ID"
 
@@ -234,7 +221,6 @@ jobs:
           set -euo pipefail
           timeout --foreground --kill-after=10s 2m \
             sudo -n env \
-              CONCH_SDK_CONFIG="$CONCH_SDK_CONFIG" \
               "$CONCH_SDK_PYTHON" \
                 "$GITHUB_WORKSPACE/scripts/workflows/conchd-crash-release/run.py" \
                 crash \
@@ -260,7 +246,6 @@ jobs:
           set -euo pipefail
           timeout --foreground --kill-after=30s 15m \
             sudo -n env \
-              CONCH_SDK_CONFIG="$CONCH_SDK_CONFIG" \
               "$CONCH_SDK_PYTHON" \
                 "$GITHUB_WORKSPACE/scripts/workflows/conchd-crash-release/run.py" \
                 verify \
@@ -361,7 +346,6 @@ jobs:
           for path in \
             "$CONCH_SOURCE" \
             "$CONCH_SDK_VENV" \
-            "$CONCH_SDK_CONFIG" \
             "$CRASH_MANIFEST" \
             "$CRASH_FIXTURE_ROOT" \
             "$CRASH_RESULTS_DIR"; do

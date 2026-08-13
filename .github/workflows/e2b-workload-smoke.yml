@@ -100,6 +100,9 @@ jobs:
     needs: [resolve-conch, build-kernel]
     runs-on: [self-hosted, Linux, ARM64, Huawei]
     timeout-minutes: 240
+    concurrency:
+      group: conch-ci-conchd-socket
+      cancel-in-progress: false
     permissions:
       contents: read
       actions: read
@@ -127,6 +130,9 @@ jobs:
     needs: [resolve-conch, build-template]
     runs-on: [self-hosted, Linux, ARM64, Huawei]
     timeout-minutes: 150
+    concurrency:
+      group: conch-ci-conchd-socket
+      cancel-in-progress: false
     permissions:
       contents: read
     steps:
@@ -188,25 +194,6 @@ jobs:
           template-image-ref: ${{ needs.build-template.outputs.template-image-ref }}
           image-profile: e2b
 
-      - name: Configure Conch SDK
-        if: ${{ github.event.inputs.run_sdk_smoke != 'false' }}
-        env:
-          CONCHD_API_URL: ${{ steps.conchd.outputs.api-url }}
-          CONCH_SDK_CONFIG: ${{ runner.temp }}/conch-e2b-sdk-config-${{ github.run_id }}-${{ github.run_attempt }}.yaml
-        run: |
-          set -euo pipefail
-          install -m 0600 /dev/null "$CONCH_SDK_CONFIG"
-          cat > "$CONCH_SDK_CONFIG" <<YAML
-          sandbox:
-            unix_socket: ""
-            api_url: "$CONCHD_API_URL"
-            sandbox_id: ""
-          image:
-            vcpu_num: 2
-            vcpu_max: 2
-            ram_mb: 2048
-          YAML
-
       - name: Validate E2B SDK and guest connectivity
         id: sdk_validation
         if: ${{ github.event.inputs.run_sdk_smoke != 'false' }}
@@ -215,7 +202,6 @@ jobs:
         env:
           CONCH_SDK_PYTHON: ${{ steps.sdk.outputs.python }}
           CONCH_SANDBOX_ID: sandbox_e2b_sdk_${{ github.run_id }}_${{ github.run_attempt }}
-          CONCH_SDK_CONFIG: ${{ runner.temp }}/conch-e2b-sdk-config-${{ github.run_id }}-${{ github.run_attempt }}.yaml
           CONCH_TEMPLATE_ID: ${{ steps.template.outputs.template-id }}
         run: |
           set -euo pipefail
@@ -242,10 +228,9 @@ jobs:
         env:
           CONCH_SDK_PYTHON: ${{ steps.sdk.outputs.python }}
           CONCH_SANDBOX_ID: sandbox_e2b_sdk_${{ github.run_id }}_${{ github.run_attempt }}
-          CONCH_SDK_CONFIG: ${{ runner.temp }}/conch-e2b-sdk-config-${{ github.run_id }}-${{ github.run_attempt }}.yaml
         run: |
           set +e
-          if [[ -n "${CONCH_SDK_PYTHON:-}" && -x "$CONCH_SDK_PYTHON" && -n "${CONCH_SDK_CONFIG:-}" ]]; then
+          if [[ -n "${CONCH_SDK_PYTHON:-}" && -x "$CONCH_SDK_PYTHON" ]]; then
             "$CONCH_SDK_PYTHON" - <<'PY'
           import os
           import time
@@ -281,8 +266,7 @@ jobs:
           set +e
           for path in \
             "$RUNNER_TEMP/conch-e2b-sdk-source" \
-            "$RUNNER_TEMP/conch-e2b-sdk-venv" \
-            "$RUNNER_TEMP/conch-e2b-sdk-config-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.yaml"; do
+            "$RUNNER_TEMP/conch-e2b-sdk-venv"; do
             [[ -z "$path" || ! -e "$path" ]] || sudo -n find "$path" -depth -delete
           done
           exit 0
@@ -295,6 +279,9 @@ jobs:
     needs: [resolve-conch, build-template, sdk-connectivity]
     runs-on: [self-hosted, Linux, ARM64, Huawei]
     timeout-minutes: 150
+    concurrency:
+      group: conch-ci-conchd-socket
+      cancel-in-progress: false
     permissions:
       contents: read
     steps:
@@ -388,24 +375,6 @@ jobs:
           template-image-ref: ${{ needs.build-template.outputs.template-image-ref }}
           image-profile: e2b
 
-      - name: Configure Conch SDK
-        env:
-          CONCHD_API_URL: ${{ steps.conchd.outputs.api-url }}
-          CONCH_SDK_CONFIG: ${{ runner.temp }}/conch-e2b-network-policy-sdk-config-${{ github.run_id }}-${{ github.run_attempt }}.yaml
-        run: |
-          set -euo pipefail
-          install -m 0600 /dev/null "$CONCH_SDK_CONFIG"
-          cat > "$CONCH_SDK_CONFIG" <<YAML
-          sandbox:
-            unix_socket: ""
-            api_url: "$CONCHD_API_URL"
-            sandbox_id: ""
-          image:
-            vcpu_num: 2
-            vcpu_max: 2
-            ram_mb: 2048
-          YAML
-
       - name: Allow sandbox requests to runner test server
         env:
           FIREWALL_STATE: ${{ runner.temp }}/conch-e2b-network-policy-firewall-${{ github.run_id }}-${{ github.run_attempt }}.txt
@@ -436,7 +405,6 @@ jobs:
           CONCH_SDK_PYTHON: ${{ steps.sdk.outputs.python }}
           CONCH_SANDBOX_ID: sandbox_network_policy_a_${{ github.run_id }}_${{ github.run_attempt }}
           CONCH_REUSE_SANDBOX_ID: sandbox_network_policy_b_${{ github.run_id }}_${{ github.run_attempt }}
-          CONCH_SDK_CONFIG: ${{ runner.temp }}/conch-e2b-network-policy-sdk-config-${{ github.run_id }}-${{ github.run_attempt }}.yaml
           CONCH_TEMPLATE_ID: ${{ steps.template.outputs.template-id }}
           CONCH_CNI_CONTROL_DIR: ${{ steps.cni-tools.outputs.control-dir }}
         run: |
@@ -515,10 +483,9 @@ jobs:
           CONCH_SDK_PYTHON: ${{ steps.sdk.outputs.python }}
           CONCH_SANDBOX_ID: sandbox_network_policy_a_${{ github.run_id }}_${{ github.run_attempt }}
           CONCH_REUSE_SANDBOX_ID: sandbox_network_policy_b_${{ github.run_id }}_${{ github.run_attempt }}
-          CONCH_SDK_CONFIG: ${{ runner.temp }}/conch-e2b-network-policy-sdk-config-${{ github.run_id }}-${{ github.run_attempt }}.yaml
         run: |
           set +e
-          if [[ -n "${CONCH_SDK_PYTHON:-}" && -x "$CONCH_SDK_PYTHON" && -n "${CONCH_SDK_CONFIG:-}" ]]; then
+          if [[ -n "${CONCH_SDK_PYTHON:-}" && -x "$CONCH_SDK_PYTHON" ]]; then
             for sandbox_id in "$CONCH_SANDBOX_ID" "$CONCH_REUSE_SANDBOX_ID"; do
               [[ -n "$sandbox_id" ]] || continue
               timeout --foreground --kill-after=5s 60s \
@@ -566,8 +533,7 @@ jobs:
             "$loopback_state" \
             "$RUNNER_TEMP/conch-e2b-network-policy-firewall-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.txt" \
             "$RUNNER_TEMP/conch-e2b-network-policy-source" \
-            "$RUNNER_TEMP/conch-e2b-network-policy-sdk-venv" \
-            "$RUNNER_TEMP/conch-e2b-network-policy-sdk-config-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.yaml"; do
+            "$RUNNER_TEMP/conch-e2b-network-policy-sdk-venv"; do
             [[ -z "$path" || ! -e "$path" ]] || sudo -n find "$path" -depth -delete
           done
           exit 0
