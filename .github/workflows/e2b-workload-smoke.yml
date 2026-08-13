@@ -1,4 +1,4 @@
-name: E2B SDK and Network Policy
+name: E2B Workload End-to-End
 run-name: ${{ github.event.inputs.conch_pr_number || github.event.inputs.conch_ref || github.ref_name }}
 
 on:
