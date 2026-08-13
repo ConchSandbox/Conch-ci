@@ -5,17 +5,17 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import ipaddress
 import json
 import os
 import re
 import signal
+import socket
 import subprocess
 import sys
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -240,18 +240,34 @@ def socket_paths(work_dir: Path) -> list[str]:
     )
 
 
-def http_status(url: str) -> int | None:
+class _UnixHTTPConnection(http.client.HTTPConnection):
+    """HTTP/1.1 over a Unix socket; conchd serves no TCP listener."""
+
+    def __init__(self, socket_path: str, timeout: float = 2) -> None:
+        super().__init__("localhost", timeout=timeout)
+        self._socket_path = socket_path
+
+    def connect(self) -> None:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(self.timeout)
+        sock.connect(self._socket_path)
+        self.sock = sock
+
+
+def http_status(unix_socket: str, path: str) -> int | None:
+    """Status of GET path, or None when conchd is unreachable."""
+    connection = _UnixHTTPConnection(unix_socket)
     try:
-        with urllib.request.urlopen(url, timeout=2) as response:
-            return response.status
-    except urllib.error.HTTPError as exc:
-        return exc.code
-    except (OSError, urllib.error.URLError):
+        connection.request("GET", path)
+        return connection.getresponse().status
+    except OSError:
         return None
+    finally:
+        connection.close()
 
 
-def sandbox_url(api_url: str, sandbox_id: str) -> str:
-    return f"{api_url}/api/v1/sandboxes/{urllib.parse.quote(sandbox_id, safe='')}"
+def sandbox_path(sandbox_id: str) -> str:
+    return f"/api/v1/sandboxes/{urllib.parse.quote(sandbox_id, safe='')}"
 
 
 def wait_agent_health(sandbox: Sandbox, timeout: float = 240) -> None:
@@ -351,10 +367,10 @@ def prepare(args: argparse.Namespace) -> None:
         raise RuntimeError("crash-release fixture paths must not already exist")
     fixture_root.mkdir(parents=True)
 
-    if http_status(f"{args.api_url}/health") != 204:
+    if http_status(args.unix_socket, "/health") != 204:
         raise RuntimeError("conchd health endpoint is not ready")
     sandbox = create_sandbox(args.template_id, args.sandbox_id)
-    if http_status(sandbox_url(args.api_url, args.sandbox_id)) != 200:
+    if http_status(args.unix_socket, sandbox_path(args.sandbox_id)) != 200:
         raise RuntimeError("created sandbox is absent from the control plane")
 
     wait_for(
@@ -405,7 +421,7 @@ def prepare(args: argparse.Namespace) -> None:
         raise RuntimeError("sandbox boot layout has no mounted paths to test")
     manifest = {
         "schema": 1,
-        "api_url": args.api_url,
+        "unix_socket": args.unix_socket,
         "boot_dir": str(boot_dir),
         "boot_mounts": boot_mounts,
         "cni_allocations_before_crash": cni_allocations(
@@ -459,7 +475,7 @@ def crash(args: argparse.Namespace) -> None:
     )
     wait_for(
         "conchd API to become unavailable",
-        lambda: http_status(f"{manifest['api_url']}/health") is None,
+        lambda: http_status(manifest["unix_socket"], "/health") is None,
         timeout=10,
         interval=0.2,
     )
@@ -483,8 +499,8 @@ def crash(args: argparse.Namespace) -> None:
     log("confirmed resources remain after the ungraceful daemon exit")
 
 
-def assert_sandbox_absent(api_url: str, sandbox_id: str) -> bool:
-    return http_status(sandbox_url(api_url, sandbox_id)) == 404
+def assert_sandbox_absent(unix_socket: str, sandbox_id: str) -> bool:
+    return http_status(unix_socket, sandbox_path(sandbox_id)) == 404
 
 
 def verify(args: argparse.Namespace) -> None:
@@ -498,16 +514,16 @@ def verify(args: argparse.Namespace) -> None:
     if Path(manifest["sentinel"]).read_text(encoding="utf-8") != "runtime-must-be-reused\n":
         raise RuntimeError("runtime sentinel is missing or changed")
 
-    api_url = manifest["api_url"]
+    unix_socket = manifest["unix_socket"]
     sandbox_id = manifest["sandbox_id"]
     wait_for(
         "restarted conchd health",
-        lambda: http_status(f"{api_url}/health") == 204,
+        lambda: http_status(unix_socket, "/health") == 204,
         timeout=30,
     )
     wait_for(
         "stale sandbox state record removal",
-        lambda: assert_sandbox_absent(api_url, sandbox_id),
+        lambda: assert_sandbox_absent(unix_socket, sandbox_id),
         timeout=30,
     )
     wait_for(
@@ -569,7 +585,7 @@ def verify(args: argparse.Namespace) -> None:
     replacement.delete()
     wait_for(
         "replacement sandbox deletion",
-        lambda: assert_sandbox_absent(api_url, sandbox_id),
+        lambda: assert_sandbox_absent(unix_socket, sandbox_id),
         timeout=30,
     )
     wait_for(
@@ -605,7 +621,7 @@ def parse_args() -> argparse.Namespace:
     prepare_parser.add_argument("--work-dir", type=Path, required=True)
     prepare_parser.add_argument("--manifest", type=Path, required=True)
     prepare_parser.add_argument("--fixture-root", type=Path, required=True)
-    prepare_parser.add_argument("--api-url", required=True)
+    prepare_parser.add_argument("--unix-socket", required=True)
     prepare_parser.add_argument("--template-id", required=True)
     prepare_parser.add_argument("--sandbox-id", required=True)
     prepare_parser.set_defaults(handler=prepare)

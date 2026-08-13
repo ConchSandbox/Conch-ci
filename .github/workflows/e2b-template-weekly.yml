@@ -84,6 +84,9 @@ jobs:
     needs: [resolve-conch, build-kernel]
     runs-on: [self-hosted, Linux, ARM64, Huawei]
     timeout-minutes: 240
+    concurrency:
+      group: conch-ci-conchd-socket
+      cancel-in-progress: false
     permissions:
       contents: read
       actions: read
@@ -115,6 +118,9 @@ jobs:
     needs: [resolve-conch, build-template]
     runs-on: [self-hosted, Linux, ARM64, Huawei]
     timeout-minutes: 180
+    concurrency:
+      group: conch-ci-conchd-socket
+      cancel-in-progress: false
     permissions:
       contents: read
       packages: write
