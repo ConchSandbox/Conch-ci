@@ -93,7 +93,7 @@ jobs:
     runs-on: [self-hosted, Linux, ARM64, Huawei]
     timeout-minutes: 240
     concurrency:
-      group: conch-ci-conchd-socket
+      group: conch-ci-conchd-runtime
       cancel-in-progress: false
     permissions:
       contents: read
@@ -123,7 +123,7 @@ jobs:
     runs-on: [self-hosted, Linux, ARM64, Huawei]
     timeout-minutes: 120
     concurrency:
-      group: conch-ci-conchd-socket
+      group: conch-ci-conchd-runtime
       cancel-in-progress: false
     permissions:
       contents: read

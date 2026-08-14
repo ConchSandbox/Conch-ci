@@ -66,10 +66,14 @@ runs:
 
         workdir="$RUNNER_TEMP/$RUNTIME_NAME-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
         config="$workdir/config.yaml"
-        # conchd serves the API on a Unix socket only, and the SDK talks to this
-        # fixed path. Jobs that start conchd must therefore be serialized on the
-        # runner; see the shared concurrency group in the calling workflows.
-        unix_socket="/var/run/conchd/conchd.sock"
+        server_work_dir="$workdir/work"
+        state_dir="$workdir/state"
+        cni_conf_dir="$workdir/cni/net.d"
+        unix_socket="$server_work_dir/conchd.sock"
+        if ((${#unix_socket} >= 108)); then
+          echo "derived conchd socket path is too long: $unix_socket" >&2
+          exit 1
+        fi
         if [[ "$REUSE_RUNTIME" == true ]]; then
           require_runtime_file() {
             local path=$1
@@ -84,11 +88,13 @@ runs:
             exit 1
           fi
           require_runtime_file "$config" "config"
-          require_runtime_file "$workdir/state.db" "state database"
+          require_runtime_file "$state_dir/state.db" "state database"
+          require_runtime_file "$cni_conf_dir/.conch-ci-runtime" "CNI runtime marker"
         else
           [[ ! -e "$workdir" ]] || sudo -n find "$workdir" -depth -delete
-          mkdir -p "$workdir/cni/net.d"
-          install -m 0644 "$CONCH_SOURCE/config/cni/net.d/"*.conf "$workdir/cni/net.d/"
+          mkdir -p "$server_work_dir" "$state_dir" "$cni_conf_dir"
+          install -m 0644 "$CONCH_SOURCE/config/cni/net.d/"*.conf "$cni_conf_dir/"
+          printf '%s\n' "$workdir" > "$cni_conf_dir/.conch-ci-runtime"
 
           cat > "$config" <<YAML
         app:
@@ -97,36 +103,66 @@ runs:
           level: $LOG_LEVEL
           output: stdout
         server:
-          unix_socket: "$unix_socket"
-          pid_file: "$workdir/conchd-service.pid"
-          work_dir: "$workdir/work"
-        state:
-          path: "$workdir/state.db"
+          work_dir: "$server_work_dir"
+          state_dir: "$state_dir"
         network:
           warm_pool_size: 1
           cni:
             plugin_bin_dirs:
               - "$BINARY_DIR/cni"
-            plugin_conf_dir: "$workdir/cni/net.d"
-        containerd:
-          root_dir: "$workdir/containerd-root"
-          state_dir: "$workdir/containerd-state"
-        vmm:
-          cloud_hypervisor:
-            binary: "$BINARY_DIR/cloud-hypervisor"
-        volume:
-          virtiofs:
-            runtime_dir: "$workdir/volumes"
         sandbox:
+          backend: cloud-hypervisor
           vsock_signal_retry: 10ms
           vsock_signal_timeout: 90s
           request_timeout: 120s
-          default_vmm_name: cloud-hypervisor
-          default_vcpu_num: 2
-          default_vcpu_max: 2
-          default_ram_mb: 2048
+          default_spec:
+            template_id: ""
+            vcpu_num: 2
+            vcpu_max: 2
+            ram_mb: 2048
+          cloud_hypervisor:
+            binary: "$BINARY_DIR/cloud-hypervisor"
         YAML
           chmod 0600 "$config"
+        fi
+
+        # Conch loads CNI configuration from this fixed system path. Bind the
+        # job-local directory over it so existing host configuration is hidden,
+        # not overwritten. Calling jobs serialize this shared mount and SDK alias.
+        for path in /etc/conch /etc/conch/cni /etc/conch/cni/net.d; do
+          if sudo -n test -L "$path"; then
+            echo "refusing unsafe CNI configuration path: $path" >&2
+            exit 1
+          fi
+        done
+        sudo -n mkdir -p /etc/conch/cni/net.d
+        if mountpoint -q /etc/conch/cni/net.d; then
+          if ! sudo -n test "$cni_conf_dir/.conch-ci-runtime" -ef \
+              /etc/conch/cni/net.d/.conch-ci-runtime; then
+            echo "/etc/conch/cni/net.d is mounted by another runtime" >&2
+            exit 1
+          fi
+        else
+          sudo -n mount --bind "$cni_conf_dir" /etc/conch/cni/net.d
+        fi
+
+        # The Python SDK uses the default socket path directly. Keep conchd's
+        # derived socket job-local and expose only a checked symlink at that path.
+        sdk_socket_dir=/var/run/conch
+        sdk_socket="$sdk_socket_dir/conchd.sock"
+        if sudo -n test -L "$sdk_socket_dir"; then
+          echo "refusing unsafe SDK socket directory: $sdk_socket_dir" >&2
+          exit 1
+        fi
+        sudo -n install -d -m 0755 "$sdk_socket_dir"
+        if sudo -n test -e "$sdk_socket" || sudo -n test -L "$sdk_socket"; then
+          if ! sudo -n test -L "$sdk_socket" || \
+              [[ $(sudo -n readlink -- "$sdk_socket") != "$unix_socket" ]]; then
+            echo "$sdk_socket belongs to another runtime" >&2
+            exit 1
+          fi
+        else
+          sudo -n ln -s -- "$unix_socket" "$sdk_socket"
         fi
 
         {
@@ -148,7 +184,7 @@ runs:
         set -euo pipefail
         [[ "$LOG_FILE" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*\.log$ ]]
         log_path="$WORK_DIR/$LOG_FILE"
-        for pid_file in "$WORK_DIR/conchd.pid" "$WORK_DIR/conchd-service.pid"; do
+        for pid_file in "$WORK_DIR/conchd.pid" "$WORK_DIR/work/conchd.pid"; do
           if [[ -f "$pid_file" ]]; then
             old_pid=$(<"$pid_file")
             if [[ "$old_pid" =~ ^[0-9]+$ ]] && sudo -n kill -0 "$old_pid" 2>/dev/null; then
@@ -158,15 +194,14 @@ runs:
           fi
           [[ ! -e "$pid_file" && ! -L "$pid_file" ]] || sudo -n unlink -- "$pid_file"
         done
-        # The API socket is shared by every job on this runner, so refuse to start
-        # if another conchd still answers on it instead of silently taking it over.
+        # Refuse to replace a live daemon even if stale runtime files survived.
         if sudo -n curl --unix-socket "$UNIX_SOCKET" -fsS -o /dev/null "http://localhost/health" 2>/dev/null; then
           echo "another conchd is already serving $UNIX_SOCKET; refusing to start" >&2
           exit 1
         fi
         fail_startup() {
           sed -n '1,400p' "$log_path" >&2 || true
-          for pid_file in "$WORK_DIR/conchd.pid" "$WORK_DIR/conchd-service.pid"; do
+          for pid_file in "$WORK_DIR/conchd.pid" "$WORK_DIR/work/conchd.pid"; do
             if [[ -f "$pid_file" ]]; then
               sudo -n kill "$(<"$pid_file")" >/dev/null 2>&1 || true
             fi
