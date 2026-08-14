@@ -21,7 +21,7 @@ runs:
         set +e
         # start-conchd records both the sudo launcher and the conchd service PID.
         # Stop either one that remains before looking for detached child resources.
-        for pid_file in "$workdir/conchd.pid" "$workdir/conchd-service.pid"; do
+        for pid_file in "$workdir/conchd.pid" "$workdir/work/conchd.pid"; do
           if [[ -f "$pid_file" ]]; then
             pid=$(<"$pid_file")
             [[ "$pid" =~ ^[0-9]+$ ]] || continue
@@ -39,17 +39,38 @@ runs:
         sudo -n python3 "$GITHUB_ACTION_PATH/cleanup.py" --work-dir "$workdir"
         workdir_cleanup_status=$?
 
-        # Runner-hygiene fallback: remove standard named-netns entries plus
-        # host-local and libcni state when conchd or CNI teardown did not.
+        # Runner-hygiene fallback for host networking resources left behind
+        # when conchd or CNI teardown did not complete.
         for namespace in $(sudo -n ip netns list | awk '/^(ns|slot)-[0-9]+([[:space:]]|$)/ {print $1}'); do
           sudo -n ip netns delete "$namespace" || true
         done
-        sudo -n find /var/lib/cni/networks/conch-bridge -mindepth 1 -delete 2>/dev/null || true
-        sudo -n find /var/lib/cni/results/conch-bridge -mindepth 1 -delete 2>/dev/null || true
-        sudo -n find /var/lib/conch/cni -depth -delete 2>/dev/null || true
         for bridge in cni-conch0 conch_bridge; do
           sudo -n ip link delete "$bridge" >/dev/null 2>&1 || true
         done
+
+        # Remove only the fixed-path resources that still point at this job.
+        sdk_socket=/var/run/conch/conchd.sock
+        expected_socket="$workdir/work/conchd.sock"
+        if sudo -n test -e "$sdk_socket" || sudo -n test -L "$sdk_socket"; then
+          if sudo -n test -L "$sdk_socket" && \
+              [[ $(sudo -n readlink -- "$sdk_socket") == "$expected_socket" ]]; then
+            sudo -n unlink -- "$sdk_socket" || workdir_cleanup_status=1
+          else
+            echo "$sdk_socket is not owned by $workdir; refusing to remove it" >&2
+            workdir_cleanup_status=1
+          fi
+        fi
+        cni_conf_dir="$workdir/cni/net.d"
+        cni_mount=/etc/conch/cni/net.d
+        if mountpoint -q "$cni_mount"; then
+          if sudo -n test "$cni_conf_dir/.conch-ci-runtime" -ef \
+              "$cni_mount/.conch-ci-runtime"; then
+            sudo -n umount -- "$cni_mount" || workdir_cleanup_status=1
+          else
+            echo "$cni_mount is not owned by $workdir; refusing to unmount it" >&2
+            workdir_cleanup_status=1
+          fi
+        fi
 
         # Never recurse through the workdir until the helper has proved that no
         # mount below it remains; otherwise find could cross into mounted data.
