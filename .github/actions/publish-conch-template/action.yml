@@ -183,6 +183,7 @@ runs:
       uses: ./.github/actions/cleanup-conch-runtime
       with:
         runtime-name: conch-template-publisher
+        binary-dir: ${{ steps.runner-environment.outputs.binary-dir }}
 
     - name: Clean publisher files
       if: always()

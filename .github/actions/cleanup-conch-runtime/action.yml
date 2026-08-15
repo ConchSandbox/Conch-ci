@@ -5,6 +5,9 @@ inputs:
   runtime-name:
     description: Runtime name passed to start-conchd
     required: true
+  binary-dir:
+    description: Runner binary directory passed to start-conchd
+    required: true
 
 runs:
   using: composite
@@ -13,40 +16,21 @@ runs:
       shell: bash
       env:
         RUNTIME_NAME: ${{ inputs.runtime-name }}
+        BINARY_DIR: ${{ inputs.binary-dir }}
       run: |
         set -euo pipefail
         [[ "$RUNTIME_NAME" =~ ^[a-z0-9][a-z0-9-]*$ ]]
+        [[ "$BINARY_DIR" == /* && -x "$BINARY_DIR/cni/bridge" ]]
         workdir="$RUNNER_TEMP/$RUNTIME_NAME-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 
         set +e
-        # start-conchd records both the sudo launcher and the conchd service PID.
-        # Stop either one that remains before looking for detached child resources.
-        for pid_file in "$workdir/conchd.pid" "$workdir/work/conchd.pid"; do
-          if [[ -f "$pid_file" ]]; then
-            pid=$(<"$pid_file")
-            [[ "$pid" =~ ^[0-9]+$ ]] || continue
-            sudo -n kill "$pid" >/dev/null 2>&1 || true
-            for _ in $(seq 1 30); do
-              sudo -n kill -0 "$pid" 2>/dev/null || break
-              sleep 1
-            done
-            sudo -n kill -0 "$pid" 2>/dev/null && sudo -n kill -9 "$pid" >/dev/null 2>&1 || true
-          fi
-        done
-
-        # Release VMM/virtiofs processes, mounts, and namespace handles. The
-        # helper fails closed when a workdir mount cannot be detached.
-        sudo -n python3 "$GITHUB_ACTION_PATH/cleanup.py" --work-dir "$workdir"
+        # Stop only processes whose command line belongs to this runtime. Then
+        # replay CNI DEL from the job-local libcni cache before releasing netns
+        # handles, fixed-name links, firewall rules, and workdir mounts.
+        sudo -n python3 "$GITHUB_ACTION_PATH/cleanup.py" \
+          --work-dir "$workdir" \
+          --binary-dir "$BINARY_DIR"
         workdir_cleanup_status=$?
-
-        # Runner-hygiene fallback for host networking resources left behind
-        # when conchd or CNI teardown did not complete.
-        for namespace in $(sudo -n ip netns list | awk '/^(ns|slot)-[0-9]+([[:space:]]|$)/ {print $1}'); do
-          sudo -n ip netns delete "$namespace" || true
-        done
-        for bridge in cni-conch0 conch_bridge; do
-          sudo -n ip link delete "$bridge" >/dev/null 2>&1 || true
-        done
 
         # Remove only the fixed-path resources that still point at this job.
         sdk_socket=/var/run/conch/conchd.sock

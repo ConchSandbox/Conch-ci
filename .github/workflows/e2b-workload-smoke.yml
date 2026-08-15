@@ -259,6 +259,7 @@ jobs:
         uses: ./.github/actions/cleanup-conch-runtime
         with:
           runtime-name: conch-e2b-sdk
+          binary-dir: ${{ steps.runner-environment.outputs.binary-dir }}
 
       - name: Clean workload files
         if: always()
@@ -513,6 +514,7 @@ jobs:
         uses: ./.github/actions/cleanup-conch-runtime
         with:
           runtime-name: conch-e2b-network-policy
+          binary-dir: ${{ steps.cni-tools.outputs.binary-dir }}
 
       - name: Clean network-policy files
         if: always()

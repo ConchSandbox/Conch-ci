@@ -259,6 +259,7 @@ runs:
       uses: ./.github/actions/cleanup-conch-runtime
       with:
         runtime-name: conch-template
+        binary-dir: ${{ steps.runner-environment.outputs.binary-dir }}
 
     - name: Clean template producer files
       if: always()
