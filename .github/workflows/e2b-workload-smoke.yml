@@ -404,8 +404,8 @@ jobs:
         working-directory: ${{ runner.temp }}/conch-e2b-network-policy-source
         env:
           CONCH_SDK_PYTHON: ${{ steps.sdk.outputs.python }}
-          CONCH_SANDBOX_ID: sandbox_network_policy_a_${{ github.run_id }}_${{ github.run_attempt }}
-          CONCH_REUSE_SANDBOX_ID: sandbox_network_policy_b_${{ github.run_id }}_${{ github.run_attempt }}
+          CONCH_SANDBOX_ID: np-a-${{ github.run_id }}-${{ github.run_attempt }}
+          CONCH_REUSE_SANDBOX_ID: np-b-${{ github.run_id }}-${{ github.run_attempt }}
           CONCH_TEMPLATE_ID: ${{ steps.template.outputs.template-id }}
           CONCH_CNI_CONTROL_DIR: ${{ steps.cni-tools.outputs.control-dir }}
         run: |
@@ -482,8 +482,8 @@ jobs:
         if: always()
         env:
           CONCH_SDK_PYTHON: ${{ steps.sdk.outputs.python }}
-          CONCH_SANDBOX_ID: sandbox_network_policy_a_${{ github.run_id }}_${{ github.run_attempt }}
-          CONCH_REUSE_SANDBOX_ID: sandbox_network_policy_b_${{ github.run_id }}_${{ github.run_attempt }}
+          CONCH_SANDBOX_ID: np-a-${{ github.run_id }}-${{ github.run_attempt }}
+          CONCH_REUSE_SANDBOX_ID: np-b-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set +e
           if [[ -n "${CONCH_SDK_PYTHON:-}" && -x "$CONCH_SDK_PYTHON" ]]; then
