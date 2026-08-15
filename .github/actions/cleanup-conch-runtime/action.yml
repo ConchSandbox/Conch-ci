@@ -1,9 +1,12 @@
 name: Clean Conch runtime
-description: Stop conchd and remove its job-local runtime and network state
+description: Stop conchd, report teardown residue, and fallback-clean its runtime
 
 inputs:
   runtime-name:
     description: Runtime name passed to start-conchd
+    required: true
+  binary-dir:
+    description: Runner binary directory passed to start-conchd
     required: true
 
 runs:
@@ -13,43 +16,80 @@ runs:
       shell: bash
       env:
         RUNTIME_NAME: ${{ inputs.runtime-name }}
+        BINARY_DIR: ${{ inputs.binary-dir }}
       run: |
         set -euo pipefail
         [[ "$RUNTIME_NAME" =~ ^[a-z0-9][a-z0-9-]*$ ]]
+        [[ "$BINARY_DIR" == /* && -x "$BINARY_DIR/cni/bridge" ]]
         workdir="$RUNNER_TEMP/$RUNTIME_NAME-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+        report_file="$RUNNER_TEMP/$RUNTIME_NAME-cleanup-report-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.md"
+        if [[ -e "$report_file" || -L "$report_file" ]]; then
+          echo "refusing to replace existing cleanup report: $report_file" >&2
+          exit 1
+        fi
 
         set +e
-        # start-conchd records both the sudo launcher and the conchd service PID.
-        # Stop either one that remains before looking for detached child resources.
-        for pid_file in "$workdir/conchd.pid" "$workdir/conchd-service.pid"; do
-          if [[ -f "$pid_file" ]]; then
-            pid=$(<"$pid_file")
-            [[ "$pid" =~ ^[0-9]+$ ]] || continue
-            sudo -n kill "$pid" >/dev/null 2>&1 || true
-            for _ in $(seq 1 30); do
-              sudo -n kill -0 "$pid" 2>/dev/null || break
-              sleep 1
-            done
-            sudo -n kill -0 "$pid" 2>/dev/null && sudo -n kill -9 "$pid" >/dev/null 2>&1 || true
+        # Give conchd a normal SIGTERM shutdown window, detect and report any
+        # dynamic residue, and enter fallback cleanup only when residue exists.
+        sudo -n env PYTHONDONTWRITEBYTECODE=1 python3 "$GITHUB_ACTION_PATH/cleanup.py" \
+          normal-shutdown \
+          --work-dir "$workdir" \
+          --binary-dir "$BINARY_DIR" \
+          --report-file "$report_file"
+        helper_status=$?
+        residue_detected=0
+        case "$helper_status" in
+          0)
+            workdir_cleanup_status=0
+            ;;
+          42)
+            # Fallback succeeded, so host resources and the workdir may still
+            # be cleaned. The step must nevertheless fail to expose the bug.
+            residue_detected=1
+            workdir_cleanup_status=0
+            ;;
+          *)
+            workdir_cleanup_status=$helper_status
+            ;;
+        esac
+
+        if [[ -e "$report_file" || -L "$report_file" ]]; then
+          if [[ -f "$report_file" && ! -L "$report_file" ]]; then
+            sudo -n cat -- "$report_file" | \
+              tee -a "$GITHUB_STEP_SUMMARY" >/dev/null || workdir_cleanup_status=1
+            sudo -n unlink -- "$report_file" || workdir_cleanup_status=1
+          else
+            echo "unsafe Conch cleanup report: $report_file" >&2
+            workdir_cleanup_status=1
           fi
-        done
+        elif (( residue_detected != 0 )); then
+          echo "Conch residue was detected but no cleanup report was produced" >&2
+          workdir_cleanup_status=1
+        fi
 
-        # Release VMM/virtiofs processes, mounts, and namespace handles. The
-        # helper fails closed when a workdir mount cannot be detached.
-        sudo -n python3 "$GITHUB_ACTION_PATH/cleanup.py" --work-dir "$workdir"
-        workdir_cleanup_status=$?
-
-        # Runner-hygiene fallback: remove standard named-netns entries plus
-        # host-local and libcni state when conchd or CNI teardown did not.
-        for namespace in $(sudo -n ip netns list | awk '/^(ns|slot)-[0-9]+([[:space:]]|$)/ {print $1}'); do
-          sudo -n ip netns delete "$namespace" || true
-        done
-        sudo -n find /var/lib/cni/networks/conch-bridge -mindepth 1 -delete 2>/dev/null || true
-        sudo -n find /var/lib/cni/results/conch-bridge -mindepth 1 -delete 2>/dev/null || true
-        sudo -n find /var/lib/conch/cni -depth -delete 2>/dev/null || true
-        for bridge in cni-conch0 conch_bridge; do
-          sudo -n ip link delete "$bridge" >/dev/null 2>&1 || true
-        done
+        # Remove only the fixed-path resources that still point at this job.
+        sdk_socket=/var/run/conch/conchd.sock
+        expected_socket="$workdir/work/conchd.sock"
+        if sudo -n test -e "$sdk_socket" || sudo -n test -L "$sdk_socket"; then
+          if sudo -n test -L "$sdk_socket" && \
+              [[ $(sudo -n readlink -- "$sdk_socket") == "$expected_socket" ]]; then
+            sudo -n unlink -- "$sdk_socket" || workdir_cleanup_status=1
+          else
+            echo "$sdk_socket is not owned by $workdir; refusing to remove it" >&2
+            workdir_cleanup_status=1
+          fi
+        fi
+        cni_conf_dir="$workdir/cni/net.d"
+        cni_mount=/etc/conch/cni/net.d
+        if mountpoint -q "$cni_mount"; then
+          if sudo -n test "$cni_conf_dir/.conch-ci-runtime" -ef \
+              "$cni_mount/.conch-ci-runtime"; then
+            sudo -n umount -- "$cni_mount" || workdir_cleanup_status=1
+          else
+            echo "$cni_mount is not owned by $workdir; refusing to unmount it" >&2
+            workdir_cleanup_status=1
+          fi
+        fi
 
         # Never recurse through the workdir until the helper has proved that no
         # mount below it remains; otherwise find could cross into mounted data.
@@ -63,5 +103,9 @@ runs:
           fi
         else
           echo "Conch work directory cleanup failed safely; leaving $workdir for inspection" >&2
+        fi
+        if (( residue_detected != 0 )); then
+          echo "Conch teardown left residual resources; fallback cleanup succeeded" >&2
+          exit 1
         fi
         exit "$workdir_cleanup_status"

@@ -46,20 +46,15 @@ eventctl="$script_dir/eventctl.py"
 
 results_dir="$work_dir/results"
 scenarios_dir="$work_dir/scenarios"
+fixed_cni_conf_dir="$work_dir/fixed-cni/net.d"
 global_events="$results_dir/cni-events.jsonl"
-mkdir -p "$results_dir" "$scenarios_dir"
+mkdir -p "$results_dir" "$scenarios_dir" "$fixed_cni_conf_dir"
 
 # The EXIT trap uses this state to stop only the daemon and mounts created by
 # the currently active scenario runner.
 run_conch_mounted=false
 active_pid=
 active_name=
-
-clear_conch_cni_state() {
-  if [[ -e /var/lib/conch/cni || -L /var/lib/conch/cni ]]; then
-    find /var/lib/conch/cni -depth -delete
-  fi
-}
 
 process_is_running() {
   [[ -n "$1" ]] && kill -0 "$1" 2>/dev/null
@@ -97,24 +92,26 @@ cleanup() {
   fi
   terminate_active_process
   chmod -R a+rX "$results_dir" 2>/dev/null
-  clear_conch_cni_state
-  cni_cleanup_status=$?
   [[ "$run_conch_mounted" != true ]] || umount -R -l /run/conch
-  if ((status == 0 && cni_cleanup_status != 0)); then
-    status=$cni_cleanup_status
-  fi
   exit "$status"
 }
 trap cleanup EXIT
 
 # The workflow starts this script in private mount, network, and PID namespaces.
-# Keep namespace handles job-local. libcni and host-local state use Conch's
-# system directory and are cleared before and after this serial runner test.
+# Keep namespace handles and the fixed CNI configuration path job-local.
+# CNI cache and host-local IPAM state are derived from each server.state_dir.
 mount --make-rprivate /
-clear_conch_cni_state
 mkdir -p /run/conch
 mount -t tmpfs -o mode=0700,nosuid,nodev tmpfs /run/conch
 run_conch_mounted=true
+for path in /etc/conch /etc/conch/cni /etc/conch/cni/net.d; do
+  [[ ! -L "$path" ]] || {
+    echo "refusing unsafe CNI configuration path: $path" >&2
+    exit 1
+  }
+done
+mkdir -p /etc/conch/cni/net.d
+mount --bind "$fixed_cni_conf_dir" /etc/conch/cni/net.d
 ip link set lo up
 
 # Conch configures explicit FORWARD rules between its CNI bridge and the
@@ -149,9 +146,10 @@ prepare_scenario() {
   mkdir -p \
     "$runtime_dir/home" \
     "$runtime_dir/tmp" \
-    "$runtime_dir/work" \
+    "$runtime_dir/state" \
     "$conf_dir" \
-    "$control_dir"
+    "$control_dir" \
+    "/run/conch/$name"
   printf '%s\n' "$plan" > "$control_dir/plan.json"
 
   cat > "$conf_dir/10-conch-ci.conf" <<JSON
@@ -164,7 +162,6 @@ prepare_scenario() {
   "ipMasq": true,
   "ipam": {
     "type": "host-local",
-    "dataDir": "/var/lib/conch/cni/networks",
     "subnet": "$subnet",
     "routes": [{"dst": "0.0.0.0/0"}]
   },
@@ -179,29 +176,21 @@ log:
   level: info
   output: stdout
 server:
-  unix_socket: "/run/conch/conch-ci-$name.sock"
-  pid_file: "$runtime_dir/conchd-service.pid"
-  work_dir: "$runtime_dir/work"
-state:
-  path: "$runtime_dir/state.db"
+  work_dir: "/run/conch/$name"
+  state_dir: "$runtime_dir/state"
 network:
   warm_pool_size: $warm_pool_size
   cni:
     plugin_bin_dirs:
       - "$(dirname "$control_plugin")"
       - "$cni_bin_dir"
-    plugin_conf_dir: "$conf_dir"
-containerd:
-  root_dir: "$runtime_dir/containerd-root"
-  state_dir: "$runtime_dir/containerd-state"
-vmm:
-  cloud_hypervisor:
-    binary: "$vmm_binary_dir/cloud-hypervisor"
 sandbox:
+  backend: cloud-hypervisor
   vsock_signal_retry: 10ms
   vsock_signal_timeout: 5s
   request_timeout: 10s
-  default_vmm_name: cloud-hypervisor
+  cloud_hypervisor:
+    binary: "$vmm_binary_dir/cloud-hypervisor"
 YAML
   chmod 0600 "$result_dir/config.yaml"
 }
@@ -209,7 +198,7 @@ YAML
 # Poll readiness and observable pool state without assuming fixed daemon timing.
 wait_for_socket() {
   local name=$1
-  local socket="/run/conch/conch-ci-$name.sock"
+  local socket="/run/conch/$name/conchd.sock"
   for ((attempt = 0; attempt < 900; attempt++)); do
     [[ ! -S "$socket" ]] || return 0
     if ! process_is_running "$active_pid"; then
@@ -257,6 +246,8 @@ start_scenario() {
 
   [[ -z "$active_pid" ]]
   active_name=$name
+  find "$fixed_cni_conf_dir" -mindepth 1 -maxdepth 1 -delete
+  install -m 0644 "$runtime_dir/cni/net.d/"*.conf "$fixed_cni_conf_dir/"
   # Run the real daemon. Successful CNI calls are delegated to the locked bridge
   # plugin; the control plugin records every call and injects planned failures.
   env \

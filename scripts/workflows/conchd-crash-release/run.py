@@ -24,7 +24,6 @@ if TYPE_CHECKING:
 
 
 NETWORK_NAMESPACE_DIR = Path("/run/conch/netns")
-DEFAULT_CNI_NETWORK_STATE_DIR = Path("/var/lib/cni/networks")
 BOOT_NAMESPACE = "conch"
 MOUNT_ESCAPE_RE = re.compile(r"\\([0-7]{3})")
 SOCKET_NAME_RE = re.compile(r"^[0-9a-f]{16}\.sock(?:\.serial)?$")
@@ -198,19 +197,10 @@ def cni_network_state(work_dir: Path) -> tuple[str, Path]:
         document = json.loads(path.read_text(encoding="utf-8"))
         name = document.get("name")
         if isinstance(name, str) and name:
-            ipam = document.get("ipam")
-            if ipam is not None and not isinstance(ipam, dict):
-                raise RuntimeError(f"CNI config has invalid ipam object: {path}")
-            raw_data_dir = ipam.get("dataDir") if isinstance(ipam, dict) else None
-            if raw_data_dir is None or raw_data_dir == "":
-                state_dir = DEFAULT_CNI_NETWORK_STATE_DIR
-            elif isinstance(raw_data_dir, str):
-                state_dir = require_absolute_safe_path(
-                    Path(raw_data_dir),
-                    "CNI network state directory",
-                )
-            else:
-                raise RuntimeError(f"CNI config has invalid ipam.dataDir: {path}")
+            state_dir = require_absolute_safe_path(
+                work_dir / "state" / "cni" / "networks",
+                "CNI network state directory",
+            )
             return name, state_dir
     raise RuntimeError(f"no named CNI config found below {config_dir}")
 
@@ -305,8 +295,8 @@ def start_volume_fixture(
 
     # Mountinfo reports the resolved host path, while Conch matches stale
     # virtiofsd processes against the runtime path written to its config.
-    volume_runtime = work_dir / "volumes"
-    process_runtime = logical_work_dir / "volumes"
+    volume_runtime = work_dir / "work" / "sandboxes"
+    process_runtime = logical_work_dir / "work" / "sandboxes"
     sandbox_runtime = volume_runtime / sandbox_id
     volume_dir = sandbox_runtime / "volume"
     mount_target = volume_dir / "0"
@@ -400,7 +390,7 @@ def prepare(args: argparse.Namespace) -> None:
         args.sandbox_id,
     )
 
-    service_pid = read_pid_file(work_dir / "conchd-service.pid")
+    service_pid = read_pid_file(work_dir / "work" / "conchd.pid")
     service_info = process_info(service_pid)
     if service_info is None:
         raise RuntimeError("conchd service process is missing")

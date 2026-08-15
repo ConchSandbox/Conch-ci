@@ -78,6 +78,13 @@ jobs:
           shellcheck "${runner_scripts[@]}"
           scripts/runner-env/runner-env.sh print-id
 
+      - name: Run Conch runtime cleanup unit tests
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          set -euo pipefail
+          python3 .github/actions/cleanup-conch-runtime/test_cleanup.py
+
       - name: Prepare locked erofs-utils
         run: |
           scripts/runner-env/jobs/prepare-erofs-utils.sh \
