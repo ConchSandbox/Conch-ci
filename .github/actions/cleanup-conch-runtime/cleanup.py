@@ -10,6 +10,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import signal
 import stat
 import subprocess
@@ -36,10 +37,18 @@ CNI_INTERFACE_NAME = "eth0"
 CNI_CONTAINER_PREFIX = "conch-slot-"
 CNI_BRIDGE_NAME = "cni-conch0"
 DEFAULT_CNI_DATA_DIR = "/var/lib/conch/cni/networks"
-TAP_INTERFACE_NAME = "tap0"
+SDK_SOCKET = Path("/var/run/conch/conchd.sock")
+CNI_CONF_MOUNT = Path("/etc/conch/cni/net.d")
+CNI_RUNTIME_MARKER = ".conch-ci-runtime"
+RUNTIME_WORKDIR_RE = re.compile(r"^[a-z0-9][a-z0-9-]*-[0-9]+-[0-9]+$")
+NORMAL_SHUTDOWN_MODE = "normal-shutdown"
+ABANDONED_RUN_MODE = "abandoned-run"
 # Keep this distinct from argparse's exit status 2 so the action can safely
 # distinguish "reported residue, fallback succeeded" from invocation errors.
 RESIDUAL_EXIT_STATUS = 42
+# Startup uses this to distinguish "nothing to recover" from a successfully
+# recovered runtime whose owning Actions job disappeared before cleanup.
+ABANDONED_RUN_EXIT_STATUS = 43
 
 
 @dataclass(frozen=True)
@@ -53,6 +62,15 @@ class CNIAttachment:
 
 
 @dataclass(frozen=True)
+class FixedRuntimeResources:
+    """Fixed host paths whose owner was validated as one CI runtime."""
+
+    workdir: Path
+    sdk_socket: bool
+    cni_mount: bool
+
+
+@dataclass(frozen=True)
 class ResidualResources:
     """Dynamic resources Conch should remove during graceful shutdown."""
 
@@ -61,7 +79,6 @@ class ResidualResources:
     cni_cache_entries: tuple[str, ...]
     network_namespaces: tuple[str, ...]
     bridge_ports: tuple[str, ...]
-    host_tap_present: bool
     nat_rule_count: int
     forward_rule_count: int
     workdir_mounts: tuple[str, ...]
@@ -74,7 +91,6 @@ class ResidualResources:
                 self.cni_cache_entries,
                 self.network_namespaces,
                 self.bridge_ports,
-                self.host_tap_present,
                 self.nat_rule_count,
                 self.forward_rule_count,
                 self.workdir_mounts,
@@ -232,6 +248,124 @@ def workdir_mount_targets(workdir: Path) -> set[str]:
         for target in mount_targets()
         if target == workdir_text or target.startswith(workdir_text + os.sep)
     }
+
+
+def validate_runner_temp(runner_temp: Path) -> Path:
+    normalized = Path(os.path.normpath(str(runner_temp)))
+    if not runner_temp.is_absolute() or normalized != runner_temp:
+        raise RuntimeError(f"RUNNER_TEMP must be a normalized absolute path: {runner_temp}")
+    resolved = runner_temp.resolve(strict=True)
+    if resolved == Path("/"):
+        raise RuntimeError(f"unsafe RUNNER_TEMP: {runner_temp}")
+    if not resolved.is_dir():
+        raise RuntimeError(f"RUNNER_TEMP is not a directory: {runner_temp}")
+    return resolved
+
+
+def validate_runtime_workdir(workdir: Path, runner_temp: Path) -> Path:
+    """Validate a marker-provided runtime as one direct RUNNER_TEMP child."""
+    normalized = Path(os.path.normpath(str(workdir)))
+    if not workdir.is_absolute() or normalized != workdir:
+        raise RuntimeError(f"runtime owner must be a normalized absolute path: {workdir}")
+    if workdir.parent != runner_temp or not RUNTIME_WORKDIR_RE.fullmatch(workdir.name):
+        raise RuntimeError(f"runtime owner is outside the supported layout: {workdir}")
+    if workdir.is_symlink():
+        raise RuntimeError(f"runtime owner must not be a symlink: {workdir}")
+    resolved_runner_temp = validate_runner_temp(runner_temp)
+    if workdir.resolve(strict=False).parent != resolved_runner_temp:
+        raise RuntimeError(f"runtime owner escapes RUNNER_TEMP: {workdir}")
+    return workdir
+
+
+def sdk_socket_owner(runner_temp: Path) -> Path | None:
+    """Return the validated runtime owner of the fixed SDK socket alias."""
+    if SDK_SOCKET.is_symlink():
+        target = Path(os.readlink(SDK_SOCKET))
+        normalized = Path(os.path.normpath(str(target)))
+        if (
+            not target.is_absolute()
+            or target != normalized
+            or target.name != "conchd.sock"
+            or target.parent.name != "work"
+        ):
+            raise RuntimeError(f"unsafe Conch SDK socket target: {target}")
+        return validate_runtime_workdir(target.parent.parent, runner_temp)
+    if SDK_SOCKET.exists():
+        raise RuntimeError(f"Conch SDK socket path is not a symlink: {SDK_SOCKET}")
+    return None
+
+
+def cni_mount_owner(runner_temp: Path) -> Path | None:
+    """Return the validated runtime owner recorded through the fixed CNI mount."""
+    if str(CNI_CONF_MOUNT) not in mount_targets():
+        return None
+    marker = CNI_CONF_MOUNT / CNI_RUNTIME_MARKER
+    try:
+        metadata = marker.lstat()
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"mounted CNI configuration has no runtime marker: {marker}") from exc
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 4096:
+        raise RuntimeError(f"mounted CNI runtime marker is unsafe: {marker}")
+    contents = marker.read_text(encoding="utf-8")
+    if not contents.endswith("\n") or "\n" in contents[:-1] or not contents[:-1]:
+        raise RuntimeError(f"mounted CNI runtime marker is malformed: {marker}")
+    return validate_runtime_workdir(Path(contents[:-1]), runner_temp)
+
+
+def fixed_runtime_resources(
+    runner_temp: Path, current_workdir: Path
+) -> FixedRuntimeResources | None:
+    """Resolve stale fixed resources, rejecting mixed or ambiguous ownership."""
+    validate_runtime_workdir(current_workdir, runner_temp)
+    socket_owner = sdk_socket_owner(runner_temp)
+    mount_owner = cni_mount_owner(runner_temp)
+    owners = {owner for owner in (socket_owner, mount_owner) if owner is not None}
+    if len(owners) > 1:
+        raise RuntimeError(
+            "fixed Conch resources have different owners: "
+            + ", ".join(str(owner) for owner in sorted(owners))
+        )
+    if not owners:
+        return None
+    owner = owners.pop()
+    if owner == current_workdir:
+        return None
+    return FixedRuntimeResources(
+        workdir=owner,
+        sdk_socket=socket_owner is not None,
+        cni_mount=mount_owner is not None,
+    )
+
+
+def remove_fixed_runtime_resources(
+    resources: FixedRuntimeResources, runner_temp: Path
+) -> None:
+    """Remove fixed paths only while they still name the validated old owner."""
+    if resources.cni_mount:
+        if cni_mount_owner(runner_temp) != resources.workdir:
+            raise RuntimeError("CNI mount ownership changed during abandoned-run recovery")
+        subprocess.run(["umount", "--", str(CNI_CONF_MOUNT)], check=True)
+        if str(CNI_CONF_MOUNT) in mount_targets():
+            raise RuntimeError(f"CNI configuration is still mounted: {CNI_CONF_MOUNT}")
+    if resources.sdk_socket:
+        if sdk_socket_owner(runner_temp) != resources.workdir:
+            raise RuntimeError("SDK socket ownership changed during abandoned-run recovery")
+        SDK_SOCKET.unlink()
+
+
+def remove_runtime_workdir(workdir: Path, runner_temp: Path) -> None:
+    """Delete a validated abandoned workdir after all of its mounts are gone."""
+    validate_runtime_workdir(workdir, runner_temp)
+    remaining_mounts = workdir_mount_targets(workdir)
+    if remaining_mounts:
+        raise RuntimeError(
+            "refusing to delete abandoned workdir with mounted paths: "
+            + ", ".join(sorted(remaining_mounts))
+        )
+    if workdir.is_symlink():
+        raise RuntimeError(f"refusing to delete symlinked runtime owner: {workdir}")
+    if workdir.exists():
+        shutil.rmtree(workdir)
 
 
 def cni_cache_entry_paths(workdir: Path) -> list[Path]:
@@ -612,7 +746,6 @@ def detect_residual_resources(
             str(namespaces[slot_id]) for slot_id in sorted(namespaces)
         ),
         bridge_ports=tuple(bridge_port_names()),
-        host_tap_present=link_exists(TAP_INTERFACE_NAME),
         nat_rule_count=len(nat_rules),
         forward_rule_count=len(forward_rules),
         workdir_mounts=tuple(sorted(workdir_mount_targets(workdir))),
@@ -624,7 +757,7 @@ def markdown_value(values: tuple[object, ...]) -> str:
     return text.replace("|", "\\|").replace("`", "\\`")
 
 
-def residual_report(resources: ResidualResources) -> str:
+def residual_report(resources: ResidualResources, mode: str) -> str:
     rows: list[tuple[str, str]] = []
     if resources.forced_daemon_pids:
         rows.append(
@@ -643,23 +776,27 @@ def residual_report(resources: ResidualResources) -> str:
         rows.append(("network namespaces", markdown_value(resources.network_namespaces)))
     if resources.bridge_ports:
         rows.append(("cni-conch0 ports", markdown_value(resources.bridge_ports)))
-    if resources.host_tap_present:
-        rows.append(("host-namespace tap", TAP_INTERFACE_NAME))
     if resources.nat_rule_count:
         rows.append(("Conch CNI NAT rules", str(resources.nat_rule_count)))
     if resources.forward_rule_count:
         rows.append(("cni-conch0 FORWARD rules", str(resources.forward_rule_count)))
     if resources.workdir_mounts:
         rows.append(("runtime mounts", markdown_value(resources.workdir_mounts)))
-    lines = [
-        "### Conch graceful-shutdown residual resources",
-        "",
-        "Conch left dynamic runtime resources after its graceful shutdown window. "
-        "This is treated as a Conch teardown bug; CI started fallback cleanup.",
-        "",
-        "| Resource | Residue |",
-        "| --- | --- |",
-    ]
+    if mode == NORMAL_SHUTDOWN_MODE:
+        title = "### Conch graceful-shutdown residual resources"
+        description = (
+            "Conch left dynamic runtime resources after its graceful shutdown window. "
+            "This is treated as a Conch teardown bug; CI started fallback cleanup."
+        )
+    elif mode == ABANDONED_RUN_MODE:
+        title = "### Abandoned Conch CI runtime recovery"
+        description = (
+            "A previous CI execution ended before its cleanup step completed. "
+            "CI inventoried its dynamic resources before starting fallback cleanup."
+        )
+    else:
+        raise RuntimeError(f"unsupported cleanup mode: {mode}")
+    lines = [title, "", description, "", "| Resource | Residue |", "| --- | --- |"]
     lines.extend(f"| {name} | {value} |" for name, value in rows)
     lines.extend(("", "Fallback cleanup started after this inventory.", ""))
     return "\n".join(lines)
@@ -686,6 +823,35 @@ def append_report(report_file: Path, contents: str) -> None:
     descriptor = os.open(report_file, flags)
     with os.fdopen(descriptor, "a", encoding="utf-8") as stream:
         stream.write(contents)
+
+
+def record_abandoned_fixed_resources(
+    report_file: Path, resources: FixedRuntimeResources
+) -> None:
+    names: list[str] = []
+    if resources.sdk_socket:
+        names.append(str(SDK_SOCKET))
+    if resources.cni_mount:
+        names.append(str(CNI_CONF_MOUNT))
+    contents = "\n".join(
+        (
+            "### Abandoned Conch CI runtime recovery",
+            "",
+            "A previous CI execution ended before its cleanup step completed.",
+            "",
+            f"- Validated runtime owner: `{resources.workdir}`",
+            f"- Fixed resources: {', '.join(names)}",
+            "",
+        )
+    )
+    if report_file.exists():
+        append_report(
+            report_file,
+            "\nFixed-path ownership was validated for "
+            f"`{resources.workdir}`: {', '.join(names)}.\n",
+        )
+    else:
+        write_report(report_file, contents)
 
 
 def delete_link(name: str) -> None:
@@ -719,9 +885,7 @@ def verify_network_cleanup() -> None:
         for tokens in iptables_rules("filter", "FORWARD")
         if conch_forward_rule(tokens)
     ]
-    remaining_links = [
-        name for name in (CNI_BRIDGE_NAME, TAP_INTERFACE_NAME) if link_exists(name)
-    ]
+    remaining_links = [CNI_BRIDGE_NAME] if link_exists(CNI_BRIDGE_NAME) else []
     if remaining_nat or remaining_filter or remaining_links:
         raise RuntimeError(
             "Conch host networking remains after cleanup: "
@@ -835,10 +999,6 @@ def fallback_cleanup(
 
     remove_network_namespace_handles(namespaces)
     delete_link(CNI_BRIDGE_NAME)
-    # Current Conch creates this persistent TAP only inside a slot namespace.
-    # Seeing it in the host namespace means an interrupted netns teardown moved
-    # it there; no live conchd remains at this point.
-    delete_link(TAP_INTERFACE_NAME)
     remove_conch_iptables_rules()
     verify_network_cleanup()
 
@@ -859,11 +1019,25 @@ def fallback_cleanup(
         )
 
 
-def cleanup(workdir: Path, binary_dir: Path, report_file: Path) -> bool:
-    """Stop conchd, report any residue, and run fallback only when necessary."""
-    forced_daemon_pids = terminate_processes(
-        runtime_processes(workdir, daemon=True), timeout=30
-    )
+def cleanup(
+    workdir: Path,
+    binary_dir: Path,
+    report_file: Path,
+    mode: str = NORMAL_SHUTDOWN_MODE,
+) -> bool:
+    """Inspect one runtime and fallback-clean dynamic residue when necessary."""
+    daemons = runtime_processes(workdir, daemon=True)
+    if mode == NORMAL_SHUTDOWN_MODE:
+        forced_daemon_pids = terminate_processes(daemons, timeout=30)
+    elif mode == ABANDONED_RUN_MODE:
+        if daemons:
+            raise RuntimeError(
+                "refusing to recover abandoned runtime with live conchd processes: "
+                + ", ".join(str(pid) for pid in sorted(daemons))
+            )
+        forced_daemon_pids = ()
+    else:
+        raise RuntimeError(f"unsupported cleanup mode: {mode}")
     remaining_daemons = runtime_processes(workdir, daemon=True)
     if remaining_daemons:
         raise RuntimeError(
@@ -890,10 +1064,13 @@ def cleanup(workdir: Path, binary_dir: Path, report_file: Path) -> bool:
             raise RuntimeError(f"expected empty bridge remains: {CNI_BRIDGE_NAME}")
         return False
 
-    write_report(report_file, residual_report(resources))
+    write_report(report_file, residual_report(resources, mode))
+    if mode == NORMAL_SHUTDOWN_MODE:
+        message = "Conch left dynamic resources after graceful shutdown"
+    else:
+        message = "An abandoned Conch CI runtime left dynamic resources"
     print(
-        "Conch left dynamic resources after graceful shutdown; "
-        f"fallback cleanup started and report written to {report_file}",
+        f"{message}; fallback cleanup started and report written to {report_file}",
         file=sys.stderr,
     )
     try:
@@ -911,27 +1088,80 @@ def cleanup(workdir: Path, binary_dir: Path, report_file: Path) -> bool:
     return True
 
 
+def recover_abandoned_runtime(
+    runner_temp: Path,
+    current_workdir: Path,
+    binary_dir: Path,
+    report_file: Path,
+) -> bool:
+    """Recover fixed paths owned by a dead, previous Actions runtime."""
+    resources = fixed_runtime_resources(runner_temp, current_workdir)
+    if resources is None:
+        return False
+
+    cleanup(
+        resources.workdir,
+        binary_dir,
+        report_file,
+        mode=ABANDONED_RUN_MODE,
+    )
+    record_abandoned_fixed_resources(report_file, resources)
+    try:
+        remove_fixed_runtime_resources(resources, runner_temp)
+        remove_runtime_workdir(resources.workdir, runner_temp)
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        try:
+            append_report(report_file, "\nAbandoned-run recovery status: **failed**\n")
+        except (OSError, RuntimeError) as report_exc:
+            print(
+                f"warning: cannot update recovery report: {report_exc}",
+                file=sys.stderr,
+            )
+        raise
+    append_report(report_file, "\nAbandoned-run recovery status: **succeeded**\n")
+    return True
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--work-dir", type=Path, required=True)
-    parser.add_argument("--binary-dir", type=Path, required=True)
-    parser.add_argument("--report-file", type=Path, required=True)
+    subparsers = parser.add_subparsers(dest="mode", required=True)
+    normal = subparsers.add_parser(NORMAL_SHUTDOWN_MODE)
+    normal.add_argument("--work-dir", type=Path, required=True)
+    normal.add_argument("--binary-dir", type=Path, required=True)
+    normal.add_argument("--report-file", type=Path, required=True)
+    abandoned = subparsers.add_parser(ABANDONED_RUN_MODE)
+    abandoned.add_argument("--runner-temp", type=Path, required=True)
+    abandoned.add_argument("--current-work-dir", type=Path, required=True)
+    abandoned.add_argument("--binary-dir", type=Path, required=True)
+    abandoned.add_argument("--report-file", type=Path, required=True)
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    workdir = args.work_dir
     binary_dir = args.binary_dir
     report_file = args.report_file
-    if not workdir.is_absolute() or workdir.resolve() == Path("/"):
-        raise SystemExit(f"work directory must be an absolute non-root path: {workdir}")
     if not binary_dir.is_absolute() or binary_dir.resolve() == Path("/"):
         raise SystemExit(f"binary directory must be an absolute non-root path: {binary_dir}")
     if not report_file.is_absolute() or report_file.resolve() == Path("/"):
         raise SystemExit(f"report file must be an absolute non-root path: {report_file}")
     try:
-        residue_detected = cleanup(workdir, binary_dir, report_file)
+        if args.mode == NORMAL_SHUTDOWN_MODE:
+            workdir = args.work_dir
+            if not workdir.is_absolute() or workdir.resolve() == Path("/"):
+                raise RuntimeError(
+                    f"work directory must be an absolute non-root path: {workdir}"
+                )
+            residue_detected = cleanup(workdir, binary_dir, report_file)
+            abandoned_recovered = False
+        else:
+            residue_detected = False
+            abandoned_recovered = recover_abandoned_runtime(
+                args.runner_temp,
+                args.current_work_dir,
+                binary_dir,
+                report_file,
+            )
     except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
         print(f"Conch runtime cleanup failed: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
@@ -941,6 +1171,12 @@ def main() -> None:
             "runtime resources after graceful shutdown; fallback cleanup succeeded."
         )
         raise SystemExit(RESIDUAL_EXIT_STATUS)
+    if abandoned_recovered:
+        print(
+            "::warning title=Recovered abandoned Conch CI runtime::A previous "
+            "run left fixed or dynamic runtime resources; recovery succeeded."
+        )
+        raise SystemExit(ABANDONED_RUN_EXIT_STATUS)
 
 
 if __name__ == "__main__":

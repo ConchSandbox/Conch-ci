@@ -31,7 +31,8 @@ runs:
         set +e
         # Give conchd a normal SIGTERM shutdown window, detect and report any
         # dynamic residue, and enter fallback cleanup only when residue exists.
-        sudo -n python3 "$GITHUB_ACTION_PATH/cleanup.py" \
+        sudo -n env PYTHONDONTWRITEBYTECODE=1 python3 "$GITHUB_ACTION_PATH/cleanup.py" \
+          normal-shutdown \
           --work-dir "$workdir" \
           --binary-dir "$BINARY_DIR" \
           --report-file "$report_file"

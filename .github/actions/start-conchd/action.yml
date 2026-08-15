@@ -58,7 +58,7 @@ runs:
       run: |
         set -euo pipefail
         [[ "$CONCH_SOURCE" == /* && -x "$CONCH_SOURCE/bin/conchd" ]]
-        [[ "$BINARY_DIR" == /* && -d "$BINARY_DIR/cni" ]]
+        [[ "$BINARY_DIR" == /* && -x "$BINARY_DIR/cni/bridge" ]]
         [[ "$RUNTIME_NAME" =~ ^[a-z0-9][a-z0-9-]*$ ]]
         [[ "$APP_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]
         [[ "$LOG_LEVEL" =~ ^(debug|info|warn|error)$ ]]
@@ -74,6 +74,49 @@ runs:
           echo "derived conchd socket path is too long: $unix_socket" >&2
           exit 1
         fi
+
+        # A runner interruption can skip every later `if: always()` cleanup
+        # step. Recover only fixed resources whose old RUNNER_TEMP owner is
+        # unambiguous and has no live conchd before claiming them for this run.
+        for path in /etc/conch /etc/conch/cni /etc/conch/cni/net.d /var/run/conch; do
+          if sudo -n test -L "$path"; then
+            echo "refusing unsafe Conch fixed path: $path" >&2
+            exit 1
+          fi
+        done
+        recovery_report="$RUNNER_TEMP/$RUNTIME_NAME-abandoned-runtime-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.md"
+        if [[ -e "$recovery_report" || -L "$recovery_report" ]]; then
+          echo "refusing to replace existing abandoned-runtime report: $recovery_report" >&2
+          exit 1
+        fi
+        set +e
+        sudo -n env PYTHONDONTWRITEBYTECODE=1 python3 \
+          "$GITHUB_ACTION_PATH/../cleanup-conch-runtime/cleanup.py" \
+          abandoned-run \
+          --runner-temp "$RUNNER_TEMP" \
+          --current-work-dir "$workdir" \
+          --binary-dir "$BINARY_DIR" \
+          --report-file "$recovery_report"
+        recovery_status=$?
+        set -e
+        if ((recovery_status == 43)); then
+          if [[ ! -f "$recovery_report" || -L "$recovery_report" ]]; then
+            echo "abandoned runtime was recovered without a safe report" >&2
+            exit 1
+          fi
+          sudo -n cat -- "$recovery_report" | tee -a "$GITHUB_STEP_SUMMARY" >/dev/null
+          sudo -n unlink -- "$recovery_report"
+        elif ((recovery_status != 0)); then
+          if [[ -f "$recovery_report" && ! -L "$recovery_report" ]]; then
+            sudo -n cat -- "$recovery_report" | tee -a "$GITHUB_STEP_SUMMARY" >/dev/null || true
+          fi
+          echo "abandoned Conch runtime recovery failed" >&2
+          exit "$recovery_status"
+        elif [[ -e "$recovery_report" || -L "$recovery_report" ]]; then
+          echo "unexpected abandoned-runtime report without recovered resources" >&2
+          exit 1
+        fi
+
         if [[ "$REUSE_RUNTIME" == true ]]; then
           require_runtime_file() {
             local path=$1
@@ -129,12 +172,6 @@ runs:
         # Conch loads CNI configuration from this fixed system path. Bind the
         # job-local directory over it so existing host configuration is hidden,
         # not overwritten. Calling jobs serialize this shared mount and SDK alias.
-        for path in /etc/conch /etc/conch/cni /etc/conch/cni/net.d; do
-          if sudo -n test -L "$path"; then
-            echo "refusing unsafe CNI configuration path: $path" >&2
-            exit 1
-          fi
-        done
         sudo -n mkdir -p /etc/conch/cni/net.d
         if mountpoint -q /etc/conch/cni/net.d; then
           if ! sudo -n test "$cni_conf_dir/.conch-ci-runtime" -ef \
@@ -150,10 +187,6 @@ runs:
         # derived socket job-local and expose only a checked symlink at that path.
         sdk_socket_dir=/var/run/conch
         sdk_socket="$sdk_socket_dir/conchd.sock"
-        if sudo -n test -L "$sdk_socket_dir"; then
-          echo "refusing unsafe SDK socket directory: $sdk_socket_dir" >&2
-          exit 1
-        fi
         sudo -n install -d -m 0755 "$sdk_socket_dir"
         if sudo -n test -e "$sdk_socket" || sudo -n test -L "$sdk_socket"; then
           if ! sudo -n test -L "$sdk_socket" || \

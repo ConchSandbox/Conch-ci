@@ -52,7 +52,6 @@ def residual_resources(**overrides: object) -> object:
         "cni_cache_entries": (),
         "network_namespaces": (),
         "bridge_ports": (),
-        "host_tap_present": False,
         "nat_rule_count": 0,
         "forward_rule_count": 0,
         "workdir_mounts": (),
@@ -219,6 +218,22 @@ class IPTablesRuleTests(unittest.TestCase):
 
 
 class CleanupControlFlowTests(unittest.TestCase):
+    def test_host_tap_is_not_treated_as_conch_residue(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with (
+                mock.patch.object(cleanup, "network_namespace_paths", return_value={}),
+                mock.patch.object(cleanup, "iptables_rules", return_value=[]),
+                mock.patch.object(cleanup, "cni_cache_entry_paths", return_value=[]),
+                mock.patch.object(cleanup, "bridge_port_names", return_value=[]),
+                mock.patch.object(cleanup, "workdir_mount_targets", return_value=set()),
+                mock.patch.object(cleanup, "link_exists") as link_exists,
+            ):
+                resources = cleanup.detect_residual_resources(root, (), {})
+
+            self.assertFalse(resources.found())
+            link_exists.assert_not_called()
+
     def test_clean_shutdown_skips_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -285,6 +300,7 @@ class CleanupControlFlowTests(unittest.TestCase):
     def test_main_uses_distinct_status_after_successful_fallback(self) -> None:
         arguments = [
             "cleanup.py",
+            "normal-shutdown",
             "--work-dir",
             "/tmp/conch-work",
             "--binary-dir",
@@ -303,6 +319,265 @@ class CleanupControlFlowTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, cleanup.RESIDUAL_EXIT_STATUS)
         self.assertIn("::error title=Conch teardown bug detected::", output.getvalue())
+
+
+class AbandonedRuntimeRecoveryTests(unittest.TestCase):
+    def runtime_paths(self, root: Path) -> tuple[Path, Path, Path]:
+        runner_temp = root / "runner-temp"
+        runner_temp.mkdir()
+        old_workdir = runner_temp / "conch-e2b-sdk-100-1"
+        current_workdir = runner_temp / "conch-e2b-sdk-101-1"
+        return runner_temp, old_workdir, current_workdir
+
+    def test_recovers_dangling_sdk_symlink_from_dead_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runner_temp, old_workdir, current_workdir = self.runtime_paths(root)
+            old_workdir.mkdir()
+            sdk_socket = root / "run/conch/conchd.sock"
+            sdk_socket.parent.mkdir(parents=True)
+            sdk_socket.symlink_to(old_workdir / "work/conchd.sock")
+            report = runner_temp / "recovery.md"
+
+            with (
+                mock.patch.object(cleanup, "SDK_SOCKET", sdk_socket),
+                mock.patch.object(cleanup, "CNI_CONF_MOUNT", root / "etc/conch"),
+                mock.patch.object(cleanup, "mount_targets", return_value=set()),
+                mock.patch.object(cleanup, "cleanup", return_value=False) as run_cleanup,
+            ):
+                recovered = cleanup.recover_abandoned_runtime(
+                    runner_temp,
+                    current_workdir,
+                    runner_temp / "bin",
+                    report,
+                )
+
+            self.assertTrue(recovered)
+            self.assertFalse(sdk_socket.is_symlink())
+            self.assertFalse(old_workdir.exists())
+            self.assertIn(
+                "Abandoned Conch CI runtime recovery",
+                report.read_text(encoding="utf-8"),
+            )
+            run_cleanup.assert_called_once_with(
+                old_workdir,
+                runner_temp / "bin",
+                report,
+                mode=cleanup.ABANDONED_RUN_MODE,
+            )
+
+    def test_current_runtime_fixed_resource_is_not_recovered(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runner_temp, _old_workdir, current_workdir = self.runtime_paths(root)
+            sdk_socket = root / "run/conch/conchd.sock"
+            sdk_socket.parent.mkdir(parents=True)
+            sdk_socket.symlink_to(current_workdir / "work/conchd.sock")
+
+            with (
+                mock.patch.object(cleanup, "SDK_SOCKET", sdk_socket),
+                mock.patch.object(cleanup, "CNI_CONF_MOUNT", root / "etc/conch"),
+                mock.patch.object(cleanup, "mount_targets", return_value=set()),
+            ):
+                resources = cleanup.fixed_runtime_resources(
+                    runner_temp, current_workdir
+                )
+
+            self.assertIsNone(resources)
+
+    def test_rejects_live_conchd_in_abandoned_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with (
+                mock.patch.object(
+                    cleanup, "runtime_processes", return_value={123: 456}
+                ),
+                mock.patch.object(cleanup, "terminate_processes") as terminate,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "live conchd"):
+                    cleanup.cleanup(
+                        root / "work",
+                        root / "bin",
+                        root / "report.md",
+                        mode=cleanup.ABANDONED_RUN_MODE,
+                    )
+
+            terminate.assert_not_called()
+
+    def test_abandoned_residue_is_not_reported_as_graceful_teardown_bug(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            report = root / "report.md"
+            resources = residual_resources(nat_rule_count=1)
+            with (
+                mock.patch.object(cleanup, "runtime_processes", return_value={}),
+                mock.patch.object(cleanup, "other_conchd_processes", return_value=[]),
+                mock.patch.object(
+                    cleanup, "detect_residual_resources", return_value=resources
+                ),
+                mock.patch.object(cleanup, "fallback_cleanup"),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                detected = cleanup.cleanup(
+                    root / "work",
+                    root / "bin",
+                    report,
+                    mode=cleanup.ABANDONED_RUN_MODE,
+                )
+
+            contents = report.read_text(encoding="utf-8")
+            self.assertTrue(detected)
+            self.assertIn("previous CI execution ended", contents)
+            self.assertNotIn("Conch teardown bug", contents)
+
+    def test_rejects_different_socket_and_mount_owners(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runner_temp, old_workdir, current_workdir = self.runtime_paths(root)
+            other_workdir = runner_temp / "conch-template-99-1"
+            sdk_socket = root / "run/conch/conchd.sock"
+            sdk_socket.parent.mkdir(parents=True)
+            sdk_socket.symlink_to(old_workdir / "work/conchd.sock")
+            cni_mount = root / "etc/conch/cni/net.d"
+            cni_mount.mkdir(parents=True)
+            (cni_mount / cleanup.CNI_RUNTIME_MARKER).write_text(
+                f"{other_workdir}\n", encoding="utf-8"
+            )
+
+            with (
+                mock.patch.object(cleanup, "SDK_SOCKET", sdk_socket),
+                mock.patch.object(cleanup, "CNI_CONF_MOUNT", cni_mount),
+                mock.patch.object(
+                    cleanup, "mount_targets", return_value={str(cni_mount)}
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "different owners"):
+                    cleanup.fixed_runtime_resources(runner_temp, current_workdir)
+
+    def test_discovers_abandoned_cni_mount_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runner_temp, old_workdir, current_workdir = self.runtime_paths(root)
+            cni_mount = root / "etc/conch/cni/net.d"
+            cni_mount.mkdir(parents=True)
+            (cni_mount / cleanup.CNI_RUNTIME_MARKER).write_text(
+                f"{old_workdir}\n", encoding="utf-8"
+            )
+
+            with (
+                mock.patch.object(cleanup, "SDK_SOCKET", root / "missing/socket"),
+                mock.patch.object(cleanup, "CNI_CONF_MOUNT", cni_mount),
+                mock.patch.object(
+                    cleanup, "mount_targets", return_value={str(cni_mount)}
+                ),
+            ):
+                resources = cleanup.fixed_runtime_resources(
+                    runner_temp, current_workdir
+                )
+
+            self.assertEqual(
+                resources,
+                cleanup.FixedRuntimeResources(old_workdir, False, True),
+            )
+
+    def test_rejects_marker_owner_outside_runner_temp(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runner_temp, _old_workdir, current_workdir = self.runtime_paths(root)
+            cni_mount = root / "etc/conch/cni/net.d"
+            cni_mount.mkdir(parents=True)
+            (cni_mount / cleanup.CNI_RUNTIME_MARKER).write_text(
+                "/tmp/conch-e2b-sdk-100-1\n", encoding="utf-8"
+            )
+
+            with (
+                mock.patch.object(cleanup, "SDK_SOCKET", root / "missing/socket"),
+                mock.patch.object(cleanup, "CNI_CONF_MOUNT", cni_mount),
+                mock.patch.object(
+                    cleanup, "mount_targets", return_value={str(cni_mount)}
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "supported layout"):
+                    cleanup.fixed_runtime_resources(runner_temp, current_workdir)
+
+    def test_cni_mount_recovery_revalidates_owner_before_unmount(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runner_temp, old_workdir, _current_workdir = self.runtime_paths(root)
+            cni_mount = root / "etc/conch/cni/net.d"
+            resources = cleanup.FixedRuntimeResources(
+                workdir=old_workdir,
+                sdk_socket=False,
+                cni_mount=True,
+            )
+
+            with (
+                mock.patch.object(cleanup, "CNI_CONF_MOUNT", cni_mount),
+                mock.patch.object(
+                    cleanup, "cni_mount_owner", return_value=old_workdir
+                ),
+                mock.patch.object(cleanup, "mount_targets", return_value=set()),
+                mock.patch.object(cleanup.subprocess, "run") as run,
+            ):
+                cleanup.remove_fixed_runtime_resources(resources, runner_temp)
+
+            run.assert_called_once_with(
+                ["umount", "--", str(cni_mount)], check=True
+            )
+
+    def test_recovery_failure_keeps_fixed_resources(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runner_temp, old_workdir, current_workdir = self.runtime_paths(root)
+            resources = cleanup.FixedRuntimeResources(old_workdir, True, True)
+
+            with (
+                mock.patch.object(
+                    cleanup, "fixed_runtime_resources", return_value=resources
+                ),
+                mock.patch.object(
+                    cleanup, "cleanup", side_effect=RuntimeError("cleanup failed")
+                ),
+                mock.patch.object(
+                    cleanup, "remove_fixed_runtime_resources"
+                ) as remove_fixed,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "cleanup failed"):
+                    cleanup.recover_abandoned_runtime(
+                        runner_temp,
+                        current_workdir,
+                        runner_temp / "bin",
+                        runner_temp / "report.md",
+                    )
+
+            remove_fixed.assert_not_called()
+
+    def test_main_reports_successful_abandoned_run_recovery(self) -> None:
+        arguments = [
+            "cleanup.py",
+            "abandoned-run",
+            "--runner-temp",
+            "/tmp/runner",
+            "--current-work-dir",
+            "/tmp/runner/conch-e2b-sdk-101-1",
+            "--binary-dir",
+            "/tmp/conch-bin",
+            "--report-file",
+            "/tmp/conch-report.md",
+        ]
+        output = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", arguments),
+            mock.patch.object(
+                cleanup, "recover_abandoned_runtime", return_value=True
+            ),
+            contextlib.redirect_stdout(output),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            cleanup.main()
+
+        self.assertEqual(raised.exception.code, cleanup.ABANDONED_RUN_EXIT_STATUS)
+        self.assertIn("Recovered abandoned Conch CI runtime", output.getvalue())
 
 
 if __name__ == "__main__":
