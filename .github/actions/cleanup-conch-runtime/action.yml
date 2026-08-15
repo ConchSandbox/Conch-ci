@@ -1,5 +1,5 @@
 name: Clean Conch runtime
-description: Stop conchd and remove its job-local runtime and network state
+description: Stop conchd, report teardown residue, and fallback-clean its runtime
 
 inputs:
   runtime-name:
@@ -22,15 +22,49 @@ runs:
         [[ "$RUNTIME_NAME" =~ ^[a-z0-9][a-z0-9-]*$ ]]
         [[ "$BINARY_DIR" == /* && -x "$BINARY_DIR/cni/bridge" ]]
         workdir="$RUNNER_TEMP/$RUNTIME_NAME-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+        report_file="$RUNNER_TEMP/$RUNTIME_NAME-cleanup-report-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.md"
+        if [[ -e "$report_file" || -L "$report_file" ]]; then
+          echo "refusing to replace existing cleanup report: $report_file" >&2
+          exit 1
+        fi
 
         set +e
-        # Stop only processes whose command line belongs to this runtime. Then
-        # replay CNI DEL from the job-local libcni cache before releasing netns
-        # handles, fixed-name links, firewall rules, and workdir mounts.
+        # Give conchd a normal SIGTERM shutdown window, detect and report any
+        # dynamic residue, and enter fallback cleanup only when residue exists.
         sudo -n python3 "$GITHUB_ACTION_PATH/cleanup.py" \
           --work-dir "$workdir" \
-          --binary-dir "$BINARY_DIR"
-        workdir_cleanup_status=$?
+          --binary-dir "$BINARY_DIR" \
+          --report-file "$report_file"
+        helper_status=$?
+        residue_detected=0
+        case "$helper_status" in
+          0)
+            workdir_cleanup_status=0
+            ;;
+          42)
+            # Fallback succeeded, so host resources and the workdir may still
+            # be cleaned. The step must nevertheless fail to expose the bug.
+            residue_detected=1
+            workdir_cleanup_status=0
+            ;;
+          *)
+            workdir_cleanup_status=$helper_status
+            ;;
+        esac
+
+        if [[ -e "$report_file" || -L "$report_file" ]]; then
+          if [[ -f "$report_file" && ! -L "$report_file" ]]; then
+            sudo -n cat -- "$report_file" | \
+              tee -a "$GITHUB_STEP_SUMMARY" >/dev/null || workdir_cleanup_status=1
+            sudo -n unlink -- "$report_file" || workdir_cleanup_status=1
+          else
+            echo "unsafe Conch cleanup report: $report_file" >&2
+            workdir_cleanup_status=1
+          fi
+        elif (( residue_detected != 0 )); then
+          echo "Conch residue was detected but no cleanup report was produced" >&2
+          workdir_cleanup_status=1
+        fi
 
         # Remove only the fixed-path resources that still point at this job.
         sdk_socket=/var/run/conch/conchd.sock
@@ -68,5 +102,9 @@ runs:
           fi
         else
           echo "Conch work directory cleanup failed safely; leaving $workdir for inspection" >&2
+        fi
+        if (( residue_detected != 0 )); then
+          echo "Conch teardown left residual resources; fallback cleanup succeeded" >&2
+          exit 1
         fi
         exit "$workdir_cleanup_status"

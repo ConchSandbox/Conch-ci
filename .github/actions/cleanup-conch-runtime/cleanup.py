@@ -37,6 +37,9 @@ CNI_CONTAINER_PREFIX = "conch-slot-"
 CNI_BRIDGE_NAME = "cni-conch0"
 DEFAULT_CNI_DATA_DIR = "/var/lib/conch/cni/networks"
 TAP_INTERFACE_NAME = "tap0"
+# Keep this distinct from argparse's exit status 2 so the action can safely
+# distinguish "reported residue, fallback succeeded" from invocation errors.
+RESIDUAL_EXIT_STATUS = 42
 
 
 @dataclass(frozen=True)
@@ -47,6 +50,36 @@ class CNIAttachment:
     plugin_config: dict[str, Any]
     cni_args: str
     cache_path: Path
+
+
+@dataclass(frozen=True)
+class ResidualResources:
+    """Dynamic resources Conch should remove during graceful shutdown."""
+
+    forced_daemon_pids: tuple[int, ...]
+    child_process_pids: tuple[int, ...]
+    cni_cache_entries: tuple[str, ...]
+    network_namespaces: tuple[str, ...]
+    bridge_ports: tuple[str, ...]
+    host_tap_present: bool
+    nat_rule_count: int
+    forward_rule_count: int
+    workdir_mounts: tuple[str, ...]
+
+    def found(self) -> bool:
+        return any(
+            (
+                self.forced_daemon_pids,
+                self.child_process_pids,
+                self.cni_cache_entries,
+                self.network_namespaces,
+                self.bridge_ports,
+                self.host_tap_present,
+                self.nat_rule_count,
+                self.forward_rule_count,
+                self.workdir_mounts,
+            )
+        )
 
 
 def process_start_time(pid: int) -> int | None:
@@ -60,6 +93,8 @@ def process_start_time(pid: int) -> int | None:
         return None
     fields = data[end + 2 :].split()
     if len(fields) < 20:
+        return None
+    if fields[0] == "Z":
         return None
     try:
         return int(fields[19])
@@ -123,12 +158,19 @@ def other_conchd_processes(workdir: Path) -> list[int]:
             continue
         pid = int(entry.name)
         command = process_command(pid)
-        if command is not None and command[0] == "conchd" and pid not in scoped:
+        if (
+            command is not None
+            and command[0] == "conchd"
+            and pid not in scoped
+            and process_start_time(pid) is not None
+        ):
             processes.append(pid)
     return sorted(processes)
 
 
-def terminate_processes(processes: dict[int, int], timeout: float) -> None:
+def terminate_processes(
+    processes: dict[int, int], timeout: float
+) -> tuple[int, ...]:
     """Stop captured processes, rechecking start time before every signal."""
     for pid, start_time in processes.items():
         if process_start_time(pid) != start_time:
@@ -147,11 +189,13 @@ def terminate_processes(processes: dict[int, int], timeout: float) -> None:
             break
         time.sleep(0.1)
 
+    forced: list[int] = []
     for pid, start_time in processes.items():
         if process_start_time(pid) != start_time:
             continue
         try:
             os.kill(pid, signal.SIGKILL)
+            forced.append(pid)
         except ProcessLookupError:
             pass
     deadline = time.monotonic() + 2
@@ -162,6 +206,7 @@ def terminate_processes(processes: dict[int, int], timeout: float) -> None:
         ):
             break
         time.sleep(0.1)
+    return tuple(sorted(forced))
 
 
 def decode_mount_path(value: str) -> str:
@@ -187,6 +232,22 @@ def workdir_mount_targets(workdir: Path) -> set[str]:
         for target in mount_targets()
         if target == workdir_text or target.startswith(workdir_text + os.sep)
     }
+
+
+def cni_cache_entry_paths(workdir: Path) -> list[Path]:
+    results_dir = workdir / "state" / "cni" / "results"
+    try:
+        return sorted(results_dir.iterdir(), key=lambda path: path.name)
+    except FileNotFoundError:
+        return []
+
+
+def bridge_port_names() -> list[str]:
+    bridge_ports = Path(f"/sys/class/net/{CNI_BRIDGE_NAME}/brif")
+    try:
+        return sorted(path.name for path in bridge_ports.iterdir())
+    except FileNotFoundError:
+        return []
 
 
 def unmount_workdir(workdir: Path) -> None:
@@ -277,11 +338,7 @@ def encode_cni_args(raw_args: Any) -> str:
 
 
 def load_cached_attachments(workdir: Path) -> list[CNIAttachment]:
-    results_dir = workdir / "state" / "cni" / "results"
-    try:
-        paths = sorted(results_dir.iterdir(), key=lambda path: path.name)
-    except FileNotFoundError:
-        return []
+    paths = cni_cache_entry_paths(workdir)
 
     attachments: list[CNIAttachment] = []
     expected_data_dir = workdir / "state" / "cni" / "networks"
@@ -532,6 +589,105 @@ def link_exists(name: str) -> bool:
     return completed.returncode == 0
 
 
+def detect_residual_resources(
+    workdir: Path,
+    forced_daemon_pids: tuple[int, ...],
+    child_processes: dict[int, int],
+) -> ResidualResources:
+    """Inspect without mutating after conchd has had a graceful exit window."""
+    namespaces = network_namespace_paths()
+    nat_rules = [tokens for tokens in iptables_rules("nat") if conch_nat_rule(tokens)]
+    forward_rules = [
+        tokens
+        for tokens in iptables_rules("filter", "FORWARD")
+        if conch_forward_rule(tokens)
+    ]
+    return ResidualResources(
+        forced_daemon_pids=forced_daemon_pids,
+        child_process_pids=tuple(sorted(child_processes)),
+        cni_cache_entries=tuple(
+            str(path) for path in cni_cache_entry_paths(workdir)
+        ),
+        network_namespaces=tuple(
+            str(namespaces[slot_id]) for slot_id in sorted(namespaces)
+        ),
+        bridge_ports=tuple(bridge_port_names()),
+        host_tap_present=link_exists(TAP_INTERFACE_NAME),
+        nat_rule_count=len(nat_rules),
+        forward_rule_count=len(forward_rules),
+        workdir_mounts=tuple(sorted(workdir_mount_targets(workdir))),
+    )
+
+
+def markdown_value(values: tuple[object, ...]) -> str:
+    text = ", ".join(str(value) for value in values)
+    return text.replace("|", "\\|").replace("`", "\\`")
+
+
+def residual_report(resources: ResidualResources) -> str:
+    rows: list[tuple[str, str]] = []
+    if resources.forced_daemon_pids:
+        rows.append(
+            (
+                "conchd processes requiring SIGKILL",
+                markdown_value(resources.forced_daemon_pids),
+            )
+        )
+    if resources.child_process_pids:
+        rows.append(
+            ("VMM/virtiofs processes", markdown_value(resources.child_process_pids))
+        )
+    if resources.cni_cache_entries:
+        rows.append(("libcni result cache", markdown_value(resources.cni_cache_entries)))
+    if resources.network_namespaces:
+        rows.append(("network namespaces", markdown_value(resources.network_namespaces)))
+    if resources.bridge_ports:
+        rows.append(("cni-conch0 ports", markdown_value(resources.bridge_ports)))
+    if resources.host_tap_present:
+        rows.append(("host-namespace tap", TAP_INTERFACE_NAME))
+    if resources.nat_rule_count:
+        rows.append(("Conch CNI NAT rules", str(resources.nat_rule_count)))
+    if resources.forward_rule_count:
+        rows.append(("cni-conch0 FORWARD rules", str(resources.forward_rule_count)))
+    if resources.workdir_mounts:
+        rows.append(("runtime mounts", markdown_value(resources.workdir_mounts)))
+    lines = [
+        "### Conch graceful-shutdown residual resources",
+        "",
+        "Conch left dynamic runtime resources after its graceful shutdown window. "
+        "This is treated as a Conch teardown bug; CI started fallback cleanup.",
+        "",
+        "| Resource | Residue |",
+        "| --- | --- |",
+    ]
+    lines.extend(f"| {name} | {value} |" for name, value in rows)
+    lines.extend(("", "Fallback cleanup started after this inventory.", ""))
+    return "\n".join(lines)
+
+
+def write_report(report_file: Path, contents: str) -> None:
+    if not report_file.is_absolute() or report_file.parent.resolve() == Path("/"):
+        raise RuntimeError(f"report file must be below an absolute directory: {report_file}")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(report_file, flags, 0o644)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+        stream.write(contents)
+
+
+def append_report(report_file: Path, contents: str) -> None:
+    mode = report_file.lstat().st_mode
+    if not stat.S_ISREG(mode):
+        raise RuntimeError(f"unsafe cleanup report file: {report_file}")
+    flags = os.O_WRONLY | os.O_APPEND
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(report_file, flags)
+    with os.fdopen(descriptor, "a", encoding="utf-8") as stream:
+        stream.write(contents)
+
+
 def delete_link(name: str) -> None:
     if link_exists(name):
         subprocess.run(["ip", "link", "delete", name], check=True)
@@ -574,29 +730,44 @@ def verify_network_cleanup() -> None:
         )
 
 
-def cleanup(workdir: Path, binary_dir: Path) -> None:
-    """Release runtime resources and prove host and workdir cleanup completed."""
-    terminate_processes(runtime_processes(workdir, daemon=True), timeout=30)
-    terminate_processes(runtime_processes(workdir, daemon=False), timeout=5)
+def cached_slot_ids(workdir: Path) -> set[int]:
+    slots: set[int] = set()
+    for path in cni_cache_entry_paths(workdir):
+        match = CNI_CACHE_FILE_RE.fullmatch(path.name)
+        if match is None:
+            continue
+        slot_id = int(match.group(1))
+        validate_slot_id(slot_id)
+        slots.add(slot_id)
+    return slots
 
+
+def fallback_cleanup(
+    workdir: Path,
+    binary_dir: Path,
+    child_processes: dict[int, int],
+) -> None:
+    """Clean resources only after graceful-shutdown residue was reported."""
+    terminate_processes(child_processes, timeout=5)
     remaining_runtime_processes = {
         **runtime_processes(workdir, daemon=True),
         **runtime_processes(workdir, daemon=False),
     }
     if remaining_runtime_processes:
         raise RuntimeError(
-            "runtime processes survived termination: "
+            "runtime processes survived fallback termination: "
             + ", ".join(str(pid) for pid in sorted(remaining_runtime_processes))
         )
 
-    other_daemons = other_conchd_processes(workdir)
-    if other_daemons:
-        raise RuntimeError(
-            "refusing global Conch network cleanup while another conchd is live: "
-            + ", ".join(str(pid) for pid in other_daemons)
+    try:
+        attachments = load_cached_attachments(workdir)
+    except (OSError, RuntimeError) as exc:
+        attachments = []
+        print(
+            f"warning: cannot replay cached CNI configuration; "
+            f"using validated runtime config and fixed-name fallback: {exc}",
+            file=sys.stderr,
         )
-
-    attachments = load_cached_attachments(workdir)
     namespaces = network_namespace_paths()
     mounted = mount_targets()
 
@@ -619,7 +790,8 @@ def cleanup(workdir: Path, binary_dir: Path) -> None:
         except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
             failed[attachment.slot_id] = str(exc)
 
-    missing_slots = sorted(set(namespaces) - attached_slots)
+    expected_slots = set(namespaces) | cached_slot_ids(workdir)
+    missing_slots = sorted(expected_slots - attached_slots)
     if missing_slots:
         try:
             fallback_config = load_runtime_plugin_config(workdir)
@@ -635,8 +807,9 @@ def cleanup(workdir: Path, binary_dir: Path) -> None:
                         slot_id,
                         fallback_config,
                         "",
-                        str(namespaces[slot_id]) in mounted,
+                        str(namespaces.get(slot_id, "")) in mounted,
                     )
+                    failed.pop(slot_id, None)
                 except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
                     failed[slot_id] = str(exc)
 
@@ -686,10 +859,63 @@ def cleanup(workdir: Path, binary_dir: Path) -> None:
         )
 
 
+def cleanup(workdir: Path, binary_dir: Path, report_file: Path) -> bool:
+    """Stop conchd, report any residue, and run fallback only when necessary."""
+    forced_daemon_pids = terminate_processes(
+        runtime_processes(workdir, daemon=True), timeout=30
+    )
+    remaining_daemons = runtime_processes(workdir, daemon=True)
+    if remaining_daemons:
+        raise RuntimeError(
+            "conchd processes survived termination: "
+            + ", ".join(str(pid) for pid in sorted(remaining_daemons))
+        )
+
+    other_daemons = other_conchd_processes(workdir)
+    if other_daemons:
+        raise RuntimeError(
+            "refusing global Conch network inspection while another conchd is live: "
+            + ", ".join(str(pid) for pid in other_daemons)
+        )
+
+    child_processes = runtime_processes(workdir, daemon=False)
+    resources = detect_residual_resources(
+        workdir, forced_daemon_pids, child_processes
+    )
+    if not resources.found():
+        # The current Conch dev branch intentionally leaves the empty CNI bridge
+        # after Pool.Close. It is expected host state, not a teardown bug.
+        delete_link(CNI_BRIDGE_NAME)
+        if link_exists(CNI_BRIDGE_NAME):
+            raise RuntimeError(f"expected empty bridge remains: {CNI_BRIDGE_NAME}")
+        return False
+
+    write_report(report_file, residual_report(resources))
+    print(
+        "Conch left dynamic resources after graceful shutdown; "
+        f"fallback cleanup started and report written to {report_file}",
+        file=sys.stderr,
+    )
+    try:
+        fallback_cleanup(workdir, binary_dir, child_processes)
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        try:
+            append_report(report_file, "\nFallback cleanup status: **failed**\n")
+        except (OSError, RuntimeError) as report_exc:
+            print(
+                f"warning: cannot update cleanup report: {report_exc}",
+                file=sys.stderr,
+            )
+        raise
+    append_report(report_file, "\nFallback cleanup status: **succeeded**\n")
+    return True
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--work-dir", type=Path, required=True)
     parser.add_argument("--binary-dir", type=Path, required=True)
+    parser.add_argument("--report-file", type=Path, required=True)
     return parser.parse_args()
 
 
@@ -697,15 +923,24 @@ def main() -> None:
     args = parse_args()
     workdir = args.work_dir
     binary_dir = args.binary_dir
+    report_file = args.report_file
     if not workdir.is_absolute() or workdir.resolve() == Path("/"):
         raise SystemExit(f"work directory must be an absolute non-root path: {workdir}")
     if not binary_dir.is_absolute() or binary_dir.resolve() == Path("/"):
         raise SystemExit(f"binary directory must be an absolute non-root path: {binary_dir}")
+    if not report_file.is_absolute() or report_file.resolve() == Path("/"):
+        raise SystemExit(f"report file must be an absolute non-root path: {report_file}")
     try:
-        cleanup(workdir, binary_dir)
+        residue_detected = cleanup(workdir, binary_dir, report_file)
     except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
         print(f"Conch runtime cleanup failed: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
+    if residue_detected:
+        print(
+            "::error title=Conch teardown bug detected::Conch left dynamic "
+            "runtime resources after graceful shutdown; fallback cleanup succeeded."
+        )
+        raise SystemExit(RESIDUAL_EXIT_STATUS)
 
 
 if __name__ == "__main__":

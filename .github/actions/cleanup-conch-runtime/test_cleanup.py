@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import sys
@@ -41,6 +43,22 @@ def network_config(data_dir: str) -> dict[str, object]:
             }
         ],
     }
+
+
+def residual_resources(**overrides: object) -> object:
+    values = {
+        "forced_daemon_pids": (),
+        "child_process_pids": (),
+        "cni_cache_entries": (),
+        "network_namespaces": (),
+        "bridge_ports": (),
+        "host_tap_present": False,
+        "nat_rule_count": 0,
+        "forward_rule_count": 0,
+        "workdir_mounts": (),
+    }
+    values.update(overrides)
+    return cleanup.ResidualResources(**values)
 
 
 class CachedAttachmentTests(unittest.TestCase):
@@ -198,6 +216,93 @@ class IPTablesRuleTests(unittest.TestCase):
                 ["-A", "FORWARD", "-i", "cni-conch0", "-j", "DROP"]
             )
         )
+
+
+class CleanupControlFlowTests(unittest.TestCase):
+    def test_clean_shutdown_skips_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            report = root / "report.md"
+            with (
+                mock.patch.object(cleanup, "runtime_processes", return_value={}),
+                mock.patch.object(cleanup, "terminate_processes", return_value=()),
+                mock.patch.object(cleanup, "other_conchd_processes", return_value=[]),
+                mock.patch.object(
+                    cleanup,
+                    "detect_residual_resources",
+                    return_value=residual_resources(),
+                ),
+                mock.patch.object(cleanup, "delete_link") as delete_link,
+                mock.patch.object(cleanup, "link_exists", return_value=False),
+                mock.patch.object(cleanup, "fallback_cleanup") as fallback_cleanup,
+            ):
+                detected = cleanup.cleanup(root / "work", root / "bin", report)
+
+            self.assertFalse(detected)
+            self.assertFalse(report.exists())
+            delete_link.assert_called_once_with("cni-conch0")
+            fallback_cleanup.assert_not_called()
+
+    def test_residue_is_reported_before_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workdir = root / "work"
+            report = root / "report.md"
+            resources = residual_resources(
+                cni_cache_entries=(
+                    str(workdir / "state/cni/results/conch-bridge-conch-slot-2-eth0"),
+                ),
+                nat_rule_count=3,
+            )
+
+            def assert_report_exists(*_args: object) -> None:
+                self.assertTrue(report.exists())
+
+            with (
+                mock.patch.object(cleanup, "runtime_processes", return_value={}),
+                mock.patch.object(cleanup, "terminate_processes", return_value=()),
+                mock.patch.object(cleanup, "other_conchd_processes", return_value=[]),
+                mock.patch.object(
+                    cleanup, "detect_residual_resources", return_value=resources
+                ),
+                mock.patch.object(
+                    cleanup,
+                    "fallback_cleanup",
+                    side_effect=assert_report_exists,
+                ) as fallback_cleanup,
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                detected = cleanup.cleanup(workdir, root / "bin", report)
+
+            self.assertTrue(detected)
+            fallback_cleanup.assert_called_once_with(workdir, root / "bin", {})
+            contents = report.read_text(encoding="utf-8")
+            self.assertIn("Conch teardown bug", contents)
+            self.assertIn("libcni result cache", contents)
+            self.assertIn("Conch CNI NAT rules", contents)
+            self.assertIn("Fallback cleanup status: **succeeded**", contents)
+
+    def test_main_uses_distinct_status_after_successful_fallback(self) -> None:
+        arguments = [
+            "cleanup.py",
+            "--work-dir",
+            "/tmp/conch-work",
+            "--binary-dir",
+            "/tmp/conch-bin",
+            "--report-file",
+            "/tmp/conch-report.md",
+        ]
+        output = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", arguments),
+            mock.patch.object(cleanup, "cleanup", return_value=True),
+            contextlib.redirect_stdout(output),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            cleanup.main()
+
+        self.assertEqual(raised.exception.code, cleanup.RESIDUAL_EXIT_STATUS)
+        self.assertIn("::error title=Conch teardown bug detected::", output.getvalue())
 
 
 if __name__ == "__main__":
