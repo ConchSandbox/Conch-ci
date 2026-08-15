@@ -128,11 +128,15 @@ jobs:
     permissions:
       contents: read
     env:
-      CONCH_SANDBOX_ID: sandbox_crash_release_${{ github.run_id }}_${{ github.run_attempt }}
+      CONCH_SANDBOX_ID: cr-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Prepare job-local paths
         run: |
           set -euo pipefail
+          if ((${#CONCH_SANDBOX_ID} > 32)); then
+            echo "derived sandbox ID exceeds Conch's 32-character limit: $CONCH_SANDBOX_ID" >&2
+            exit 1
+          fi
           {
             echo "CONCH_SOURCE=$RUNNER_TEMP/conch-crash-release-source-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
             echo "CONCH_SDK_VENV=$RUNNER_TEMP/conch-crash-release-venv-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
