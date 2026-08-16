@@ -136,11 +136,10 @@ runs:
           --plain-http \
           "$TEMPLATE_IMAGE_REF")
         printf '%s\n' "$pull_output"
-        template_id=$(awk '$1 == "Template:" {print $2; exit}' <<<"$pull_output")
-        pulled_template_digest=$(awk '$1 == "Image" && $2 == "digest:" {print $3; exit}' \
+        template_id=$(awk '$1 == "Template" && $2 == "ID:" {print $3; exit}' \
           <<<"$pull_output")
-        [[ "$template_id" =~ ^tmpl_[[:alnum:]]+$ ]]
-        [[ "$pulled_template_digest" == "$template_digest" ]]
+        [[ "$template_id" =~ ^sha256:[0-9a-f]{64}$ ]]
+        [[ "$template_id" == "$template_digest" ]]
 
         ghcr_template_tag="$GHCR_TEMPLATE_REPOSITORY:build-$TEMPLATE_BUILD_ID"
         ./bin/conch template push \
