@@ -52,11 +52,14 @@ runs:
           "$IMAGE_PROFILE" >> "$GITHUB_OUTPUT"
 
     - name: Checkout immutable Conch source
-      uses: ./.github/actions/checkout-conch
-      with:
-        repository: ${{ inputs.conch-repository }}
-        commit: ${{ inputs.conch-commit }}
-        destination: ${{ runner.temp }}/conch-template-publisher-source
+      shell: bash
+      env:
+        CONCH_REPOSITORY: ${{ inputs.conch-repository }}
+      run: |
+        scripts/runner-env/jobs/checkout-conch.sh \
+          --repository "$CONCH_REPOSITORY" \
+          --commit "${{ inputs.conch-commit }}" \
+          --destination "$RUNNER_TEMP/conch-template-publisher-source"
 
     - name: Build Conch binaries
       uses: ./.github/actions/build-conch
