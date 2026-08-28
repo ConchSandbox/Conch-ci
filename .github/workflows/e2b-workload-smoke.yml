@@ -202,7 +202,8 @@ jobs:
           fi
 
       - name: Upload integration diagnostics
-        if: always()
+        if: failure()
+        continue-on-error: true
         uses: actions/upload-artifact@v4.6.2
         with:
           name: template-image-p0-${{ github.run_id }}-${{ github.run_attempt }}
