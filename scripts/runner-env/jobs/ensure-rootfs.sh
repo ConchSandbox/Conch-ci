@@ -32,7 +32,7 @@ done
 [[ "$conch_commit" =~ ^[0-9a-f]{40}$ ]]
 [[ "$(git -C "$conch_source" rev-parse HEAD)" == "$conch_commit" ]]
 case "$source_repository" in
-  https://github.com/ConchSandbox/Conch.git|https://atomgit.com/openeuler/Conch.git) ;;
+  https://github.com/ConchSandbox/Conch.git|https://github.com/SToPire/Conch.git|https://atomgit.com/openeuler/Conch.git) ;;
   *) echo "unsupported Conch repository: $source_repository" >&2; exit 2 ;;
 esac
 [[ "$dockerfile_relative" =~ ^[A-Za-z0-9._/-]+$ ]]

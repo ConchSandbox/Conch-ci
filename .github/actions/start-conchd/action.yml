@@ -159,6 +159,7 @@ runs:
           vsock_signal_timeout: 90s
           request_timeout: 120s
           default_spec:
+            template_name: ""
             template_id: ""
             vcpu_num: 2
             vcpu_max: 2

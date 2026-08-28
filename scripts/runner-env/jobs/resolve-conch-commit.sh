@@ -21,6 +21,9 @@ case "$repository" in
   https://github.com/ConchSandbox/Conch.git)
     pr_ref_prefix=refs/pull
     ;;
+  https://github.com/SToPire/Conch.git)
+    pr_ref_prefix=refs/pull
+    ;;
   https://atomgit.com/openeuler/Conch.git)
     pr_ref_prefix=refs/merge-requests
     ;;

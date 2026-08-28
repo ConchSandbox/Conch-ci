@@ -4,6 +4,7 @@
 | --- | --- |
 | `prepare-self-hosted-runner.yml` | 检查或安装自托管 Runner 所需的锁定工具环境。 |
 | `build-and-check.yml` | 构建 Conch，并运行静态检查、Go 测试、Go vet、Python SDK 与 Conch-ci 运行时清理单元测试。 |
+| `template-image-integration.yml` | 使用本地 OCI registry 和隔离 conchd 验证 Image/Template 重定向、同名隔离、类型门禁及完整生命周期。 |
 | `network-pool-integration.yml` | 验证网络池预填、失败重试和资源清理。 |
 | `conchd-crash-release.yml` | 验证 `conchd` 异常退出并重启后能清理遗留资源，并复用同一 Sandbox ID。 |
 | `conch-init-smoke.yml` | 在真实虚拟机中验证 `conch-init` 启动、vsock 就绪和 SDK 健康检查。 |

@@ -18,7 +18,7 @@ while (($#)); do
 done
 
 case "$repository" in
-  https://github.com/ConchSandbox/Conch.git|https://atomgit.com/openeuler/Conch.git) ;;
+  https://github.com/ConchSandbox/Conch.git|https://github.com/SToPire/Conch.git|https://atomgit.com/openeuler/Conch.git) ;;
   *) echo "unsupported Conch repository: $repository" >&2; exit 2 ;;
 esac
 [[ "$commit" =~ ^[0-9a-f]{40}$ ]]
