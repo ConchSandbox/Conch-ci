@@ -58,7 +58,7 @@ jobs:
           else
             resolve_args+=(--ref "$CONCH_REF")
           fi
-          scripts/runner-env/jobs/resolve-conch-commit.sh "${resolve_args[@]}"
+          scripts/workflows/resolve-conch-commit.sh "${resolve_args[@]}"
 
   build-kernel:
     name: Build or reuse ARM64 kernel
@@ -132,11 +132,11 @@ jobs:
           mode: verify
 
       - name: Checkout immutable Conch source
-        run: |
-          scripts/runner-env/jobs/checkout-conch.sh \
-            --repository "$CONCH_REPOSITORY" \
-            --commit "${{ needs.resolve-conch.outputs.conch-commit }}" \
-            --destination "$RUNNER_TEMP/conch-template-image-integration-source"
+        uses: ./.github/actions/checkout-conch
+        with:
+          repository: ${{ env.CONCH_REPOSITORY }}
+          commit: ${{ needs.resolve-conch.outputs.conch-commit }}
+          destination: ${{ runner.temp }}/conch-template-image-integration-source
 
       - name: Build Conch binaries
         uses: ./.github/actions/build-conch

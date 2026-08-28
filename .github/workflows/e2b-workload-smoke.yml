@@ -70,7 +70,7 @@ jobs:
           else
             resolve_args+=(--ref "$CONCH_REF")
           fi
-          scripts/runner-env/jobs/resolve-conch-commit.sh "${resolve_args[@]}"
+          scripts/workflows/resolve-conch-commit.sh "${resolve_args[@]}"
 
   # Builds or restores the content-addressed ARM64 kernel required by the E2B
   # template consumed later in this workflow.
@@ -150,11 +150,11 @@ jobs:
           mode: verify
 
       - name: Checkout immutable Conch source
-        run: |
-          scripts/runner-env/jobs/checkout-conch.sh \
-            --repository "$CONCH_REPOSITORY" \
-            --commit "${{ needs.resolve-conch.outputs.conch-commit }}" \
-            --destination "$RUNNER_TEMP/conch-template-image-p0-source"
+        uses: ./.github/actions/checkout-conch
+        with:
+          repository: ${{ env.CONCH_REPOSITORY }}
+          commit: ${{ needs.resolve-conch.outputs.conch-commit }}
+          destination: ${{ runner.temp }}/conch-template-image-p0-source
 
       - name: Build Conch binaries
         uses: ./.github/actions/build-conch
@@ -234,6 +234,7 @@ jobs:
   # covering guest commands, DNS, outbound routing, inbound access, and delete.
   sdk-connectivity:
     name: E2B SDK and Guest Connectivity
+    if: ${{ github.event.inputs.run_sdk_smoke != 'false' }}
     needs: [resolve-conch, build-template, template-image-integration]
     runs-on: [self-hosted, Linux, ARM64, Huawei]
     timeout-minutes: 150
@@ -253,11 +254,11 @@ jobs:
           mode: verify
 
       - name: Checkout immutable Conch source
-        run: |
-          scripts/runner-env/jobs/checkout-conch.sh \
-            --repository "$CONCH_REPOSITORY" \
-            --commit "${{ needs.resolve-conch.outputs.conch-commit }}" \
-            --destination "$RUNNER_TEMP/conch-e2b-sdk-source"
+        uses: ./.github/actions/checkout-conch
+        with:
+          repository: ${{ env.CONCH_REPOSITORY }}
+          commit: ${{ needs.resolve-conch.outputs.conch-commit }}
+          destination: ${{ runner.temp }}/conch-e2b-sdk-source
 
       - name: Prepare Conch SDK
         id: sdk
@@ -403,11 +404,11 @@ jobs:
           mode: verify
 
       - name: Checkout immutable Conch source
-        run: |
-          scripts/runner-env/jobs/checkout-conch.sh \
-            --repository "$CONCH_REPOSITORY" \
-            --commit "${{ needs.resolve-conch.outputs.conch-commit }}" \
-            --destination "$RUNNER_TEMP/conch-e2b-network-policy-source"
+        uses: ./.github/actions/checkout-conch
+        with:
+          repository: ${{ env.CONCH_REPOSITORY }}
+          commit: ${{ needs.resolve-conch.outputs.conch-commit }}
+          destination: ${{ runner.temp }}/conch-e2b-network-policy-source
 
       - name: Prepare Conch SDK
         id: sdk
