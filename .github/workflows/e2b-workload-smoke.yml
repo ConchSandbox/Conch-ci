@@ -107,6 +107,7 @@ jobs:
       contents: read
       actions: read
     outputs:
+      rootfs-image-ref: ${{ steps.template.outputs.rootfs-image-ref }}
       template-image-ref: ${{ steps.template.outputs.template-image-ref }}
     steps:
       - name: Checkout CI repository
@@ -123,11 +124,114 @@ jobs:
           dockerfile: examples/e2b-rootfs/Dockerfile
           image-profile: e2b
 
+  # Exercises the complete Image/Template control-plane lifecycle before any
+  # VM workload consumes the produced Template.
+  template-image-integration:
+    name: Template/Image black-box lifecycle
+    needs: [resolve-conch, build-template]
+    runs-on: [self-hosted, Linux, ARM64, Huawei]
+    timeout-minutes: 60
+    concurrency:
+      group: conch-ci-conchd-runtime
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout CI repository
+        uses: actions/checkout@v4.4.0
+
+      - name: Verify runner environment
+        id: runner-environment
+        uses: ./.github/actions/ensure-runner-environment
+        with:
+          mode: verify
+
+      - name: Checkout immutable Conch source
+        run: |
+          scripts/runner-env/jobs/checkout-conch.sh \
+            --repository "$CONCH_REPOSITORY" \
+            --commit "${{ needs.resolve-conch.outputs.conch-commit }}" \
+            --destination "$RUNNER_TEMP/conch-template-image-p0-source"
+
+      - name: Build Conch binaries
+        uses: ./.github/actions/build-conch
+        with:
+          conch-source: ${{ runner.temp }}/conch-template-image-p0-source
+
+      - name: Start isolated conchd
+        id: conchd
+        uses: ./.github/actions/start-conchd
+        with:
+          conch-source: ${{ runner.temp }}/conch-template-image-p0-source
+          binary-dir: ${{ steps.runner-environment.outputs.binary-dir }}
+          runtime-name: conch-template-image-p0
+          app-name: conch-template-image-p0
+          log-level: debug
+          api-timeout: ${{ env.CONCH_API_TIMEOUT }}
+
+      - name: Run Template/Image P0 integration suite
+        env:
+          CONCH_SOURCE: ${{ runner.temp }}/conch-template-image-p0-source
+          CONCH_CONFIG: ${{ steps.conchd.outputs.config }}
+          CONCH_UNIX_SOCKET: ${{ steps.conchd.outputs.unix-socket }}
+          ROOTFS_IMAGE_REF: ${{ needs.build-template.outputs.rootfs-image-ref }}
+          TEMPLATE_IMAGE_REF: ${{ needs.build-template.outputs.template-image-ref }}
+          TEST_ARTIFACT_DIR: ${{ runner.temp }}/conch-template-image-p0-artifacts-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          timeout --foreground --kill-after=30s 45m \
+            python3 -u scripts/workflows/template-image-integration/run.py \
+              --conch-source "$CONCH_SOURCE" \
+              --config "$CONCH_CONFIG" \
+              --unix-socket "$CONCH_UNIX_SOCKET" \
+              --rootfs-image-ref "$ROOTFS_IMAGE_REF" \
+              --template-image-ref "$TEMPLATE_IMAGE_REF" \
+              --artifact-dir "$TEST_ARTIFACT_DIR"
+
+      - name: Dump conchd diagnostics on failure
+        if: failure()
+        env:
+          CONCHD_WORK_DIR: ${{ steps.conchd.outputs.work-dir }}
+        run: |
+          set +e
+          if [[ -n "${CONCHD_WORK_DIR:-}" && -f "$CONCHD_WORK_DIR/conchd.log" ]]; then
+            sed -n '1,800p' "$CONCHD_WORK_DIR/conchd.log"
+          fi
+
+      - name: Upload integration diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: template-image-p0-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/conch-template-image-p0-artifacts-${{ github.run_id }}-${{ github.run_attempt }}
+            ${{ runner.temp }}/conch-template-image-p0-${{ github.run_id }}-${{ github.run_attempt }}/conchd.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Clean Conch runtime
+        if: always()
+        uses: ./.github/actions/cleanup-conch-runtime
+        with:
+          runtime-name: conch-template-image-p0
+          binary-dir: ${{ steps.runner-environment.outputs.binary-dir }}
+
+      - name: Clean integration files
+        if: always()
+        run: |
+          set +e
+          for path in \
+            "$RUNNER_TEMP/conch-template-image-p0-source" \
+            "$RUNNER_TEMP/conch-template-image-p0-artifacts-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"; do
+            [[ -z "$path" || ! -e "$path" ]] || sudo -n find "$path" -depth -delete
+          done
+          exit 0
+
   # Exercises an E2B sandbox without a network policy through the current SDK,
   # covering guest commands, DNS, outbound routing, inbound access, and delete.
   sdk-connectivity:
     name: E2B SDK and Guest Connectivity
-    needs: [resolve-conch, build-template]
+    needs: [resolve-conch, build-template, template-image-integration]
     runs-on: [self-hosted, Linux, ARM64, Huawei]
     timeout-minutes: 150
     concurrency:
