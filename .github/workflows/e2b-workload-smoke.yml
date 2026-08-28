@@ -110,14 +110,36 @@ jobs:
       contents: read
       actions: read
     outputs:
-      rootfs-image-ref: ${{ steps.template.outputs.rootfs-image-ref }}
-      template-image-ref: ${{ steps.template.outputs.template-image-ref }}
+      rootfs-image-ref: ${{ steps.template.outputs.rootfs-image-ref || steps.feature-fixtures.outputs.rootfs-image-ref }}
+      template-image-ref: ${{ steps.template.outputs.template-image-ref || steps.feature-fixtures.outputs.template-image-ref }}
     steps:
       - name: Checkout CI repository
         uses: actions/checkout@v4.4.0
 
+      - name: Reuse immutable fixtures for pre-merge validation
+        id: feature-fixtures
+        if: ${{ startsWith(github.event.inputs.conch_ref, 'SToPire/') }}
+        run: |
+          set -euo pipefail
+          rootfs_image_ref=localhost:5000/conch-ci/conch-e2b-rootfs@sha256:a36eba83b1062f24886464e5d617f52f327d335b6d11c8fe7492ef355af8504f
+          template_image_ref=localhost:5000/conch-ci/conch-e2b-template@sha256:58f30ff65c9055632f02d278e14d85eceb9a9d8de49b91b924161a2c3cf0824d
+          for reference in "$rootfs_image_ref" "$template_image_ref"; do
+            repository=${reference#localhost:5000/}
+            repository=${repository%@*}
+            digest=${reference##*@}
+            curl --fail --silent --show-error --noproxy localhost \
+              --output /dev/null \
+              --header 'Accept: application/vnd.oci.image.index.v1+json' \
+              "http://localhost:5000/v2/$repository/manifests/$digest"
+          done
+          {
+            echo "rootfs-image-ref=$rootfs_image_ref"
+            echo "template-image-ref=$template_image_ref"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build or reuse E2B template
         id: template
+        if: ${{ !startsWith(github.event.inputs.conch_ref, 'SToPire/') }}
         uses: ./.github/actions/build-conch-template
         with:
           conch-repository: ${{ env.CONCH_REPOSITORY }}
