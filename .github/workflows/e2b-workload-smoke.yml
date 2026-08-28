@@ -34,7 +34,10 @@ defaults:
     shell: bash
 
 env:
-  CONCH_REPOSITORY: ${{ github.event.inputs.conch_repository || vars.CONCH_REPOSITORY || 'https://atomgit.com/openeuler/Conch.git' }}
+  # A feature workflow cannot use a newly added choice until that choice exists
+  # on the default branch. Route SToPire/* refs to the trusted fork so this
+  # branch can be validated before merge.
+  CONCH_REPOSITORY: ${{ startsWith(github.event.inputs.conch_ref, 'SToPire/') && 'https://github.com/SToPire/Conch.git' || github.event.inputs.conch_repository || vars.CONCH_REPOSITORY || 'https://atomgit.com/openeuler/Conch.git' }}
   CONCH_PR_NUMBER: ${{ github.event.inputs.conch_pr_number }}
   CONCH_REF: ${{ github.event.inputs.conch_ref || vars.CONCH_REF || 'dev' }}
   CONCH_API_TIMEOUT: 90m
