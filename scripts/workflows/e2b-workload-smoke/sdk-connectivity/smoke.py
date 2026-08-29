@@ -162,7 +162,7 @@ def assert_sandbox_absent(sandbox_id):
         raise RuntimeError(f"rejected sandbox is still present: {sandbox_id}")
 
 
-def validate_environment_rejections(template_id, base_sandbox_id):
+def validate_environment_rejections(template_name, base_sandbox_id):
     cases = (
         (
             "invalid environment key",
@@ -179,7 +179,7 @@ def validate_environment_rejections(template_id, base_sandbox_id):
         log(f"validating rejection of {name}: sandbox_id={sandbox_id}")
         try:
             unexpected = ConchSandbox.create(
-                template_id=template_id,
+                template_name=template_name,
                 sandbox_id=sandbox_id,
                 vcpu_num=2,
                 vcpu_max=2,
@@ -404,9 +404,9 @@ def main():
         f"using e2b={version('e2b')} "
         f"e2b-code-interpreter={version('e2b-code-interpreter')}"
     )
-    template_id = os.environ["CONCH_TEMPLATE_ID"]
+    template_name = os.environ["CONCH_TEMPLATE_NAME"]
     sandbox_id = os.environ["CONCH_SANDBOX_ID"]
-    validate_environment_rejections(template_id, sandbox_id)
+    validate_environment_rejections(template_name, sandbox_id)
 
     expected_environment = {
         "CONCH_E2E_SANDBOX_ENV": f"value for {sandbox_id} with spaces=preserved",
@@ -414,7 +414,7 @@ def main():
     }
     log("creating Conch sandbox with its initial environment")
     conch_sandbox = ConchSandbox.create(
-        template_id=template_id,
+        template_name=template_name,
         sandbox_id=sandbox_id,
         vcpu_num=2,
         vcpu_max=2,

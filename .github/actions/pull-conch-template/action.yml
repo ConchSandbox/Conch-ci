@@ -16,6 +16,9 @@ inputs:
     required: true
 
 outputs:
+  template-name:
+    description: Logical Name of the locally pulled template
+    value: ${{ steps.pull.outputs.template-name }}
   template-id:
     description: ID of the locally pulled template
     value: ${{ steps.pull.outputs.template-id }}
@@ -54,8 +57,14 @@ runs:
           "$TEMPLATE_IMAGE_REF")
         printf '%s\n' "$pull_output"
 
+        template_name=$(awk '$1 == "Template" && $2 == "Name:" {print $3; exit}' \
+          <<<"$pull_output")
         template_id=$(awk '$1 == "Template" && $2 == "ID:" {print $3; exit}' \
           <<<"$pull_output")
+        [[ "$template_name" == "$TEMPLATE_IMAGE_REF" ]]
         [[ "$template_id" =~ ^sha256:[0-9a-f]{64}$ ]]
         [[ "$template_id" == "$template_digest" ]]
-        echo "template-id=$template_id" >> "$GITHUB_OUTPUT"
+        {
+          echo "template-name=$template_name"
+          echo "template-id=$template_id"
+        } >> "$GITHUB_OUTPUT"

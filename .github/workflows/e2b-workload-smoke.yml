@@ -202,7 +202,7 @@ jobs:
         env:
           CONCH_SDK_PYTHON: ${{ steps.sdk.outputs.python }}
           CONCH_SANDBOX_ID: sandbox_e2b_sdk_${{ github.run_id }}_${{ github.run_attempt }}
-          CONCH_TEMPLATE_ID: ${{ steps.template.outputs.template-id }}
+          CONCH_TEMPLATE_NAME: ${{ steps.template.outputs.template-name }}
         run: |
           set -euo pipefail
           timeout --foreground --kill-after=30s 15m \

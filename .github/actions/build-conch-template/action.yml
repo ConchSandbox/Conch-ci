@@ -191,19 +191,23 @@ runs:
       run: |
         create_output=$(./bin/conch template create \
           --config "$CONCH_TEMPLATE_CONFIG" \
+          --name "$TEMPLATE_TAG" \
           --source "$ROOTFS_IMAGE_REF" \
           --kernel "$CONCH_TEMPLATE_KERNEL_PATH" \
           --initrd "$CONCH_TEMPLATE_INITRD" \
           --plain-http)
         printf '%s\n' "$create_output"
+        template_name=$(awk '$1 == "Template" && $2 == "Name:" {print $3; exit}' \
+          <<<"$create_output")
         template_id=$(awk '$1 == "Template" && $2 == "ID:" {print $3; exit}' \
           <<<"$create_output")
+        [[ "$template_name" == "$TEMPLATE_TAG" ]]
         [[ "$template_id" =~ ^sha256:[0-9a-f]{64}$ ]]
         ./bin/conch template push \
           --config "$CONCH_TEMPLATE_CONFIG" \
           --plain-http \
           --timeout 60m \
-          "$template_id" "$TEMPLATE_TAG"
+          "$template_name" "$TEMPLATE_TAG"
         remote_digest=$("$GITHUB_ACTION_PATH/inspect-template.sh" "$TEMPLATE_TAG")
         [[ "$remote_digest" == "$template_id" ]]
         template_repository=${TEMPLATE_TAG%:*}

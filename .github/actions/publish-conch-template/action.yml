@@ -118,7 +118,6 @@ runs:
         ./bin/conch image pull \
           --config "$CONCH_CONFIG" \
           --plain-http \
-          --skip-unpack \
           "$ROOTFS_IMAGE_REF"
         ghcr_rootfs_tag="$GHCR_ROOTFS_REPOSITORY:build-$ROOTFS_BUILD_ID"
         ./bin/conch image push \
@@ -136,8 +135,11 @@ runs:
           --plain-http \
           "$TEMPLATE_IMAGE_REF")
         printf '%s\n' "$pull_output"
+        template_name=$(awk '$1 == "Template" && $2 == "Name:" {print $3; exit}' \
+          <<<"$pull_output")
         template_id=$(awk '$1 == "Template" && $2 == "ID:" {print $3; exit}' \
           <<<"$pull_output")
+        [[ "$template_name" == "$TEMPLATE_IMAGE_REF" ]]
         [[ "$template_id" =~ ^sha256:[0-9a-f]{64}$ ]]
         [[ "$template_id" == "$template_digest" ]]
 
@@ -147,7 +149,7 @@ runs:
           --username "$GITHUB_ACTOR" \
           --password "$GHCR_TOKEN" \
           --timeout 60m \
-          "$template_id" "$ghcr_template_tag"
+          "$template_name" "$ghcr_template_tag"
         published_template_digest=$(
           "$GITHUB_WORKSPACE/.github/actions/build-conch-template/inspect-template.sh" \
             "$ghcr_template_tag"
