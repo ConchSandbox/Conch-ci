@@ -5,8 +5,8 @@ reference=${1:?Conch template reference is required}
 work_dir=$(mktemp -d)
 trap 'find "$work_dir" -depth -delete' EXIT
 
-if [[ "$reference" =~ ^localhost:5000/conch-ci/conch-[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?-template:build-[0-9a-f]{64}$ ]]; then
-  local_reference=${reference#localhost:5000/}
+if [[ "$reference" =~ ^localhost:5001/conch-ci/conch-[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?-template:build-[0-9a-f]{64}$ ]]; then
+  local_reference=${reference#localhost:5001/}
   repository=${local_reference%:*}
   tag=${local_reference##*:}
   curl \
@@ -17,7 +17,7 @@ if [[ "$reference" =~ ^localhost:5000/conch-ci/conch-[a-z0-9]([a-z0-9-]{0,61}[a-
     --dump-header "$work_dir/headers" \
     --header 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json' \
     --output "$work_dir/index.json" \
-    "http://localhost:5000/v2/$repository/manifests/$tag"
+    "http://localhost:5001/v2/$repository/manifests/$tag"
   digest=$(awk '
     tolower($1) == "docker-content-digest:" {
       gsub("\\r", "", $2)

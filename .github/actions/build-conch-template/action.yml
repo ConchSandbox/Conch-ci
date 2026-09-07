@@ -93,7 +93,7 @@ runs:
         [[ "$CONCH_COMMIT" =~ ^[0-9a-f]{40}$ ]]
         [[ "$KERNEL_SHA256" =~ ^[0-9a-f]{64}$ ]]
         [[ "$ROOTFS_IMAGE_REF" =~ @sha256:[0-9a-f]{64}$ ]]
-        [[ "$TEMPLATE_REPOSITORY" =~ ^localhost:5000/conch-ci/conch-[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?-template$ ]]
+        [[ "$TEMPLATE_REPOSITORY" =~ ^localhost:5001/conch-ci/conch-[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?-template$ ]]
         recipe_sha256=$(
           {
             sha256sum "$GITHUB_ACTION_PATH/action.yml" | awk '{print $1}'

@@ -8,7 +8,7 @@ fi
 image_profile=${1:?image profile is required}
 [[ "$image_profile" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]]
 
-local_registry=localhost:5000
+local_registry=localhost:5001
 local_prefix=$local_registry/conch-ci
 ghcr_registry=ghcr.io
 ghcr_prefix=$ghcr_registry/conchsandbox

@@ -548,7 +548,7 @@ class Suite:
 
 
 def parse_digest_reference(reference: str) -> tuple[str, str]:
-    if not reference.startswith("localhost:5000/") or "@" not in reference:
+    if not reference.startswith("localhost:5001/") or "@" not in reference:
         raise IntegrationError(f"expected a localhost digest reference: {reference!r}")
     repository, digest = reference.rsplit("@", 1)
     if not DIGEST_PATTERN.fullmatch(digest):
@@ -557,7 +557,7 @@ def parse_digest_reference(reference: str) -> tuple[str, str]:
 
 
 def parse_tag_reference(reference: str) -> tuple[str, str]:
-    if not reference.startswith("localhost:5000/"):
+    if not reference.startswith("localhost:5001/"):
         raise IntegrationError(f"expected a localhost tag reference: {reference!r}")
     slash = reference.rfind("/")
     colon = reference.rfind(":")
@@ -577,7 +577,7 @@ def make_tag_reference(repository: str, tag: str) -> str:
 
 
 def registry_path(repository: str, object_name: str) -> str:
-    prefix = "localhost:5000/"
+    prefix = "localhost:5001/"
     if not repository.startswith(prefix):
         raise IntegrationError(f"unsupported registry repository: {repository!r}")
     repository_path = repository[len(prefix) :]
@@ -589,7 +589,7 @@ def registry_get_manifest(reference: str) -> tuple[bytes, str, str]:
         repository, object_name = parse_digest_reference(reference)
     else:
         repository, object_name = parse_tag_reference(reference)
-    connection = http.client.HTTPConnection("localhost", 5000, timeout=30)
+    connection = http.client.HTTPConnection("localhost", 5001, timeout=30)
     try:
         connection.request(
             "GET",
@@ -622,7 +622,7 @@ def registry_put_manifest(
     manifest: bytes,
     media_type: str,
 ) -> str:
-    connection = http.client.HTTPConnection("localhost", 5000, timeout=30)
+    connection = http.client.HTTPConnection("localhost", 5001, timeout=30)
     try:
         connection.request(
             "PUT",

@@ -40,7 +40,7 @@ case "/$dockerfile_relative/" in
   *"/../"*|*"/./"*|*"//"*) echo "invalid Dockerfile path: $dockerfile_relative" >&2; exit 2 ;;
 esac
 git -C "$conch_source" ls-files --error-unmatch -- "$dockerfile_relative" >/dev/null
-[[ "$repository" =~ ^localhost:5000/conch-ci/conch-[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?-rootfs$ ]]
+[[ "$repository" =~ ^localhost:5001/conch-ci/conch-[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?-rootfs$ ]]
 [[ -x "$bin_dir/buildctl" && -x "$bin_dir/buildkitd" && -x "$bin_dir/buildkit-runc" ]]
 [[ -n "$work_dir" && "$work_dir" != / ]]
 dockerfile="$conch_source/$dockerfile_relative"
@@ -61,10 +61,10 @@ manifest_json="$work_dir/manifest.json"
 inspect_headers="$work_dir/inspect.headers"
 mkdir -p "$work_dir"
 curl --fail --silent --show-error --noproxy localhost --max-time 5 \
-  http://localhost:5000/v2/ >/dev/null
+  http://localhost:5001/v2/ >/dev/null
 
 inspect_image() {
-  local repository_path=${repository#localhost:5000/}
+  local repository_path=${repository#localhost:5001/}
   if ! curl \
     --fail \
     --silent \
@@ -73,7 +73,7 @@ inspect_image() {
     --dump-header "$inspect_headers" \
     --header 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json' \
     --output "$manifest_json" \
-    "http://localhost:5000/v2/$repository_path/manifests/build-$build_id"; then
+    "http://localhost:5001/v2/$repository_path/manifests/build-$build_id"; then
     return 1
   fi
   local index_digest
