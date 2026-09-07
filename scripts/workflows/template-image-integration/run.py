@@ -301,13 +301,15 @@ class Suite:
             name,
         )
 
-    def template_remove(self, name: str) -> None:
+    def template_remove(self, name: str, expect_success: bool = True) -> None:
         self.run_cli(
             "template",
             "rm",
             "--config",
             str(self.config),
             name,
+            expect_success=expect_success,
+            expected_error_code=None if expect_success else "template.not_found",
         )
 
     def mutate_remote_manifest(self, reference: str, label: str) -> str:
@@ -458,7 +460,7 @@ class Suite:
             if pulled != (name, self.template_digest):
                 raise IntegrationError(f"Template alias pull is wrong: {pulled!r}")
         self.template_remove(first_name)
-        self.template_remove(first_name)
+        self.template_remove(first_name, expect_success=False)
         self.assert_template_absent(first_name)
         if self.inspect_template(second_name).get("template_id") != self.template_digest:
             raise IntegrationError(f"removing {first_name} damaged {second_name}")
@@ -539,7 +541,7 @@ class Suite:
         if self.inspect_template(collision).get("template_id") != self.template_digest:
             raise IntegrationError(f"Image rm damaged Template {collision}")
         self.template_remove(collision)
-        self.template_remove(collision)
+        self.template_remove(collision, expect_success=False)
         self.assert_template_absent(collision)
         self.assert_record_hygiene()
         self.snapshot("name-collision")
