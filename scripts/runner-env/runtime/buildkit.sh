@@ -46,7 +46,7 @@ case "$mode" in
     log_file="$work_dir/buildkitd.log"
     config_file="$work_dir/buildkitd.toml"
     printf '%s\n' \
-      '[registry."localhost:5000"]' \
+      '[registry."localhost:5001"]' \
       '  http = true' \
       > "$config_file"
     # The runner shell intentionally owns this job-local log file.

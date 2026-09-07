@@ -59,8 +59,8 @@ COMPONENT_FILES = {
     "cni_plugins": ("bin/cni/bridge", "bin/cni/host-local", "bin/cni/loopback"),
 }
 
-LOCAL_REGISTRY_ENDPOINT = "localhost:5000"
-LOCAL_REGISTRY_LISTEN_ADDRESS = "127.0.0.1:5000"
+LOCAL_REGISTRY_ENDPOINT = "localhost:5001"
+LOCAL_REGISTRY_LISTEN_ADDRESS = "127.0.0.1:5001"
 REGISTRY_SERVICE_NAME = "conch-ci-registry.service"
 REGISTRY_SERVICE_UNIT = Path("/etc/systemd/system") / REGISTRY_SERVICE_NAME
 REGISTRY_HEALTH_URL = f"http://{LOCAL_REGISTRY_LISTEN_ADDRESS}/v2/"
@@ -865,7 +865,9 @@ def validate_state(value: Any) -> dict[str, Any]:
                     raise ValidationError(
                         f"state: invalid distribution_registry {field}"
                     )
-            if receipt["endpoint"] != LOCAL_REGISTRY_ENDPOINT:
+            # Accept the previous endpoint only as a migration receipt. Inspection
+            # still requires the current endpoint and plans reconfiguration.
+            if receipt["endpoint"] not in (LOCAL_REGISTRY_ENDPOINT, "localhost:5000"):
                 raise ValidationError("state: invalid distribution_registry endpoint")
     if not isinstance(value["last_changed_at"], str):
         raise ValidationError("state: invalid change timestamp")
