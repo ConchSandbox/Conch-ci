@@ -92,10 +92,15 @@ def string(value: Any, location: str, pattern: re.Pattern[str] | None = None) ->
     return value
 
 
-def validate_download(value: Any, location: str) -> None:
+def validate_download(value: Any, location: str, *, per_architecture: bool) -> None:
     item = exact_object(value, location, ("version", "sha256"))
     version = string(item["version"], f"{location}.version")
-    string(item["sha256"], f"{location}.sha256", SHA256_RE)
+    if per_architecture:
+        digests = exact_object(item["sha256"], f"{location}.sha256", ("arm64", "amd64"))
+        for architecture, digest in digests.items():
+            string(digest, f"{location}.sha256.{architecture}", SHA256_RE)
+    else:
+        string(item["sha256"], f"{location}.sha256", SHA256_RE)
     if FLOATING_RE.search(version):
         raise ValidationError(f"{location}.version: floating version is forbidden")
 
@@ -109,12 +114,12 @@ def validate_version(value: Any, location: str) -> None:
 
 def validate_lock(value: Any) -> dict[str, Any]:
     lock = exact_object(value, "$", ("schema_version", "managed_components", "job_build_inputs"))
-    if lock["schema_version"] != 1 or isinstance(lock["schema_version"], bool):
-        raise ValidationError("$.schema_version: expected integer 1")
+    if lock["schema_version"] != 2 or isinstance(lock["schema_version"], bool):
+        raise ValidationError("$.schema_version: expected integer 2")
 
     components = exact_object(lock["managed_components"], "$.managed_components", COMPONENTS)
     for name in COMPONENTS:
-        validate_download(components[name], f"$.managed_components.{name}")
+        validate_download(components[name], f"$.managed_components.{name}", per_architecture=name != "erofs_utils")
 
     inputs = exact_object(
         lock["job_build_inputs"],

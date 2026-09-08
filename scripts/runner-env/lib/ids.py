@@ -40,13 +40,15 @@ def kernel_build_id(
     source_archive_sha256: str,
     config_sha256: str,
     platform: str,
+    recipe_sha256: str,
 ) -> str:
     return framed_digest(
-        b"conch-kernel-build-id-v2",
+        b"conch-kernel-build-id-v3",
         [
             ("source_commit", source_commit),
             ("source_archive_sha256", source_archive_sha256),
             ("config_sha256", config_sha256),
+            ("recipe_sha256", recipe_sha256),
             ("platform", platform),
         ],
     )
@@ -130,6 +132,7 @@ def main() -> None:
     kernel.add_argument("--source-commit", required=True)
     kernel.add_argument("--source-archive-sha256", required=True)
     kernel.add_argument("--config-sha256", required=True)
+    kernel.add_argument("--recipe-sha256", required=True)
     kernel.add_argument("--platform", required=True, choices=("arm64", "amd64"))
     rootfs = subparsers.add_parser("rootfs")
     rootfs.add_argument("--platform", required=True)
@@ -146,6 +149,7 @@ def main() -> None:
                 args.source_archive_sha256,
                 args.config_sha256,
                 args.platform,
+                args.recipe_sha256,
             )
         )
     else:

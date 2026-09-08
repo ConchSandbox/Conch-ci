@@ -53,24 +53,25 @@ jobs:
             --repository "$CONCH_REPOSITORY" \
             --ref "$CONCH_REF"
 
-  # Builds or restores the content-addressed ARM64 kernel required by the E2B
+  # Builds or restores the content-addressed native kernel required by the E2B
   # template image.
   build-kernel:
-    name: Build or reuse ARM64 kernel
+    name: Build or reuse native kernel
     needs: resolve-conch
-    runs-on: [self-hosted, Linux, ARM64, Huawei]
+    runs-on: [self-hosted, Linux, Huawei]
     timeout-minutes: 180
     permissions:
       contents: read
       actions: write
     outputs:
+      runner-arch: ${{ runner.arch }}
       kernel-sha256: ${{ steps.kernel.outputs.kernel-sha256 }}
       kernel-artifact-name: ${{ steps.kernel.outputs.kernel-artifact-name }}
     steps:
       - name: Checkout CI repository
         uses: actions/checkout@v4.4.0
 
-      - name: Build or reuse ARM64 kernel
+      - name: Build or reuse native kernel
         id: kernel
         uses: ./.github/actions/build-kernel
         with:
@@ -82,7 +83,7 @@ jobs:
   build-template:
     name: Build or reuse E2B template
     needs: [resolve-conch, build-kernel]
-    runs-on: [self-hosted, Linux, ARM64, Huawei]
+    runs-on: [self-hosted, Linux, Huawei, "${{ needs.build-kernel.outputs.runner-arch }}"]
     timeout-minutes: 240
     concurrency:
       group: conch-ci-conchd-runtime
@@ -91,6 +92,8 @@ jobs:
       contents: read
       actions: read
     outputs:
+      registry-runner: ${{ runner.name }}
+      runner-arch: ${{ runner.arch }}
       rootfs-image-ref: ${{ steps.template.outputs.rootfs-image-ref }}
       rootfs-build-id: ${{ steps.template.outputs.rootfs-build-id }}
       template-image-ref: ${{ steps.template.outputs.template-image-ref }}
@@ -116,7 +119,7 @@ jobs:
     name: Publish E2B images to GHCR
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_to_ghcr }}
     needs: [resolve-conch, build-template]
-    runs-on: [self-hosted, Linux, ARM64, Huawei]
+    runs-on: [self-hosted, Linux, Huawei, "${{ needs.build-template.outputs.runner-arch }}"]
     timeout-minutes: 180
     concurrency:
       group: conch-ci-conchd-runtime
@@ -127,6 +130,11 @@ jobs:
     steps:
       - name: Checkout CI repository
         uses: actions/checkout@v4.4.0
+
+      - name: Verify local registry producer
+        uses: ./.github/actions/verify-local-registry
+        with:
+          producer-runner: ${{ needs.build-template.outputs.registry-runner }}
 
       - name: Publish rootfs and template to GHCR
         uses: ./.github/actions/publish-conch-template

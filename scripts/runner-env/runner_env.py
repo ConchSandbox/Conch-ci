@@ -32,6 +32,7 @@ sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 from archive import ArchiveError, extract_selected  # noqa: E402
 from ids import repository_environment_id  # noqa: E402
 from lock import ValidationError, load_lock  # noqa: E402
+from platforms import host_architecture, platform_receipt  # noqa: E402
 
 
 EXIT_USAGE_OR_SCHEMA = 2
@@ -155,19 +156,10 @@ def filesystem_available(name: str, path: Path = Path("/proc/filesystems")) -> b
 
 
 def verify_baseline() -> dict[str, str]:
-    if os.uname().machine != "aarch64":
-        raise BaselineError(f"unsupported architecture: {os.uname().machine}; Phase 1 requires aarch64")
-
-    os_release = parse_os_release()
-    expected = {
-        "ID": "openEuler",
-        "VERSION_ID": "24.03",
-        "PRETTY_NAME": "openEuler 24.03 (LTS-SP3)",
-    }
-    for key, expected_value in expected.items():
-        actual = os_release.get(key)
-        if actual != expected_value:
-            raise BaselineError(f"os-release {key}={actual!r}, expected {expected_value!r}")
+    try:
+        platform = platform_receipt(host_architecture(), parse_os_release())
+    except ValueError as exc:
+        raise BaselineError(str(exc)) from exc
 
     required_commands = (
         "autoconf",
@@ -256,12 +248,7 @@ def verify_baseline() -> dict[str, str]:
         except subprocess.CalledProcessError as exc:
             raise BaselineError(f"host build dependency unavailable through pkg-config: {package}") from exc
 
-    return {
-        "architecture": "arm64",
-        "os_id": expected["ID"],
-        "os_version_id": expected["VERSION_ID"],
-        "os_pretty_name": expected["PRETTY_NAME"],
-    }
+    return platform
 
 
 def _reject_symlink_ancestors(path: Path) -> None:
@@ -358,47 +345,40 @@ def local_lock(lock_path: Path, *, shared: bool, create: bool) -> Iterator[None]
         os.close(descriptor)
 
 
+def download_sha256(component: str, declaration: dict[str, Any]) -> str:
+    digest = declaration["sha256"]
+    return digest if component == "erofs_utils" else digest[host_architecture()]
+
+
+def asset_name(component: str, version: str) -> str:
+    architecture = host_architecture()
+    hypervisor_suffix = "-aarch64" if architecture == "arm64" else ""
+    return {
+        "cloud_hypervisor": f"cloud-hypervisor-static{hypervisor_suffix}",
+        "buildkit": f"buildkit-{version}.linux-{architecture}.tar.gz",
+        "distribution_registry": f"registry_{version.removeprefix('v')}_linux_{architecture}.tar.gz",
+        "erofs_utils": f"erofs-utils-{version.removeprefix('v')}.tar.gz",
+        "cni_plugins": f"cni-plugins-linux-{architecture}-{version}.tgz",
+    }[component]
+
+
 def source_url(component: str, version: str) -> str:
-    if component == "cloud_hypervisor":
-        return (
-            "https://github.com/ConchSandbox/cloud-hypervisor/releases/download/"
-            f"{version}/cloud-hypervisor-static-aarch64"
-        )
-    if component == "buildkit":
-        return (
-            "https://github.com/moby/buildkit/releases/download/"
-            f"{version}/buildkit-{version}.linux-arm64.tar.gz"
-        )
-    if component == "distribution_registry":
-        clean = version.removeprefix("v")
-        return (
-            "https://github.com/distribution/distribution/releases/download/"
-            f"{version}/registry_{clean}_linux_arm64.tar.gz"
-        )
     if component == "erofs_utils":
-        clean = version.removeprefix("v")
         return (
             "https://git.kernel.org/pub/scm/linux/kernel/git/xiang/erofs-utils.git/snapshot/"
-            f"erofs-utils-{clean}.tar.gz"
+            + asset_name(component, version)
         )
-    if component == "cni_plugins":
-        return (
-            "https://github.com/containernetworking/plugins/releases/download/"
-            f"{version}/cni-plugins-linux-arm64-{version}.tgz"
-        )
-    raise RunnerEnvError(f"unknown managed component: {component}")
+    repository = {
+        "cloud_hypervisor": "ConchSandbox/cloud-hypervisor",
+        "buildkit": "moby/buildkit",
+        "distribution_registry": "distribution/distribution",
+        "cni_plugins": "containernetworking/plugins",
+    }[component]
+    return f"https://github.com/{repository}/releases/download/{version}/{asset_name(component, version)}"
 
 
 def archive_name(component: str, version: str) -> str:
-    clean = version.replace("/", "_")
-    suffix = {
-        "cloud_hypervisor": "cloud-hypervisor-static-aarch64",
-        "buildkit": f"buildkit-{version}.linux-arm64.tar.gz",
-        "distribution_registry": f"registry_{version.removeprefix('v')}_linux_arm64.tar.gz",
-        "erofs_utils": f"erofs-utils-{version.removeprefix('v')}.tar.gz",
-        "cni_plugins": f"cni-plugins-linux-arm64-{version}.tgz",
-    }[component]
-    return f"{component}-{clean}-{suffix}"
+    return f"{component}-{version.replace('/', '_')}-{asset_name(component, version)}"
 
 
 def download_verified(url: str, expected_sha256: str, destination: Path) -> Path:
@@ -467,11 +447,13 @@ def smoke_component(component: str, root: Path) -> str:
     return " | ".join(output)
 
 
-def validate_arm64_elf(path: Path) -> None:
+def validate_native_elf(path: Path) -> None:
     result = run(["file", str(path)], capture=True)
     description = (result.stdout or "").strip()
-    if "ELF 64-bit" not in description or "ARM aarch64" not in description:
-        raise RunnerEnvError(f"expected ARM64 ELF executable at {path}: {description}")
+    architecture = host_architecture()
+    marker = {"arm64": "ARM aarch64", "amd64": "x86-64"}[architecture]
+    if "ELF 64-bit" not in description or marker not in description:
+        raise RunnerEnvError(f"expected {architecture} ELF executable at {path}: {description}")
 
 
 def atomic_install(source: Path, target: Path) -> None:
@@ -678,9 +660,9 @@ def configure_registry_service(paths: dict[str, Path]) -> None:
     )
 
 
-def install_component(component: str, declaration: dict[str, str], paths: dict[str, Path]) -> None:
+def install_component(component: str, declaration: dict[str, Any], paths: dict[str, Path]) -> None:
     version = declaration["version"]
-    expected_sha256 = declaration["sha256"]
+    expected_sha256 = download_sha256(component, declaration)
     url = source_url(component, version)
     archive = download_verified(
         url,
@@ -744,7 +726,7 @@ def install_component(component: str, declaration: dict[str, str], paths: dict[s
             if not os.access(staged, os.X_OK):
                 raise RunnerEnvError(f"{component} did not stage an executable file: {relative}")
             if component != "erofs_utils":
-                validate_arm64_elf(staged)
+                validate_native_elf(staged)
         if component != "erofs_utils":
             for command in component_smoke_commands(component, output_root):
                 run(command)
@@ -758,7 +740,7 @@ def install_component(component: str, declaration: dict[str, str], paths: dict[s
 
 def expected_component_receipt(
     component: str,
-    declaration: dict[str, str],
+    declaration: dict[str, Any],
     paths: dict[str, Path],
 ) -> dict[str, Any]:
     files = []
@@ -777,7 +759,7 @@ def expected_component_receipt(
         "declared_version": declaration["version"],
         "version_output": smoke_component(component, paths["root"]),
         "source_url": source_url(component, declaration["version"]),
-        "archive_sha256": declaration["sha256"],
+        "archive_sha256": download_sha256(component, declaration),
         "files": files,
     }
     if component == "erofs_utils":
@@ -813,14 +795,20 @@ def validate_state(value: Any) -> dict[str, Any]:
         or any(character not in "0123456789abcdef" for character in environment_id)
     ):
         raise ValidationError("state: invalid schema version or environment ID")
-    expected_platform = {
-        "architecture": "arm64",
-        "os_id": "openEuler",
-        "os_version_id": "24.03",
-        "os_pretty_name": "openEuler 24.03 (LTS-SP3)",
-    }
-    if value["platform"] != expected_platform or not isinstance(value["install_root"], str):
+    platform = value["platform"]
+    fields = {"architecture", "os_id", "os_version_id", "os_pretty_name"}
+    if not isinstance(platform, dict) or set(platform) != fields or not all(
+        isinstance(item, str) for item in platform.values()
+    ) or not isinstance(value["install_root"], str):
         raise ValidationError("state: invalid platform or install root")
+    try:
+        platform_receipt(platform["architecture"], {
+            "ID": platform["os_id"],
+            "VERSION_ID": platform["os_version_id"],
+            "PRETTY_NAME": platform["os_pretty_name"],
+        })
+    except ValueError as exc:
+        raise ValidationError(f"state: {exc}") from exc
     components = value["components"]
     legacy_components = set(COMPONENTS) - {"distribution_registry"}
     if not isinstance(components, dict) or (
@@ -888,7 +876,7 @@ def load_state(paths: dict[str, Path], *, strict: bool) -> dict[str, Any] | None
 
 def inspect_component(
     component: str,
-    declaration: dict[str, str],
+    declaration: dict[str, Any],
     receipt: dict[str, Any] | None,
     paths: dict[str, Path],
 ) -> set[str]:
@@ -897,7 +885,7 @@ def inspect_component(
     reasons: set[str] = set()
     if receipt.get("declared_version") != declaration["version"]:
         reasons.add("version-mismatch")
-    if receipt.get("archive_sha256") != declaration["sha256"]:
+    if receipt.get("archive_sha256") != download_sha256(component, declaration):
         reasons.add("digest-mismatch")
     if receipt.get("source_url") != source_url(component, declaration["version"]):
         reasons.add("configuration-mismatch")
@@ -983,7 +971,10 @@ def plan_operations(
             operations.append(operation_for(component, reasons, status=status))
     if (
         state is not None
-        and state.get("environment_id") != environment_id
+        and (
+            state.get("environment_id") != environment_id
+            or state.get("platform") != platform_receipt(host_architecture(), parse_os_release())
+        )
         and not any(operation["component"] == "ci_dependency_metadata" for operation in operations)
     ):
         operations.append(

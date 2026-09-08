@@ -36,14 +36,30 @@ ids="$script_dir/lib/ids.py"
 kernel_commit=$(python3 "$lock_file" get job_build_inputs.kernel_commit)
 kernel_archive_sha256=$(python3 "$lock_file" get job_build_inputs.kernel_archive_sha256)
 kernel_archive_url="https://gitee.com/openeuler/kernel/repository/archive/${kernel_commit}.tar.gz"
-platform=arm64
-config="$conch_source/config/oe-kernel/aarch/.config"
+platform=$(python3 "$script_dir/lib/platforms.py")
+case "$platform" in
+  arm64)
+    config="$conch_source/config/oe-kernel/aarch/.config"
+    kernel_arch=arm64
+    kernel_target=Image
+    image_pattern='ARM64|ARM aarch64'
+    ;;
+  amd64)
+    config="$conch_source/config/oe-kernel/x86/.config"
+    kernel_arch=x86
+    kernel_target=bzImage
+    image_pattern='Linux kernel x86 boot executable bzImage'
+    ;;
+  *) echo "unsupported kernel platform: $platform" >&2; exit 2 ;;
+esac
 [[ -f "$config" ]]
 config_sha256=$(sha256sum "$config" | awk '{print $1}')
+recipe_sha256=$(sha256sum "${BASH_SOURCE[0]}" | awk '{print $1}')
 build_id=$(python3 "$ids" kernel \
   --source-commit "$kernel_commit" \
   --source-archive-sha256 "$kernel_archive_sha256" \
   --config-sha256 "$config_sha256" \
+  --recipe-sha256 "$recipe_sha256" \
   --platform "$platform")
 artifact_name="kernel-${platform}-${build_id}"
 cache_dir="$cache_root/$artifact_name"
@@ -80,12 +96,13 @@ verify_cache() {
   [[ -f "$cache_dir/Image" && -f "$cache_dir/bzImage" && -f "$cache_dir/kernel-metadata.json" ]]
   cmp -s "$cache_dir/Image" "$cache_dir/bzImage"
   [[ $(stat -c '%s' "$cache_dir/Image") -gt 1048576 ]]
-  file "$cache_dir/Image" | grep -Eq 'ARM64|ARM aarch64'
+  file "$cache_dir/Image" | grep -Eq "$image_pattern"
   KERNEL_METADATA="$cache_dir/kernel-metadata.json" \
   KERNEL_BUILD_ID="$build_id" \
   KERNEL_SOURCE_COMMIT="$kernel_commit" \
   KERNEL_SOURCE_ARCHIVE_SHA256="$kernel_archive_sha256" \
   KERNEL_CONFIG_SHA256="$config_sha256" \
+  KERNEL_RECIPE_SHA256="$recipe_sha256" \
   KERNEL_PLATFORM="$platform" \
   python3 - <<'PY'
 import hashlib
@@ -97,15 +114,16 @@ from pathlib import Path
 metadata_path = Path(os.environ["KERNEL_METADATA"])
 metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
 expected = {
-    "schema_version": 2,
+    "schema_version": 3,
     "build_id": os.environ["KERNEL_BUILD_ID"],
     "source_commit": os.environ["KERNEL_SOURCE_COMMIT"],
     "source_archive_sha256": os.environ["KERNEL_SOURCE_ARCHIVE_SHA256"],
     "config_sha256": os.environ["KERNEL_CONFIG_SHA256"],
+    "recipe_sha256": os.environ["KERNEL_RECIPE_SHA256"],
     "platform": os.environ["KERNEL_PLATFORM"],
-    "native_output": "Image",
+    "native_output": "Image" if os.environ["KERNEL_PLATFORM"] == "arm64" else "bzImage",
     "workflow_alias": "bzImage",
-    "format": "ARM64 Image",
+    "format": "ARM64 Image" if os.environ["KERNEL_PLATFORM"] == "arm64" else "x86_64 bzImage",
 }
 for key, value in expected.items():
     if metadata.get(key) != value:
@@ -188,12 +206,16 @@ else
   [[ -f "$source_dir/Makefile" ]]
 
   install -m 0644 "$config" "$source_dir/.config"
-  make -C "$source_dir" olddefconfig
-  make -C "$source_dir" -j"$(nproc)" Image
-  native_image="$source_dir/arch/arm64/boot/Image"
+  make -C "$source_dir" ARCH="$kernel_arch" olddefconfig
+  if [[ "$platform" == amd64 ]]; then
+    grep -qx 'CONFIG_X86_64=y' "$source_dir/.config"
+    grep -qx 'CONFIG_PVH=y' "$source_dir/.config"
+  fi
+  make -C "$source_dir" ARCH="$kernel_arch" -j"$(nproc)" "$kernel_target"
+  native_image="$source_dir/arch/$kernel_arch/boot/$kernel_target"
   [[ -f "$native_image" ]]
   [[ $(stat -c '%s' "$native_image") -gt 1048576 ]]
-  file "$native_image" | grep -Eq 'ARM64|ARM aarch64'
+  file "$native_image" | grep -Eq "$image_pattern"
 
   mkdir -p "$cache_dir"
   install -m 0644 "$native_image" "$cache_dir/Image"
@@ -204,6 +226,7 @@ else
   KERNEL_SOURCE_COMMIT="$kernel_commit" \
   KERNEL_SOURCE_ARCHIVE_SHA256="$kernel_archive_sha256" \
   KERNEL_CONFIG_SHA256="$config_sha256" \
+  KERNEL_RECIPE_SHA256="$recipe_sha256" \
   KERNEL_PLATFORM="$platform" \
   CONCH_COMMIT="$conch_commit" \
   KERNEL_SHA256="$kernel_sha256" \
@@ -213,16 +236,17 @@ import os
 from pathlib import Path
 
 metadata = {
-    "schema_version": 2,
+    "schema_version": 3,
     "build_id": os.environ["KERNEL_BUILD_ID"],
     "source_commit": os.environ["KERNEL_SOURCE_COMMIT"],
     "source_archive_sha256": os.environ["KERNEL_SOURCE_ARCHIVE_SHA256"],
     "config_sha256": os.environ["KERNEL_CONFIG_SHA256"],
+    "recipe_sha256": os.environ["KERNEL_RECIPE_SHA256"],
     "platform": os.environ["KERNEL_PLATFORM"],
     "conch_commit": os.environ["CONCH_COMMIT"],
-    "native_output": "Image",
+    "native_output": "Image" if os.environ["KERNEL_PLATFORM"] == "arm64" else "bzImage",
     "workflow_alias": "bzImage",
-    "format": "ARM64 Image",
+    "format": "ARM64 Image" if os.environ["KERNEL_PLATFORM"] == "arm64" else "x86_64 bzImage",
     "sha256": os.environ["KERNEL_SHA256"],
 }
 Path(os.environ["KERNEL_METADATA"]).write_text(
@@ -236,7 +260,7 @@ PY
 fi
 
 kernel_sha256=$(sha256sum "$cache_dir/Image" | awk '{print $1}')
-printf 'ARM64 Image ready (workflow alias: bzImage)\n'
+printf '%s %s ready (workflow alias: bzImage)\n' "$platform" "$kernel_target"
 printf 'kernel sha256: %s\n' "$kernel_sha256"
 write_outputs "$kernel_sha256" "$cache_hit"
 
@@ -250,7 +274,7 @@ if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
     echo "- Config SHA-256: \`$config_sha256\`"
     echo "- Platform: \`$platform\`"
     echo "- Cache hit: \`$cache_hit\`"
-    echo "- Output: ARM64 \`Image\` (workflow alias: \`bzImage\`)"
+    echo "- Output: \`$platform $kernel_target\` (workflow alias: \`bzImage\`)"
     echo "- SHA-256: \`$kernel_sha256\`"
   } >> "$GITHUB_STEP_SUMMARY"
 fi
