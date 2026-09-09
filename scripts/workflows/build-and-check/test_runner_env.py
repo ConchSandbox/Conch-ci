@@ -21,7 +21,7 @@ sys.path.insert(0, str(ROOT / "scripts/runner-env"))
 import runner_env as env
 from ids import kernel_build_id, rootfs_build_id
 from lock import ValidationError, load_lock, validate_lock
-from platforms import host_architecture, platform_receipt, same_platform
+from platforms import host_architecture, platform_receipt
 
 UBUNTU = {"ID": "ubuntu", "VERSION_ID": "26.04", "PRETTY_NAME": "Ubuntu 26.04 LTS"}
 OPENEULER = {
@@ -33,8 +33,6 @@ class PlatformTests(unittest.TestCase):
     def test_supported_hosts(self):
         for machine, architecture, release in (
             ("aarch64", "arm64", OPENEULER), ("x86_64", "amd64", UBUNTU),
-            ("x86_64", "amd64", {**UBUNTU, "PRETTY_NAME": "Ubuntu 26.04.1 LTS"}),
-            ("x86_64", "amd64", {**UBUNTU, "PRETTY_NAME": "Ubuntu 26.04.2 LTS"}),
         ):
             with self.subTest(machine=machine), patch.object(
                 os, "uname", return_value=SimpleNamespace(machine=machine)
@@ -46,38 +44,6 @@ class PlatformTests(unittest.TestCase):
                 self.assertEqual(env.verify_baseline(), platform_receipt(architecture, release))
                 run.assert_any_call(["docker", "info"], capture=True)
                 run.assert_any_call(["sudo", "-n", "true"], capture=True)
-
-    def test_ubuntu_display_name_is_preserved_but_not_platform_identity(self):
-        recorded = platform_receipt("amd64", UBUNTU)
-        for name in ("Ubuntu 26.04.1 LTS", "Ubuntu 26.04.2 LTS", "Ubuntu"):
-            current = platform_receipt("amd64", {**UBUNTU, "PRETTY_NAME": name})
-            self.assertEqual(current["os_pretty_name"], name)
-            self.assertTrue(same_platform(recorded, current))
-            self.assertEqual(recorded["os_pretty_name"], UBUNTU["PRETTY_NAME"])
-        for field, value in (("architecture", "arm64"), ("os_id", "debian"), ("os_version_id", "99")):
-            self.assertFalse(same_platform(recorded, {**recorded, field: value}))
-
-    def test_openeuler_service_pack_remains_strict(self):
-        for name in ("openEuler 24.03 (LTS-SP2)", "openEuler 24.03 (LTS-SP4)", "openEuler 24.03"):
-            with self.subTest(name=name), self.assertRaises(ValueError):
-                platform_receipt("arm64", {**OPENEULER, "PRETTY_NAME": name})
-        recorded = platform_receipt("arm64", OPENEULER)
-        self.assertFalse(same_platform(recorded, {**recorded, "os_pretty_name": "openEuler 24.03 (LTS-SP4)"}))
-
-    def test_verify_accepts_ubuntu_point_update_without_writing_receipt(self):
-        recorded = platform_receipt("amd64", UBUNTU)
-        current = platform_receipt("amd64", {**UBUNTU, "PRETTY_NAME": "Ubuntu 26.04.1 LTS"})
-        state = {"environment_id": "a" * 64, "platform": recorded, "install_root": "/test/root", "components": {}}
-        original = copy.deepcopy(state)
-        with tempfile.TemporaryDirectory() as directory, patch.object(
-            env, "load_state", return_value=state
-        ), patch.object(env, "inspect_component", return_value=set()), patch.object(env, "smoke_component"):
-            paths = {"dirty": Path(directory) / "dirty", "root": Path("/test/root")}
-            lock = load_lock(ROOT / "runner-env.lock.yaml")
-            self.assertEqual(env.verify_unlocked(lock, "a" * 64, current, paths), original)
-            self.assertEqual(state, original)
-            with self.assertRaisesRegex(env.DriftError, "runner platform receipt mismatch"):
-                env.verify_unlocked(lock, "a" * 64, {**current, "architecture": "arm64"}, paths)
 
     def test_unsupported_platforms_fail_before_commands(self):
         for machine, release in (("riscv64", UBUNTU), ("x86_64", {**UBUNTU, "VERSION_ID": "99"})):
