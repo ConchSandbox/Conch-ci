@@ -272,7 +272,6 @@ jobs:
           SDK_PYTHON: ${{ steps.sdk.outputs.python }}
         run: |
           "$SDK_PYTHON" - <<'PY'
-          from functools import partial
           import os
           import time
           from conch.client import AgentClient
@@ -282,13 +281,11 @@ jobs:
               int(os.environ["CONCH_INIT_API_PORT"]),
               os.environ["CONCH_INIT_TOKEN"],
           )
-          # The current SDK does not expose a health-check timeout.
-          client.session.get = partial(client.session.get, timeout=5)
           deadline = time.monotonic() + 120
           last_error = None
           while time.monotonic() < deadline:
               try:
-                  response = client.health_check()
+                  response = client.health_check(request_timeout=5)
                   if response.get("status") != "OK":
                       raise RuntimeError(f"unexpected health response: {response!r}")
                   print(response)
