@@ -14,6 +14,9 @@
 
 自托管任务以 `self-hosted, Linux, Huawei` 为基础标签，支持 ARM64（aarch64）和
 X64（x86_64）；当前宿主系统允许 openEuler 24.03 LTS-SP3 或 Ubuntu 26.04 LTS。
+Ubuntu 使用 `ID` 和 `VERSION_ID` 判断兼容性，点版本的 `PRETTY_NAME` 变化不会
+导致平台拒绝或验证失败；显示名称仍记录在回执中，执行 `ensure` 时可更新。
+openEuler 仍保留精确的 LTS-SP3 校验。
 内核生产任务可以调度到任一架构，下游任务跟随生产者的架构，避免把 ARM64 内核或
 模板交给 X64 Runner。RootFS 和工具下载使用对应的 `arm64` / `amd64` 平台。
 

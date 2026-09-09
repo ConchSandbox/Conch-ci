@@ -32,7 +32,7 @@ sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 from archive import ArchiveError, extract_selected  # noqa: E402
 from ids import repository_environment_id  # noqa: E402
 from lock import ValidationError, load_lock  # noqa: E402
-from platforms import host_architecture, platform_receipt  # noqa: E402
+from platforms import host_architecture, platform_receipt, same_platform  # noqa: E402
 
 
 EXIT_USAGE_OR_SCHEMA = 2
@@ -1047,7 +1047,7 @@ def verify_unlocked(
             "runner environment declaration changed: "
             f"state={state['environment_id']} expected={environment_id}; run approved ensure"
         )
-    if state["platform"] != platform:
+    if not same_platform(state["platform"], platform):
         raise DriftError(f"runner platform receipt mismatch: {state['platform']} != {platform}")
     if state["install_root"] != str(paths["root"]):
         raise DriftError(
