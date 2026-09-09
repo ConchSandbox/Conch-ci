@@ -1,21 +1,29 @@
-schema_version: 1
+schema_version: 2
 
 managed_components:
   cloud_hypervisor:
     version: v52.0-conch
-    sha256: 363a3bcf5cd09b5885a3555c14e8f774c99aa87467ce60fcb65db41aaa677dcf
+    sha256:
+      arm64: 363a3bcf5cd09b5885a3555c14e8f774c99aa87467ce60fcb65db41aaa677dcf
+      amd64: da4e0d585f1553c6d3aac3282ee7acd7226fa316e800323a6c12d972f6129c7e
   buildkit:
     version: v0.32.0
-    sha256: bff1c800e765022cc498959d37250dd6101a07b8388f595d1548aaa378373e74
+    sha256:
+      arm64: bff1c800e765022cc498959d37250dd6101a07b8388f595d1548aaa378373e74
+      amd64: d2722fb31115f0170bee1208dc75335738a1fc497afa30bf174bcc6acd43c136
   distribution_registry:
     version: v3.1.1
-    sha256: 8167316d2b4a57e10d44f8c8a3c75fea5f3ec1c71872760bb903e5e8e52e9ad6
+    sha256:
+      arm64: 8167316d2b4a57e10d44f8c8a3c75fea5f3ec1c71872760bb903e5e8e52e9ad6
+      amd64: 6f330a3ba9ea1d23a6ee189f449d792595240585bb2f159123d76ac594f70dd8
   erofs_utils:
     version: 1.9.1
     sha256: a9ef5ab67c4b8d2d3e9ed71f39cd008bda653142a720d8a395a36f1110d0c432
   cni_plugins:
     version: v1.9.1
-    sha256: 56171987d3947707c3563db2f4001bccaf50fd63468611b9f3cbecb1375ee7ec
+    sha256:
+      arm64: 56171987d3947707c3563db2f4001bccaf50fd63468611b9f3cbecb1375ee7ec
+      amd64: b98f74a0f8522f0a83867178729c1aa70f2158f90c45a2ca8fa791db1c76b303
 
 job_build_inputs:
   go_toolchain:

@@ -63,23 +63,24 @@ jobs:
           fi
           scripts/runner-env/jobs/resolve-conch-commit.sh "${resolve_args[@]}"
 
-  # Builds or restores the content-addressed ARM64 kernel used by the template.
+  # Builds or restores the content-addressed native kernel used by the template.
   build-kernel:
-    name: Build or reuse ARM64 kernel
+    name: Build or reuse native kernel
     needs: resolve-conch
-    runs-on: [self-hosted, Linux, ARM64, Huawei]
+    runs-on: [self-hosted, Linux, Huawei]
     timeout-minutes: 180
     permissions:
       contents: read
       actions: write
     outputs:
+      runner-arch: ${{ runner.arch }}
       kernel-sha256: ${{ steps.kernel.outputs.kernel-sha256 }}
       kernel-artifact-name: ${{ steps.kernel.outputs.kernel-artifact-name }}
     steps:
       - name: Checkout CI repository
         uses: actions/checkout@v4.4.0
 
-      - name: Build or reuse ARM64 kernel
+      - name: Build or reuse native kernel
         id: kernel
         uses: ./.github/actions/build-kernel
         with:
@@ -90,15 +91,18 @@ jobs:
   build-template:
     name: Build or reuse E2B template
     needs: [resolve-conch, build-kernel]
-    runs-on: [self-hosted, Linux, ARM64, Huawei]
+    runs-on: [self-hosted, Linux, Huawei, "${{ needs.build-kernel.outputs.runner-arch }}"]
     timeout-minutes: 240
     concurrency:
       group: conch-ci-conchd-runtime
+      queue: max
       cancel-in-progress: false
     permissions:
       contents: read
       actions: read
     outputs:
+      registry-runner: ${{ runner.name }}
+      runner-arch: ${{ runner.arch }}
       template-image-ref: ${{ steps.template.outputs.template-image-ref }}
     steps:
       - name: Checkout CI repository
@@ -120,10 +124,11 @@ jobs:
   crash-release:
     name: Crash Release
     needs: [resolve-conch, build-template]
-    runs-on: [self-hosted, Linux, ARM64, Huawei]
+    runs-on: [self-hosted, Linux, Huawei, "${{ needs.build-template.outputs.runner-arch }}"]
     timeout-minutes: 120
     concurrency:
       group: conch-ci-conchd-runtime
+      queue: max
       cancel-in-progress: false
     permissions:
       contents: read
@@ -148,6 +153,11 @@ jobs:
 
       - name: Checkout CI repository
         uses: actions/checkout@v4.4.0
+
+      - name: Verify local registry producer
+        uses: ./.github/actions/verify-local-registry
+        with:
+          producer-runner: ${{ needs.build-template.outputs.registry-runner }}
 
       - name: Verify runner environment
         id: runner-environment

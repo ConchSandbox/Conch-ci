@@ -48,7 +48,7 @@ dockerfile="$conch_source/$dockerfile_relative"
 dockerfile_dir=$(dirname -- "$dockerfile")
 dockerfile_name=$(basename -- "$dockerfile")
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
-platform=linux/arm64
+platform="linux/$(python3 "$script_dir/lib/platforms.py")"
 script_sha256=$(sha256sum "${BASH_SOURCE[0]}" | awk '{print $1}')
 build_id=$(python3 "$script_dir/lib/ids.py" rootfs \
   --platform "$platform" \
@@ -123,10 +123,10 @@ if media_type.endswith("image.index.v1+json") or media_type.endswith("manifest.l
         item
         for item in manifest.get("manifests", [])
         if item.get("platform", {}).get("os") == "linux"
-        and item.get("platform", {}).get("architecture") == "arm64"
+        and item.get("platform", {}).get("architecture") == os.environ["ROOTFS_PLATFORM"].split("/")[1]
     ]
     if len(matches) != 1:
-        raise SystemExit(f"expected one linux/arm64 platform manifest, got {len(matches)}")
+        raise SystemExit(f"expected one {os.environ['ROOTFS_PLATFORM']} platform manifest, got {len(matches)}")
     platform_digest = matches[0].get("digest", "")
 else:
     platform_digest = index_digest

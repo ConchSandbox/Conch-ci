@@ -1,0 +1,22 @@
+name: Verify local registry producer
+description: Require the producer runner before consuming its immutable local OCI images
+
+inputs:
+  producer-runner:
+    description: Name of the runner that published the local OCI images
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Check producer identity
+      shell: bash
+      env:
+        REGISTRY_RUNNER: ${{ inputs.producer-runner }}
+        CURRENT_RUNNER: ${{ runner.name }}
+      run: |
+        set -euo pipefail
+        if [[ -z "$REGISTRY_RUNNER" || "$CURRENT_RUNNER" != "$REGISTRY_RUNNER" ]]; then
+          echo "Local OCI images belong to runner '$REGISTRY_RUNNER', not '$CURRENT_RUNNER'" >&2
+          exit 1
+        fi

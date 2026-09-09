@@ -3,6 +3,15 @@ name: Prepare Self-hosted Runner
 on:
   workflow_dispatch:
     inputs:
+      runner_arch:
+        description: Runner architecture to prepare (all prepares both)
+        required: true
+        type: choice
+        default: all
+        options:
+          - all
+          - ARM64
+          - X64
       mode:
         description: Read-only verification or installation
         required: true
@@ -31,7 +40,11 @@ jobs:
   # and repairs it only for an explicit ensure run or a reviewed main change.
   prepare:
     name: ${{ github.event_name == 'push' && 'Ensure' || inputs.mode }}
-    runs-on: [self-hosted, Linux, ARM64, Huawei]
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: ${{ fromJSON(github.event_name == 'push' && '["ARM64","X64"]' || inputs.runner_arch == 'ARM64' && '["ARM64"]' || inputs.runner_arch == 'X64' && '["X64"]' || '["ARM64","X64"]') }}
+    runs-on: [self-hosted, Linux, Huawei, "${{ matrix.arch }}"]
     timeout-minutes: 60
     steps:
       - name: Checkout CI repository

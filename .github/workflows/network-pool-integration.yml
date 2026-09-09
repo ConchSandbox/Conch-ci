@@ -67,7 +67,7 @@ jobs:
   network-integration:
     name: Network Pool Integration
     needs: resolve-conch
-    runs-on: [self-hosted, Linux, ARM64, Huawei]
+    runs-on: [self-hosted, Linux, Huawei]
     timeout-minutes: 20
 
     steps:

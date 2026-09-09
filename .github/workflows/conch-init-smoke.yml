@@ -61,24 +61,25 @@ jobs:
           fi
           scripts/runner-env/jobs/resolve-conch-commit.sh "${resolve_args[@]}"
 
-  # Builds or restores the content-addressed ARM64 kernel artifact used by the
+  # Builds or restores the content-addressed native kernel artifact used by the
   # real-VM conch-init smoke test.
   build-kernel:
-    name: Build or reuse ARM64 kernel
+    name: Build or reuse native kernel
     needs: resolve-conch
-    runs-on: [self-hosted, Linux, ARM64, Huawei]
+    runs-on: [self-hosted, Linux, Huawei]
     timeout-minutes: 180
     permissions:
       contents: read
       actions: write
     outputs:
+      runner-arch: ${{ runner.arch }}
       kernel-sha256: ${{ steps.kernel.outputs.kernel-sha256 }}
       kernel-artifact-name: ${{ steps.kernel.outputs.kernel-artifact-name }}
     steps:
       - name: Checkout CI repository
         uses: actions/checkout@v4.4.0
 
-      - name: Build or reuse ARM64 kernel
+      - name: Build or reuse native kernel
         id: kernel
         uses: ./.github/actions/build-kernel
         with:
@@ -90,7 +91,7 @@ jobs:
   conch-init-smoke:
     name: Conch Init Smoke
     needs: [resolve-conch, build-kernel]
-    runs-on: [self-hosted, Linux, ARM64, Huawei]
+    runs-on: [self-hosted, Linux, Huawei, "${{ needs.build-kernel.outputs.runner-arch }}"]
     timeout-minutes: 60
     steps:
       - name: Checkout CI repository

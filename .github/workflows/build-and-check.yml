@@ -77,6 +77,7 @@ jobs:
           mapfile -t runner_scripts < <(find scripts/runner-env -type f -name '*.sh' -print | sort)
           shellcheck "${runner_scripts[@]}"
           scripts/runner-env/runner-env.sh print-id
+          python3 scripts/workflows/build-and-check/test_runner_env.py
 
       - name: Run Conch runtime cleanup unit tests
         env:

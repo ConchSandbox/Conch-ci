@@ -64,6 +64,15 @@ runs:
           --commit "${{ inputs.conch-commit }}" \
           --destination "$RUNNER_TEMP/conch-template-source"
 
+    - name: Validate kernel artifact architecture
+      shell: bash
+      env:
+        KERNEL_ARTIFACT_NAME: ${{ inputs.kernel-artifact-name }}
+      run: |
+        set -euo pipefail
+        architecture=$(python3 scripts/runner-env/lib/platforms.py)
+        [[ "$KERNEL_ARTIFACT_NAME" =~ ^kernel-${architecture}-[0-9a-f]{64}$ ]]
+
     - name: Build or reuse rootfs image
       id: rootfs
       shell: bash
@@ -149,7 +158,7 @@ runs:
         KERNEL_ARTIFACT_NAME: ${{ inputs.kernel-artifact-name }}
         KERNEL_SHA256: ${{ inputs.kernel-sha256 }}
       run: |
-        [[ "$KERNEL_ARTIFACT_NAME" =~ ^kernel-arm64-[0-9a-f]{64}$ ]]
+        [[ "$KERNEL_ARTIFACT_NAME" =~ ^kernel-(arm64|amd64)-[0-9a-f]{64}$ ]]
         scripts/runner-env/jobs/build-kernel.sh ensure \
           --conch-source "$RUNNER_TEMP/conch-template-source" \
           --conch-commit "${{ inputs.conch-commit }}" \

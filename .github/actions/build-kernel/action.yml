@@ -1,5 +1,5 @@
 name: Build kernel
-description: Build or reuse the locked ARM64 kernel artifact
+description: Build or reuse the locked native kernel artifact
 
 inputs:
   conch-repository:
