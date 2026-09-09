@@ -28,5 +28,5 @@ managed_components:
 job_build_inputs:
   go_toolchain:
     version: 1.26.3
-  kernel_commit: c02455c4cce8052f74fc11c09e9073c01c7f33a4
-  kernel_archive_sha256: 0ba5fb19946375be29dcdb3729172ad4e6cdf61bbef27486503f704affb3e77a
+  kernel_commit: 7ddd0b6c4ca1134c4ff598a1372a3cae96bfa188
+  kernel_archive_sha256: ca2d70918fffe4db5c3b8c1e8deebc1fe1074945b8ae1914835fe8dec54f49d8
