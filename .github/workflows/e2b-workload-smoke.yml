@@ -103,6 +103,7 @@ jobs:
     timeout-minutes: 240
     concurrency:
       group: conch-ci-conchd-runtime
+      queue: max
       cancel-in-progress: false
     permissions:
       contents: read
@@ -135,6 +136,7 @@ jobs:
     timeout-minutes: 150
     concurrency:
       group: conch-ci-conchd-runtime
+      queue: max
       cancel-in-progress: false
     permissions:
       contents: read
@@ -290,6 +292,7 @@ jobs:
     timeout-minutes: 150
     concurrency:
       group: conch-ci-conchd-runtime
+      queue: max
       cancel-in-progress: false
     permissions:
       contents: read

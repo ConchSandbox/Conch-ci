@@ -40,7 +40,8 @@ CI 不安装或升级宿主机软件包，`verify` 只读检查，只有专用�
 重新计算。宿主编译器和 BuildKit 实现变更仍不单独影响内核或 RootFS 构建 ID。
 更新后的环境 ID 由仓库输入自动计算，两台 Runner 都需要通过准备工作流更新回执。
 
-使用 `start-conchd` action 的自托管任务共享 `conch-ci-conchd-runtime` 并发组。每次
+使用 `start-conchd` action 的自托管任务共享 `conch-ci-conchd-runtime` 并发组，
+并设置 `queue: max`，让全量测试的等待任务排队而不互相取消。每次
 启动会先检查固定的 CNI 配置挂载和 SDK socket 链接；如果它们可验证地属于一个已经
 没有存活 `conchd` 的旧 `$RUNNER_TEMP` 运行目录，CI 会记录告警、执行兜底清理并继续
 当前任务。所有权不明确或旧 `conchd` 仍存活时，CI 会拒绝接管这些资源。
