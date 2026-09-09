@@ -228,7 +228,7 @@ jobs:
             CONCH_INIT_VSOCK_SOCKET="$CONCH_INIT_VSOCK_SOCKET" \
             CONCH_INIT_VMM_LOG="$CONCH_INIT_VMM_LOG" \
             sh -c 'exec "$CLOUD_HYPERVISOR" \
-              --cpus boot=1,max=1 \
+              --cpus boot=1,max=1,max_phys_bits=42 \
               --memory size=512M \
               --kernel "$CONCH_KERNEL_PATH" \
               --initramfs "$CONCH_INIT_INITRAMFS" \

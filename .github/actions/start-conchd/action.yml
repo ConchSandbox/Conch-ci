@@ -121,7 +121,7 @@ runs:
           require_runtime_file() {
             local path=$1
             local description=$2
-            if [[ ! -f "$path" || -L "$path" ]]; then
+            if ! sudo -n test -f "$path" || sudo -n test -L "$path"; then
               echo "cannot reuse conchd runtime: $description is missing or unsafe: $path" >&2
               exit 1
             fi
@@ -131,7 +131,8 @@ runs:
             exit 1
           fi
           require_runtime_file "$config" "config"
-          require_runtime_file "$state_dir/state.db" "state database"
+          require_runtime_file "$state_dir/containerd/io.containerd.metadata.v1.bolt/meta.db" \
+            "containerd metadata database"
           require_runtime_file "$cni_conf_dir/.conch-ci-runtime" "CNI runtime marker"
         else
           [[ ! -e "$workdir" ]] || sudo -n find "$workdir" -depth -delete
