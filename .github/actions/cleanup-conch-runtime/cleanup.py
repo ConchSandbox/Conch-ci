@@ -34,6 +34,7 @@ MAX_SLOT_ID_EXCLUSIVE = 4002
 CNI_CACHE_KIND = "cniCacheV1"
 CNI_NETWORK_NAME = "conch-bridge"
 CNI_INTERFACE_NAME = "eth0"
+TAP_INTERFACE_NAME = "tap0"
 CNI_CONTAINER_PREFIX = "conch-slot-"
 CNI_BRIDGE_NAME = "cni-conch0"
 DEFAULT_CNI_DATA_DIR = "/var/lib/conch/cni/networks"
