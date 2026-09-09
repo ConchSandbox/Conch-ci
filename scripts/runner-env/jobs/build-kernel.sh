@@ -48,7 +48,7 @@ case "$platform" in
     config="$conch_source/config/oe-kernel/x86/.config"
     kernel_arch=x86
     kernel_target=bzImage
-    image_pattern='Linux kernel x86 boot executable bzImage'
+    image_pattern='Linux kernel x86 boot executable,? bzImage'
     ;;
   *) echo "unsupported kernel platform: $platform" >&2; exit 2 ;;
 esac
