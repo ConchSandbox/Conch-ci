@@ -142,6 +142,45 @@ runs:
           mkdir -p "$state_dir" "$cni_conf_dir"
           server_work_dir=$(python3 "$runtime_paths" create "$workdir")
           install -m 0644 "$CONCH_SOURCE/config/cni/net.d/"*.conf "$cni_conf_dir/"
+          CNI_CONFIG_DIR="$cni_conf_dir" python3 - <<'PY'
+        import ipaddress
+        import json
+        import os
+        from pathlib import Path
+        import subprocess
+
+        subnet = ipaddress.ip_network("10.231.240.0/20")
+        routes = json.loads(subprocess.check_output(
+            ["ip", "-j", "-4", "route", "show", "table", "all"], text=True,
+        ))
+        for route in routes:
+            destination = route.get("dst", "default")
+            if destination == "default":
+                continue
+            network = ipaddress.ip_network(destination, strict=False)
+            if network.prefixlen and subnet.overlaps(network):
+                raise SystemExit(f"CI subnet {subnet} overlaps host route {destination}")
+
+        configs = sorted(Path(os.environ["CNI_CONFIG_DIR"]).glob("*.conf"))
+        if len(configs) != 1:
+            raise SystemExit("expected exactly one Conch CNI configuration")
+        path = configs[0]
+        config = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(config, dict) or (
+            config.get("name"), config.get("type"), config.get("bridge")
+        ) != ("conch-bridge", "bridge", "cni-conch0"):
+            raise SystemExit("unsupported Conch CNI bridge configuration")
+        ipam = config.get("ipam")
+        if not isinstance(ipam, dict) or ipam.get("type") != "host-local":
+            raise SystemExit("Conch CNI must use host-local IPAM")
+        if any(key in ipam for key in ("ranges", "rangeStart", "rangeEnd", "gateway")):
+            raise SystemExit("expected a single automatic Conch CNI address range")
+        if any("gw" in route for route in ipam.get("routes", [])):
+            raise SystemExit("explicit CNI route gateways require subnet adaptation")
+        ipam["subnet"] = str(subnet)
+        path.write_text(json.dumps(config, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        print(f"CI CNI subnet: {subnet}")
+        PY
           printf '%s\n' "$workdir" > "$cni_conf_dir/.conch-ci-runtime"
 
           cat > "$config" <<YAML
