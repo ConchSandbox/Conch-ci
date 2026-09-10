@@ -19,6 +19,10 @@ import urllib.parse
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts/runner-env/lib"))
+from conch_runtime import runtime_work_path
+
 if TYPE_CHECKING:
     from conch import Sandbox
 
@@ -220,7 +224,7 @@ def cni_allocations(state_root: Path, network_name: str) -> list[str]:
 
 
 def socket_paths(work_dir: Path) -> list[str]:
-    runtime_dir = work_dir / "work"
+    runtime_dir = runtime_work_path(work_dir)
     if not runtime_dir.exists():
         return []
     return sorted(
@@ -295,8 +299,8 @@ def start_volume_fixture(
 
     # Mountinfo reports the resolved host path, while Conch matches stale
     # virtiofsd processes against the runtime path written to its config.
-    volume_runtime = work_dir / "work" / "sandboxes"
-    process_runtime = logical_work_dir / "work" / "sandboxes"
+    volume_runtime = runtime_work_path(work_dir) / "sandboxes"
+    process_runtime = runtime_work_path(logical_work_dir) / "sandboxes"
     sandbox_runtime = volume_runtime / sandbox_id
     volume_dir = sandbox_runtime / "volume"
     mount_target = volume_dir / "0"
@@ -380,7 +384,7 @@ def prepare(args: argparse.Namespace) -> None:
         timeout=30,
     )
 
-    boot_dir = work_dir / "work" / "snapshot" / BOOT_NAMESPACE / args.sandbox_id
+    boot_dir = runtime_work_path(work_dir) / "snapshot" / BOOT_NAMESPACE / args.sandbox_id
     wait_for("sandbox boot layout", boot_dir.exists, timeout=30)
     wait_for("sandbox VMM sockets", lambda: bool(socket_paths(work_dir)), timeout=30)
     volume = start_volume_fixture(
@@ -390,7 +394,7 @@ def prepare(args: argparse.Namespace) -> None:
         args.sandbox_id,
     )
 
-    service_pid = read_pid_file(work_dir / "work" / "conchd.pid")
+    service_pid = read_pid_file(runtime_work_path(work_dir) / "conchd.pid")
     service_info = process_info(service_pid)
     if service_info is None:
         raise RuntimeError("conchd service process is missing")
