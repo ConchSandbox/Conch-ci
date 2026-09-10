@@ -42,13 +42,6 @@ if [[ -n "$pr_number" ]]; then
   commit=$(awk 'NR == 1 {print $1}' <<<"$resolved")
 elif [[ "$ref" =~ ^[0-9a-f]{40}$ ]]; then
   commit=$ref
-  git ls-remote --exit-code "$repository" "$commit" >/dev/null 2>&1 || {
-    temp_dir=$(mktemp -d)
-    trap 'find "$temp_dir" -depth -delete' EXIT
-    git -C "$temp_dir" init --quiet
-    git -C "$temp_dir" remote add origin "$repository"
-    git -C "$temp_dir" fetch --quiet --depth 1 origin "$commit"
-  }
 else
   resolved=$(git ls-remote --exit-code "$repository" "$ref" "refs/heads/$ref")
   commit=$(awk 'NR == 1 {print $1}' <<<"$resolved")

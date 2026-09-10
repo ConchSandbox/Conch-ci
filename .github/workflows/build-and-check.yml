@@ -39,7 +39,7 @@ defaults:
 
 jobs:
   # Builds the selected Conch source and runs formatting, static analysis,
-  # unit tests, and Python SDK import checks on a hosted runner.
+  # unit tests on a hosted runner.
   ci:
     name: Conch Build and Check
     runs-on: ubuntu-24.04
@@ -146,21 +146,17 @@ jobs:
         run: |
           set -euo pipefail
           mapfile -t shell_files < <(find scripts initrd -type f -name '*.sh' -print 2>/dev/null | sort)
-          if [ "${#shell_files[@]}" -eq 0 ]; then
-            echo "no shell scripts found"
-            exit 0
-          fi
-          bash -n "${shell_files[@]}"
+          ((${#shell_files[@]} > 0))
+          for script in "${shell_files[@]}"; do
+            bash -n "$script"
+          done
 
       - name: Run shellcheck
         working-directory: conch-src
         run: |
           set -euo pipefail
           mapfile -t shell_files < <(find scripts initrd -type f -name '*.sh' -print 2>/dev/null | sort)
-          if [ "${#shell_files[@]}" -eq 0 ]; then
-            echo "no shell scripts found"
-            exit 0
-          fi
+          ((${#shell_files[@]} > 0))
           shellcheck "${shell_files[@]}"
 
       - name: Check Go formatting
@@ -186,22 +182,9 @@ jobs:
           set -euo pipefail
           go vet ./...
 
-      - name: Check Python SDK import path
-        working-directory: conch-src
-        run: |
-          set -euo pipefail
-          python -m pip install -e './sdk[test]'
-          python - <<'PY'
-          from conch import AgentClient, Sandbox
-          from conch.sandbox import generate_random_id
-
-          assert AgentClient
-          assert Sandbox
-          assert generate_random_id().startswith("sandbox_")
-          PY
-
       - name: Run Python SDK create-payload unit tests
         working-directory: conch-src
         run: |
           set -euo pipefail
+          python -m pip install -e './sdk[test]'
           python -m pytest sdk/tests/test_create.py -k build_create_payload

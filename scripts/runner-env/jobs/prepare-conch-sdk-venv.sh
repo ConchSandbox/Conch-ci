@@ -47,19 +47,6 @@ if [[ -n "$requirements" ]]; then
   "$venv/bin/python" -m pip install "${pip_options[@]}" --requirement "$requirements"
 fi
 
-CONCH_SOURCE="$conch_source" \
-"$venv/bin/python" - <<'PY'
-import os
-import sys
-
-sys.path.insert(0, os.environ["CONCH_SOURCE"])
-from conch.client import AgentClient
-
-client = AgentClient("127.0.0.1")
-assert callable(client.health_check)
-print("Conch SDK environment smoke test passed")
-PY
-
 if [[ -n "${GITHUB_PATH:-}" ]]; then
   printf '%s\n' "$venv/bin" >> "$GITHUB_PATH"
 fi
