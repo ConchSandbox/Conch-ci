@@ -85,7 +85,7 @@ def log(message: str) -> None:
     print(message, flush=True)
 
 
-def run_git(args: list[str], cwd: str, redact: bool = False, check: bool = True) -> subprocess.CompletedProcess[str]:
+def run_git(args: list[str], cwd: str, redact: bool = False) -> subprocess.CompletedProcess[str]:
     command_for_error = "<redacted>" if redact else " ".join(args)
     if redact:
         log("$ git <redacted>")
@@ -101,7 +101,7 @@ def run_git(args: list[str], cwd: str, redact: bool = False, check: bool = True)
     )
     if proc.stdout:
         print(proc.stdout, end="")
-    if check and proc.returncode != 0:
+    if proc.returncode != 0:
         raise RuntimeError(f"git {command_for_error} failed with exit code {proc.returncode}")
     return proc
 
@@ -175,12 +175,11 @@ def github_request(
     method: str,
     path: str,
     payload: dict[str, Any] | None = None,
-    token: str | None = None,
 ) -> Any:
     return api_request(
         method,
         f"{config.github_api_base}{path}",
-        token=token or config.github_token,
+        token=config.github_token,
         payload=payload,
         extra_headers={
             "Accept": "application/vnd.github+json",

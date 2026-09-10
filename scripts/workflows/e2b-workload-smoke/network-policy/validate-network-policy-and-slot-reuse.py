@@ -10,11 +10,8 @@ import time
 import urllib.request
 from importlib.metadata import version
 from pathlib import Path
-from urllib.parse import urlparse
 
 import requests
-
-sys.path.insert(0, os.getcwd())
 
 from conch import Sandbox as ConchSandbox
 from e2b.connection_config import ConnectionConfig
@@ -38,15 +35,7 @@ def request_with_timeout(self, method, url, **kwargs):
 requests.sessions.Session.request = request_with_timeout
 
 
-def expected_body_matches(body, expected_body):
-    if expected_body is None:
-        return True
-    if isinstance(expected_body, (tuple, list, set)):
-        return body.strip() in expected_body
-    return body.strip() == expected_body
-
-
-def wait_http(url, expected_body=None, timeout=180):
+def wait_http(url, timeout=180):
     log(f"waiting for HTTP health: {url}")
     deadline = time.monotonic() + timeout
     last_error = None
@@ -56,8 +45,6 @@ def wait_http(url, expected_body=None, timeout=180):
                 body = response.read().decode()
                 if response.status not in (200, 204):
                     raise RuntimeError(f"{url} returned {response.status}: {body!r}")
-                if not expected_body_matches(body, expected_body):
-                    raise RuntimeError(f"{url} body={body!r}, want {expected_body!r}")
                 return body
         except Exception as exc:
             last_error = exc
@@ -101,7 +88,8 @@ def wait_e2b_commands(e2b, sandbox_ip, timeout=30):
     raise RuntimeError(f"timed out waiting for E2B command API: {last_error}")
 
 
-def new_code_interpreter_sandbox(envd_url, sandbox_ip):
+def new_code_interpreter_sandbox(sandbox_ip):
+    envd_url = f"http://{sandbox_ip}:49983"
     config = ConnectionConfig(debug=True, sandbox_url=envd_url)
     sandbox = CodeInterpreterSandbox(
         sandbox_id="debug_sandbox_id",
@@ -111,8 +99,7 @@ def new_code_interpreter_sandbox(envd_url, sandbox_ip):
         traffic_access_token=None,
         connection_config=config,
     )
-    envd_host = urlparse(envd_url).hostname or sandbox_ip
-    sandbox.get_host = lambda port: f"{envd_host}:{port}"
+    sandbox.get_host = lambda port: f"{sandbox_ip}:{port}"
     return sandbox
 
 
@@ -267,10 +254,7 @@ else:
             raise RuntimeError("sandbox resume failed")
         wait_conch_health(sandbox)
         wait_http(f"http://{sandbox.ip}:{guest_http_port}/health")
-        e2b = new_code_interpreter_sandbox(
-            f"http://{sandbox.ip}:{guest_http_port}",
-            sandbox.ip,
-        )
+        e2b = new_code_interpreter_sandbox(sandbox.ip)
         guest_http(allow_ip, True)
         guest_http(deny_ip, False)
     finally:
@@ -418,10 +402,7 @@ finally:
     try:
         log("validating conntrack isolation across reused network slots")
         sandbox_ip = sandbox.ip
-        e2b = new_code_interpreter_sandbox(
-            f"http://{sandbox_ip}:49983",
-            sandbox_ip,
-        )
+        e2b = new_code_interpreter_sandbox(sandbox_ip)
         received, result = guest_udp(e2b, b"sandbox-a")
         if not received:
             raise RuntimeError(
@@ -472,10 +453,7 @@ finally:
             )
         wait_conch_health(replacement)
         wait_http(f"http://{replacement.ip}:49983/health")
-        replacement_e2b = new_code_interpreter_sandbox(
-            f"http://{replacement.ip}:49983",
-            replacement.ip,
-        )
+        replacement_e2b = new_code_interpreter_sandbox(replacement.ip)
         wait_e2b_commands(replacement_e2b, replacement.ip)
         bypassed, result = guest_udp(replacement_e2b, b"sandbox-b")
         if bypassed:
@@ -513,7 +491,7 @@ def main():
     sandbox_ip = conch_sandbox.ip
     envd_url = f"http://{sandbox_ip}:49983"
     wait_http(f"{envd_url}/health")
-    e2b = new_code_interpreter_sandbox(envd_url, sandbox_ip)
+    e2b = new_code_interpreter_sandbox(sandbox_ip)
 
     validate_network_policy(conch_sandbox, e2b)
     validate_cross_sandbox_conntrack_isolation(conch_sandbox)

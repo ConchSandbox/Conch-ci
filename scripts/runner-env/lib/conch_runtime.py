@@ -55,11 +55,7 @@ def runtime_work_path(workdir: Path) -> Path:
         if not target.is_dir() or target.is_symlink():
             raise RuntimeError(f"unsafe Conch runtime work directory: {target}")
         return target
-    # Retain cleanup/restart support for runtimes created before this change.
-    legacy = workdir / "work"
-    if legacy.is_symlink():
-        raise RuntimeError(f"unsafe legacy Conch work directory: {legacy}")
-    return legacy if legacy.is_dir() else root / "work"
+    return root / "work"
 
 
 def create_runtime(workdir: Path) -> Path:

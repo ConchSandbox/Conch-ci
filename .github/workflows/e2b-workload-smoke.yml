@@ -242,37 +242,6 @@ jobs:
           sudo -n ip netns list
           sudo -n iptables -t nat -S
 
-      - name: Best-effort delete E2B sandbox after failure
-        if: ${{ always() && github.event.inputs.run_sdk_smoke != 'false' && steps.sdk_validation.outcome != 'success' }}
-        env:
-          CONCH_SDK_PYTHON: ${{ steps.sdk.outputs.python }}
-          CONCH_SANDBOX_ID: sandbox_e2b_sdk_${{ github.run_id }}_${{ github.run_attempt }}
-        run: |
-          set +e
-          if [[ -n "${CONCH_SDK_PYTHON:-}" && -x "$CONCH_SDK_PYTHON" ]]; then
-            "$CONCH_SDK_PYTHON" - <<'PY'
-          import os
-          import time
-          from conch import Sandbox
-          base_sandbox_id = os.environ.get("CONCH_SANDBOX_ID", "")
-          sandbox_ids = [
-              base_sandbox_id,
-              f"{base_sandbox_id}_invalid_env",
-              f"{base_sandbox_id}_oversized_env",
-          ] if base_sandbox_id else []
-          for sandbox_id in sandbox_ids:
-              try:
-                  Sandbox.delete_sandbox(sandbox_id)
-                  time.sleep(5)
-              except Exception as exc:
-                  if "Sandbox not found" in str(exc):
-                      print(f"sandbox already absent: {sandbox_id}")
-                  else:
-                      print(f"warning: sandbox cleanup failed for {sandbox_id}: {exc}")
-          PY
-          fi
-          exit 0
-
       - name: Clean Conch runtime
         if: always()
         uses: ./.github/actions/cleanup-conch-runtime
@@ -501,37 +470,6 @@ jobs:
               fi
               ;;
           esac
-          exit 0
-
-      - name: Delete network-policy sandboxes
-        if: always()
-        env:
-          CONCH_SDK_PYTHON: ${{ steps.sdk.outputs.python }}
-          CONCH_SANDBOX_ID: np-a-${{ github.run_id }}-${{ github.run_attempt }}
-          CONCH_REUSE_SANDBOX_ID: np-b-${{ github.run_id }}-${{ github.run_attempt }}
-        run: |
-          set +e
-          if [[ -n "${CONCH_SDK_PYTHON:-}" && -x "$CONCH_SDK_PYTHON" ]]; then
-            for sandbox_id in "$CONCH_SANDBOX_ID" "$CONCH_REUSE_SANDBOX_ID"; do
-              [[ -n "$sandbox_id" ]] || continue
-              timeout --foreground --kill-after=5s 60s \
-                "$CONCH_SDK_PYTHON" - "$sandbox_id" <<'PY'
-          import sys
-          import time
-          from conch import Sandbox
-          sandbox_id = sys.argv[1]
-          try:
-              Sandbox.delete_sandbox(sandbox_id)
-              time.sleep(5)
-          except Exception as exc:
-              print(f"warning: sandbox cleanup failed for {sandbox_id}: {exc}")
-          PY
-              status=$?
-              if (( status != 0 )); then
-                echo "warning: sandbox cleanup timed out or failed for $sandbox_id (exit=$status)"
-              fi
-            done
-          fi
           exit 0
 
       - name: Clean Conch runtime

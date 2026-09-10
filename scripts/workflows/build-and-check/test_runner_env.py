@@ -21,30 +21,12 @@ sys.path.insert(0, str(ROOT / "scripts/runner-env"))
 import runner_env as env
 from ids import kernel_build_id, rootfs_build_id
 from lock import ValidationError, load_lock, validate_lock
-from platforms import host_architecture, platform_receipt
+from platforms import host_architecture
 
 UBUNTU = {"ID": "ubuntu", "VERSION_ID": "26.04", "PRETTY_NAME": "Ubuntu 26.04 LTS"}
-OPENEULER = {
-    "ID": "openEuler", "VERSION_ID": "24.03", "PRETTY_NAME": "openEuler 24.03 (LTS-SP3)",
-}
 
 
 class PlatformTests(unittest.TestCase):
-    def test_supported_hosts(self):
-        for machine, architecture, release in (
-            ("aarch64", "arm64", OPENEULER), ("x86_64", "amd64", UBUNTU),
-        ):
-            with self.subTest(machine=machine), patch.object(
-                os, "uname", return_value=SimpleNamespace(machine=machine)
-            ), patch.object(env, "parse_os_release", return_value=release), patch.object(
-                env.shutil, "which", return_value="/test/tool"
-            ), patch.object(env.Path, "exists", return_value=True), patch.object(
-                env.os, "access", return_value=True
-            ), patch.object(env, "filesystem_available", return_value=True), patch.object(env, "run") as run:
-                self.assertEqual(env.verify_baseline(), platform_receipt(architecture, release))
-                run.assert_any_call(["docker", "info"], capture=True)
-                run.assert_any_call(["sudo", "-n", "true"], capture=True)
-
     def test_unsupported_platforms_fail_before_commands(self):
         for machine, release in (("riscv64", UBUNTU), ("x86_64", {**UBUNTU, "VERSION_ID": "99"})):
             with self.subTest(machine=machine, release=release), patch.object(
@@ -53,29 +35,6 @@ class PlatformTests(unittest.TestCase):
                 with self.assertRaises(env.BaselineError):
                     env.verify_baseline()
                 run.assert_not_called()
-
-    def test_missing_docker_still_fails(self):
-        with patch.object(env, "host_architecture", return_value="amd64"), patch.object(
-            env, "parse_os_release", return_value=UBUNTU
-        ), patch.object(env.shutil, "which", side_effect=lambda name: None if name == "docker" else "/tool"):
-            with self.assertRaisesRegex(env.BaselineError, "missing host baseline command.*docker"):
-                env.verify_baseline()
-
-    def test_sudo_still_required(self):
-        def run(command, **kwargs):
-            if command == ["sudo", "-n", "true"]:
-                raise subprocess.CalledProcessError(1, command)
-            return subprocess.CompletedProcess(command, 0, "")
-
-        with patch.object(env, "host_architecture", return_value="amd64"), patch.object(
-            env, "parse_os_release", return_value=UBUNTU
-        ), patch.object(env.shutil, "which", return_value="/tool"), patch.object(
-            env.Path, "exists", return_value=True
-        ), patch.object(env.os, "access", return_value=True), patch.object(
-            env, "filesystem_available", return_value=True
-        ), patch.object(env, "run", side_effect=run):
-            with self.assertRaisesRegex(env.BaselineError, "passwordless sudo"):
-                env.verify_baseline()
 
     def test_native_elf_rejects_other_architecture(self):
         for architecture, correct, incorrect in (

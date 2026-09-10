@@ -3,7 +3,7 @@
 | Workflow | 用途 |
 | --- | --- |
 | `prepare-self-hosted-runner.yml` | 检查或安装自托管 Runner 所需的锁定工具环境。 |
-| `build-and-check.yml` | 构建 Conch，并运行静态检查、Go 测试、Go vet、Python SDK 与 Conch-ci 运行时清理单元测试。 |
+| `build-and-check.yml` | 构建 Conch，并运行静态检查、Go 测试、Go vet、Python SDK payload 与 Conch-ci 环境、运行时清理单元测试。 |
 | `template-image-integration.yml` | 使用本地 OCI registry 和隔离 conchd 验证 Image/Template 重定向、同名隔离、类型门禁及完整生命周期。 |
 | `conchd-crash-release.yml` | 验证 `conchd` 异常退出并重启后能清理遗留资源，并复用同一 Sandbox ID。 |
 | `conch-init-smoke.yml` | 在真实虚拟机中验证 `conch-init` 启动、vsock 就绪和 SDK 健康检查。 |
@@ -36,12 +36,18 @@ CI 不安装或升级宿主机软件包，`verify` 只读检查，只有专用�
 
 `runner-env.lock.yaml` schema 2 为二进制组件分别锁定 ARM64/AMD64 的 SHA-256，
 源码构建的 erofs-utils 共用源码校验和。内核构建 ID v3 包含源码、配置、架构和
-构建脚本摘要，本次更新会失效旧内核缓存；RootFS 和 Template 缓存也会因配方更新
-重新计算。宿主编译器和 BuildKit 实现变更仍不单独影响内核或 RootFS 构建 ID。
-更新后的环境 ID 由仓库输入自动计算，两台 Runner 都需要通过准备工作流更新回执。
+构建脚本摘要；RootFS 和 Template 缓存同样按各自的语义输入计算。
+宿主编译器和 BuildKit 实现变更不单独影响内核或 RootFS 构建 ID。
+环境 ID 由仓库输入自动计算，变化后 Runner 需要通过准备工作流更新回执。
 
 使用 `start-conchd` action 的自托管任务共享 `conch-ci-conchd-runtime` 并发组，
-并设置 `queue: max`，让全量测试的等待任务排队而不互相取消。每次
-启动会先检查固定的 CNI 配置挂载和 SDK socket 链接；如果它们可验证地属于一个已经
-没有存活 `conchd` 的旧 `$RUNNER_TEMP` 运行目录，CI 会记录告警、执行兜底清理并继续
-当前任务。所有权不明确或旧 `conchd` 仍存活时，CI 会拒绝接管这些资源。
+并设置 `queue: max`，让全量测试的等待任务排队而不互相取消。启动时固定 CNI
+配置挂载或 SDK socket 链接被其他运行目录占用，会直接报错；需要先清理占用者，
+再运行新任务。同一任务的崩溃重启测试使用 `reuse-runtime` 保留配置和状态。
+运行目录仅支持 `/tmp/conch-ci-run-<hash>/work`，不再接管旧布局。
+
+当前任务仍通过 `if: always()` 停止 conchd、检查残留资源并清理挂载和网络。
+正常退出后存在残留会导致任务失败；CNI 清理仅重放经过校验的当前 libcni 缓存，
+缓存损坏或 CNI DEL 失败会报错并保留运行目录、固定 socket 链接及 CNI 配置挂载，
+阻止后续任务接管未清理完成的资源。
+环境回执要求完整组件列表和 `localhost:5001` registry 端点；不再兼容旧回执格式。

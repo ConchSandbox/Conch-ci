@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
-import stat
 import sys
 import tarfile
 from pathlib import Path, PurePosixPath

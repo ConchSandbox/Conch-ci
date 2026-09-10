@@ -810,10 +810,7 @@ def validate_state(value: Any) -> dict[str, Any]:
     except ValueError as exc:
         raise ValidationError(f"state: {exc}") from exc
     components = value["components"]
-    legacy_components = set(COMPONENTS) - {"distribution_registry"}
-    if not isinstance(components, dict) or (
-        set(components) != set(COMPONENTS) and set(components) != legacy_components
-    ):
+    if not isinstance(components, dict) or set(components) != set(COMPONENTS):
         raise ValidationError("state: invalid components")
     receipt_fields = {
         "declared_version",
@@ -853,9 +850,7 @@ def validate_state(value: Any) -> dict[str, Any]:
                     raise ValidationError(
                         f"state: invalid distribution_registry {field}"
                     )
-            # Accept the previous endpoint only as a migration receipt. Inspection
-            # still requires the current endpoint and plans reconfiguration.
-            if receipt["endpoint"] not in (LOCAL_REGISTRY_ENDPOINT, "localhost:5000"):
+            if receipt["endpoint"] != LOCAL_REGISTRY_ENDPOINT:
                 raise ValidationError("state: invalid distribution_registry endpoint")
     if not isinstance(value["last_changed_at"], str):
         raise ValidationError("state: invalid change timestamp")
@@ -975,7 +970,6 @@ def plan_operations(
             state.get("environment_id") != environment_id
             or state.get("platform") != platform_receipt(host_architecture(), parse_os_release())
         )
-        and not any(operation["component"] == "ci_dependency_metadata" for operation in operations)
     ):
         operations.append(
             operation_for(
@@ -1068,14 +1062,14 @@ def verify_unlocked(
 
 def write_action_outputs(
     *,
-    paths: dict[str, Path] | None,
+    paths: dict[str, Path],
 ) -> None:
     output_path = os.environ.get("GITHUB_OUTPUT")
     if not output_path:
         return
     values = {
-        "binary-dir": str(paths["bin"]) if paths else "",
-        "cloud-hypervisor-path": str(paths["root"] / "bin/cloud-hypervisor") if paths else "",
+        "binary-dir": str(paths["bin"]),
+        "cloud-hypervisor-path": str(paths["root"] / "bin/cloud-hypervisor"),
     }
     with Path(output_path).open("a", encoding="utf-8") as stream:
         for key, value in values.items():
@@ -1214,15 +1208,10 @@ def main() -> int:
         environment_id = repository_environment_id(REPO_ROOT)
         if args.command == "print-id":
             print(environment_id)
-            write_action_outputs(
-                paths=None,
-            )
         elif args.command == "ensure":
             ensure(lock, environment_id)
         elif args.command == "verify":
             verify_command(lock, environment_id)
-        else:
-            parser.error(f"unsupported command: {args.command}")
         return 0
     except ValidationError as exc:
         print(f"runner-env schema error: {exc}", file=sys.stderr)

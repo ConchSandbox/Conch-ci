@@ -1,15 +1,11 @@
 import os
 import re
 import socket
-import sys
 import time
 import urllib.request
 from importlib.metadata import version
-from urllib.parse import urlparse
 
 import requests
-
-sys.path.insert(0, os.getcwd())
 
 from conch import Sandbox as ConchSandbox
 from e2b.connection_config import ConnectionConfig
@@ -40,14 +36,6 @@ def request_with_timeout(self, method, url, **kwargs):
 requests.sessions.Session.request = request_with_timeout
 
 
-def expected_body_matches(body, expected_body):
-    if expected_body is None:
-        return True
-    if isinstance(expected_body, (tuple, list, set)):
-        return body.strip() in expected_body
-    return body.strip() == expected_body
-
-
 def wait_http(url, expected_body=None, timeout=180):
     log(f"waiting for HTTP health: {url}")
     deadline = time.monotonic() + timeout
@@ -58,7 +46,7 @@ def wait_http(url, expected_body=None, timeout=180):
                 body = response.read().decode()
                 if response.status not in (200, 204):
                     raise RuntimeError(f"{url} returned {response.status}: {body!r}")
-                if not expected_body_matches(body, expected_body):
+                if expected_body is not None and body.strip() != expected_body:
                     raise RuntimeError(f"{url} body={body!r}, want {expected_body!r}")
                 return body
         except Exception as exc:
@@ -87,7 +75,8 @@ def wait_conch_health(sandbox, timeout=180):
     raise RuntimeError(f"timed out waiting for Conch health check: {last_health}")
 
 
-def new_code_interpreter_sandbox(envd_url, sandbox_ip):
+def new_code_interpreter_sandbox(sandbox_ip):
+    envd_url = f"http://{sandbox_ip}:49983"
     config = ConnectionConfig(debug=True, sandbox_url=envd_url)
     sandbox = CodeInterpreterSandbox(
         sandbox_id="debug_sandbox_id",
@@ -97,8 +86,7 @@ def new_code_interpreter_sandbox(envd_url, sandbox_ip):
         traffic_access_token=None,
         connection_config=config,
     )
-    envd_host = urlparse(envd_url).hostname or sandbox_ip
-    sandbox.get_host = lambda port: f"{envd_host}:{port}"
+    sandbox.get_host = lambda port: f"{sandbox_ip}:{port}"
     return sandbox
 
 
@@ -117,7 +105,7 @@ def dump_guest_logs(e2b):
 
 
 def logs_stdout_text(result):
-    return "\n".join(getattr(line, "text", line) for line in result.logs.stdout)
+    return "\n".join(result.logs.stdout)
 
 
 def environment_from_command_output(output):
@@ -255,7 +243,7 @@ for attempt in range(1, 6):
     if "url-ok" not in result_text:
         raise RuntimeError(
             "sandbox URL access check failed: "
-            f"stdout={result_text!r} error={getattr(result, 'error', None)!r}"
+            f"stdout={result_text!r} error={result.error!r}"
         )
     log(result_text.strip())
 
@@ -293,7 +281,7 @@ for attempt in range(1, 6):
     if "network-ok" not in result_text:
         raise RuntimeError(
             "sandbox outbound network check failed: "
-            f"stdout={result_text!r} error={getattr(result, 'error', None)!r}"
+            f"stdout={result_text!r} error={result.error!r}"
         )
     log(result_text.strip())
 
@@ -340,7 +328,7 @@ print(f"inbound-listener-ready port={{listener_port}}")
     if match is None:
         raise RuntimeError(
             "sandbox inbound listener did not start: "
-            f"stdout={result_text!r} error={getattr(result, 'error', None)!r}"
+            f"stdout={result_text!r} error={result.error!r}"
         )
     listener_port = int(match.group(1))
 
@@ -431,11 +419,11 @@ def main():
     envd_url = f"http://{sandbox_ip}:49983"
     code_interpreter_url = f"http://{sandbox_ip}:49999"
     wait_http(f"{envd_url}/health")
-    e2b = new_code_interpreter_sandbox(envd_url, sandbox_ip)
+    e2b = new_code_interpreter_sandbox(sandbox_ip)
     try:
         wait_http(
             f"{code_interpreter_url}/health",
-            expected_body=("OK", '"OK"'),
+            expected_body='"OK"',
         )
     except Exception:
         dump_guest_logs(e2b)

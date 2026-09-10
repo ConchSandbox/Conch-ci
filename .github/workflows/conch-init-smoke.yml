@@ -219,7 +219,6 @@ jobs:
         env:
           CLOUD_HYPERVISOR: ${{ steps.runner-environment.outputs.cloud-hypervisor-path }}
         run: |
-          sudo -n ip link del "$CONCH_INIT_TAP_NAME" >/dev/null 2>&1 || true
           sudo -n ip tuntap add "$CONCH_INIT_TAP_NAME" mode tap
           sudo -n ip addr add "$CONCH_INIT_NET_CIDR" dev "$CONCH_INIT_TAP_NAME"
           sudo -n ip link set "$CONCH_INIT_TAP_NAME" up
@@ -253,7 +252,7 @@ jobs:
           echo "$!" > "$CONCH_INIT_VMM_PID_FILE"
           for _ in $(seq 1 120); do
             if [[ -S "$CONCH_INIT_VMM_API" && -S "$CONCH_INIT_VSOCK_SOCKET" ]]; then
-              sudo -n chmod 0666 "$CONCH_INIT_VMM_API" "$CONCH_INIT_VSOCK_SOCKET" || true
+              sudo -n chmod 0666 "$CONCH_INIT_VMM_API" "$CONCH_INIT_VSOCK_SOCKET"
               exit 0
             fi
             kill -0 "$(cat "$CONCH_INIT_VMM_PID_FILE")" 2>/dev/null || {
@@ -299,8 +298,6 @@ jobs:
                       raise RuntimeError(f"unexpected health response: {response!r}")
                   print(response)
                   raise SystemExit(0)
-              except SystemExit:
-                  raise
               except Exception as exc:
                   last_error = exc
                   time.sleep(1)

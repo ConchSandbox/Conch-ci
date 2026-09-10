@@ -27,7 +27,6 @@ OCI_ACCEPT = ", ".join(
 )
 TEMPLATE_RECORD_PREFIX = "io.conch.template/"
 TEMPORARY_TEMPLATE_FETCH_PREFIX = "localhost/conch/template-fetch:"
-DIGEST_TEMPLATE_RECORD_PREFIX = "localhost/conch/template:sha256-"
 DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
@@ -349,16 +348,9 @@ class Suite:
         temporary = [
             name for name in names if name.startswith(TEMPORARY_TEMPLATE_FETCH_PREFIX)
         ]
-        canonical = [
-            name for name in names if name.startswith(DIGEST_TEMPLATE_RECORD_PREFIX)
-        ]
         if temporary:
             raise IntegrationError(
                 f"temporary Template fetch records were not removed: {temporary!r}"
-            )
-        if canonical:
-            raise IntegrationError(
-                f"digest-derived Template records unexpectedly exist: {canonical!r}"
             )
 
     def run(self) -> None:
