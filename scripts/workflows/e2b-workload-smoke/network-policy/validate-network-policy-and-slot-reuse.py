@@ -9,6 +9,7 @@ import threading
 import time
 import urllib.request
 from importlib.metadata import version
+from pathlib import Path
 from urllib.parse import urlparse
 
 import requests
@@ -385,18 +386,16 @@ finally:
         raise RuntimeError(f"cannot find network slot for sandbox IP {sandbox_ip}")
 
     def conntrack_has_established_tuple(netns_path):
-        entries = run_root(
-            "nsenter", f"--net={netns_path}", "cat", "/proc/net/nf_conntrack"
-        )
-        pattern = re.compile(
-            rf"\budp\b.*\bdst={re.escape(target_ip)} "
-            rf"sport={source_port} dport={target_port}\b"
-        )
-        # A replied UDP flow can match ctstate ESTABLISHED without being ASSURED.
-        return any(
-            pattern.search(line) and "[UNREPLIED]" not in line
-            for line in entries.splitlines()
-        )
+        result = run_root(
+            "nsenter", f"--net={netns_path}",
+            sys.executable, str(Path(__file__).resolve().with_name("conntrack.py")),
+            "--destination-ip", target_ip,
+            "--source-port", str(source_port),
+            "--destination-port", str(target_port),
+        ).strip()
+        if result not in {"true", "false"}:
+            raise RuntimeError(f"unexpected conntrack query result: {result!r}")
+        return result == "true"
 
     def wait_for_established_conntrack(netns_path, timeout=5):
         deadline = time.monotonic() + timeout
