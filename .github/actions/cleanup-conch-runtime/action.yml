@@ -69,7 +69,9 @@ runs:
 
         # Remove only the fixed-path resources that still point at this job.
         sdk_socket=/var/run/conch/conchd.sock
-        expected_socket="$workdir/work/conchd.sock"
+        runtime_paths="$GITHUB_WORKSPACE/scripts/runner-env/lib/conch_runtime.py"
+        server_work_dir=$(python3 "$runtime_paths" path "$workdir") || exit "$?"
+        expected_socket="$server_work_dir/conchd.sock"
         if sudo -n test -e "$sdk_socket" || sudo -n test -L "$sdk_socket"; then
           if sudo -n test -L "$sdk_socket" && \
               [[ $(sudo -n readlink -- "$sdk_socket") == "$expected_socket" ]]; then
@@ -93,6 +95,10 @@ runs:
 
         # Never recurse through the workdir until the helper has proved that no
         # mount below it remains; otherwise find could cross into mounted data.
+        if (( workdir_cleanup_status == 0 )); then
+          sudo -n env PYTHONDONTWRITEBYTECODE=1 python3 "$runtime_paths" remove "$workdir" \
+            || workdir_cleanup_status=$?
+        fi
         if (( workdir_cleanup_status == 0 )); then
           if [[ -e "$workdir" ]]; then
             sudo -n find "$workdir" -depth -delete

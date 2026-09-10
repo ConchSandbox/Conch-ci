@@ -109,6 +109,7 @@ runs:
             sha256sum "$GITHUB_WORKSPACE/.github/actions/build-conch/action.yml" | awk '{print $1}'
             sha256sum "$GITHUB_WORKSPACE/.github/actions/build-conch-initramfs/action.yml" | awk '{print $1}'
             sha256sum "$GITHUB_WORKSPACE/.github/actions/start-conchd/action.yml" | awk '{print $1}'
+            sha256sum "$GITHUB_WORKSPACE/scripts/runner-env/lib/conch_runtime.py" | awk '{print $1}'
             printf 'go-toolchain=%s\n' "$(python3 scripts/runner-env/lib/lock.py \
               get job_build_inputs.go_toolchain.version)"
           } | sha256sum | awk '{print $1}'

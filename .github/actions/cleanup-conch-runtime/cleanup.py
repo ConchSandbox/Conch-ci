@@ -20,6 +20,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts/runner-env/lib"))
+from conch_runtime import runtime_root, runtime_owner, runtime_work_path, remove_runtime
+
 
 MOUNT_ESCAPE_RE = re.compile(r"\\([0-7]{3})")
 NETWORK_NAMESPACE_DIR = Path("/run/conch/netns")
@@ -130,7 +134,11 @@ def process_command(pid: int) -> tuple[str, bytes] | None:
 
 def runtime_processes(workdir: Path, *, daemon: bool) -> dict[int, int]:
     """Find Conch processes tied to this job runtime."""
-    workdir_variants = {os.fsencode(workdir), os.fsencode(workdir.resolve())}
+    server_workdir = runtime_work_path(workdir)
+    workdir_variants = {
+        os.fsencode(workdir), os.fsencode(workdir.resolve()),
+        os.fsencode(server_workdir), os.fsencode(server_workdir.resolve()),
+    }
     workdir_prefixes = {
         variant + os.fsencode(os.sep) for variant in workdir_variants
     }
@@ -242,12 +250,14 @@ def mount_targets() -> set[str]:
 
 
 def workdir_mount_targets(workdir: Path) -> set[str]:
-    """Return mounts at or below workdir without relying on path traversal."""
-    workdir_text = str(workdir.resolve())
+    """Return mounts below the job directory and its short Conch runtime."""
+    server_workdir = runtime_work_path(workdir)
+    roots = {str(workdir.resolve()), str(server_workdir.resolve())}
+    if server_workdir.parent == runtime_root(workdir):
+        roots.add(str(server_workdir.parent))
     return {
-        target
-        for target in mount_targets()
-        if target == workdir_text or target.startswith(workdir_text + os.sep)
+        target for target in mount_targets()
+        if any(target == root or target.startswith(root + os.sep) for root in roots)
     }
 
 
@@ -290,7 +300,12 @@ def sdk_socket_owner(runner_temp: Path) -> Path | None:
             or target.parent.name != "work"
         ):
             raise RuntimeError(f"unsafe Conch SDK socket target: {target}")
-        return validate_runtime_workdir(target.parent.parent, runner_temp)
+        owner = target.parent.parent
+        if owner.parent == Path("/tmp") and owner.name.startswith("conch-ci-run-"):
+            owner = runtime_owner(owner)
+            if runtime_work_path(owner) / "conchd.sock" != target:
+                raise RuntimeError(f"unexpected Conch SDK socket target: {target}")
+        return validate_runtime_workdir(owner, runner_temp)
     if SDK_SOCKET.exists():
         raise RuntimeError(f"Conch SDK socket path is not a symlink: {SDK_SOCKET}")
     return None
@@ -365,6 +380,7 @@ def remove_runtime_workdir(workdir: Path, runner_temp: Path) -> None:
         )
     if workdir.is_symlink():
         raise RuntimeError(f"refusing to delete symlinked runtime owner: {workdir}")
+    remove_runtime(workdir)
     if workdir.exists():
         shutil.rmtree(workdir)
 
