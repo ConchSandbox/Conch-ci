@@ -17,7 +17,8 @@ X64（x86_64）；当前宿主系统允许 openEuler 24.03 LTS-SP3 或 Ubuntu 26
 Ubuntu 使用 `ID` 和 `VERSION_ID` 判断兼容性，点版本的 `PRETTY_NAME` 变化不会
 导致平台拒绝或验证失败；显示名称仍记录在回执中，执行 `ensure` 时可更新。
 openEuler 仍保留精确的 LTS-SP3 校验。
-内核生产任务可以调度到任一架构，下游任务跟随生产者的架构，避免把 ARM64 内核或
+手动运行自托管测试时，`runner_arch` 可选 `auto`（默认）、`X64` 或 `ARM64`。
+内核生产任务按所选架构调度，下游任务跟随生产者的架构，避免把 ARM64 内核或
 模板交给 X64 Runner。RootFS 和工具下载使用对应的 `arm64` / `amd64` 平台。
 
 RootFS 和 Template 仍通过生产机器的 `localhost:5001` registry 按 digest 消费。

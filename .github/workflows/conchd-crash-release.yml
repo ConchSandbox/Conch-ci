@@ -4,6 +4,15 @@ run-name: ${{ github.event.inputs.conch_pr_number || github.event.inputs.conch_r
 on:
   workflow_dispatch:
     inputs:
+      runner_arch:
+        description: Self-hosted runner architecture
+        required: true
+        type: choice
+        default: auto
+        options:
+          - auto
+          - X64
+          - ARM64
       conch_repository:
         description: Trusted Conch source repository
         required: false
@@ -25,7 +34,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: conch-crash-release-${{ github.event.inputs.conch_repository }}-${{ github.event.inputs.conch_pr_number || github.event.inputs.conch_ref || github.ref }}
+  group: conch-crash-release-${{ github.event.inputs.conch_repository }}-${{ github.event.inputs.conch_pr_number || github.event.inputs.conch_ref || github.ref }}-${{ inputs.runner_arch || 'auto' }}
   cancel-in-progress: true
 
 env:
@@ -67,7 +76,7 @@ jobs:
   build-kernel:
     name: Build or reuse native kernel
     needs: resolve-conch
-    runs-on: [self-hosted, Linux, Huawei]
+    runs-on: ${{ fromJSON('{"auto":["self-hosted","Linux","Huawei"],"X64":["self-hosted","Linux","Huawei","X64"],"ARM64":["self-hosted","Linux","Huawei","ARM64"]}')[inputs.runner_arch || 'auto'] }}
     timeout-minutes: 180
     permissions:
       contents: read
