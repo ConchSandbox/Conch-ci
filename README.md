@@ -54,6 +54,11 @@ CI 不安装或升级宿主机软件包，`verify` 只读检查，只有专用�
 阻止后续任务接管未清理完成的资源。
 环境回执要求完整组件列表和 `localhost:5001` registry 端点；不再兼容旧回执格式。
 
+当前 ARM64 Runner 通过 WSL 中转访问 GitHub。内核工件上传曾超过默认的五分钟
+无进度上限，因此该 Runner 的 `.env` 设置了
+`ACTIONS_ARTIFACT_UPLOAD_TIMEOUT_MS=900000`（十五分钟），并在空闲时重启服务使其
+生效。这只调整 GitHub 工件上传的等待时间；WSL 和中转连接仍需保持在线。
+
 ## StratoVirt 主验证后端
 
 `e2b-workload-smoke.yml` 和 `conchd-crash-release.yml` 新增 `vmm_backend`
