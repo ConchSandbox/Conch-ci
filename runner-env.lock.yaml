@@ -1,6 +1,11 @@
 schema_version: 2
 
 managed_components:
+  stratovirt:
+    version: 2.4.0-15.oe2403sp3
+    sha256:
+      arm64: 12c8e13e5878fe0e123af186d4a2c6004f9db5348b7001da75e5cbdc0d511654
+      amd64: f8edfae40f07d595ba35cdd5628ac3216ed15596f62d27c50bfa8dbde37d1688
   cloud_hypervisor:
     version: v52.0-conch
     sha256:

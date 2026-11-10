@@ -9,6 +9,8 @@ inputs:
 outputs:
   binary-dir:
     value: ${{ steps.execute.outputs.binary-dir }}
+  stratovirt-path:
+    value: ${{ steps.execute.outputs.stratovirt-path }}
   cloud-hypervisor-path:
     value: ${{ steps.execute.outputs.cloud-hypervisor-path }}
 

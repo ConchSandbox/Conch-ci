@@ -21,7 +21,8 @@ openEuler 仍保留精确的 LTS-SP3 校验。
 模板交给 X64 Runner。RootFS 和工具下载使用对应的 `arm64` / `amd64` 平台。
 
 RootFS 和 Template 仍通过生产机器的 `localhost:5001` registry 按 digest 消费。
-当前部署每种架构各一台 Runner；消费者会校验生产者的 Runner 名称。若增加同架构
+当前可用测试 Runner 为 ARM64；X64 工作流需等待对应 Runner 上线。
+消费者会校验生产者的 Runner 名称。若增加同架构
 Runner，需要先实现镜像跨机器传输或合并生产/消费任务；当前会拒绝跨机器消费，
 不会假定另一台机器拥有相同的本地镜像。
 
@@ -30,7 +31,8 @@ Runner，需要先实现镜像跨机器传输或合并生产/消费任务；当�
 详细前置项见 `scripts/runner-env/runner_env.py` 的 `verify_baseline()`。
 CI 不安装或升级宿主机软件包，`verify` 只读检查，只有专用准备工作流执行 `ensure`。
 新 Runner 需要先补齐这些前置条件，再运行 `prepare-self-hosted-runner.yml`，选择
-`runner_arch: X64` 和 `mode: ensure`；默认 `mode: verify`。
+与机器一致的 `runner_arch`（当前服务器选 `ARM64`）和 `mode: ensure`；默认
+`mode: verify`。
 `runner_arch` 也支持 `ARM64` 或 `all`，默认 `all`；相关 main 分支变更会分别为两种
 架构执行准备任务。离线架构的任务会等待对应 Runner 上线。
 
@@ -51,3 +53,34 @@ CI 不安装或升级宿主机软件包，`verify` 只读检查，只有专用�
 缓存损坏或 CNI DEL 失败会报错并保留运行目录、固定 socket 链接及 CNI 配置挂载，
 阻止后续任务接管未清理完成的资源。
 环境回执要求完整组件列表和 `localhost:5001` registry 端点；不再兼容旧回执格式。
+
+当前 ARM64 Runner 通过 WSL 中转访问 GitHub。内核工件上传曾超过默认的五分钟
+无进度上限，因此该 Runner 的 `.env` 设置了
+`ACTIONS_ARTIFACT_UPLOAD_TIMEOUT_MS=900000`（十五分钟），并在空闲时重启服务使其
+生效。这只调整 GitHub 工件上传的等待时间；WSL 和中转连接仍需保持在线。
+
+## StratoVirt 主验证后端
+
+`e2b-workload-smoke.yml` 和 `conchd-crash-release.yml` 新增 `vmm_backend`
+输入，默认 `stratovirt`，可选 `cloud-hypervisor` 进行对照。同一后端参数贯穿模板
+生产、SDK、网络策略和崩溃重启；每次启动输出后端名称、二进制版本及 SHA-256。
+`conch-init-smoke.yml` 仍是 Cloud Hypervisor 的独立底层启动检查；StratoVirt 的
+真实启动、vsock 和 Agent 健康由 E2B 工作流的沙箱创建链路验证。
+
+StratoVirt 使用 `runner-env.lock.yaml` 锁定的 openEuler 24.03 LTS-SP3
+`stratovirt-2.4.0-15.oe2403sp3` RPM，分别记录 ARM64/X64 的下载摘要。
+准备工作流仅从通过摘要校验的 RPM 中提取 `/usr/bin/stratovirt` 到
+`${RUNNER_TOOL_CACHE}/conch-ci/bin/stratovirt`，不执行 RPM 安装脚本，不覆盖宿主机
+的 StratoVirt。下载源为用户指定的 `dl-cdn.openeuler.openatom.cn` 仓库。
+
+该 ARM64 RPM 的签名检查通过；包装版本为 2.4.0-15，但常规二进制报告
+`StratoVirt 2.6.0 commit-id unknown`。包内 `/usr/lib64/stratovirt/static/stratovirt`
+在当前服务器执行版本查询即崩溃，故不使用该变体。回执同时记录包装版本、实际
+版本输出、RPM 摘要和安装后二进制摘要，避免仅按包名误判测试版本。
+
+宿主机需预先具备 `rpm`、`rpm2cpio`、`cpio` 和 GNU StratoVirt 的动态库依赖
+（包括 pixman），使用 StratoVirt 的任务还要求 `/dev/vhost-vsock` 已存在。
+Ubuntu Runner 也需要提前准备 RPM 解包工具和对应共享库。CI 不安装宿主软件包
+或加载内核模块。更新此声明后，须先在同一 CI ref 上运行
+`prepare-self-hosted-runner.yml`，选择对应架构及 `mode: ensure`，再运行功能测试。
+旧的五组件环境回执会被重新准备为六组件回执。

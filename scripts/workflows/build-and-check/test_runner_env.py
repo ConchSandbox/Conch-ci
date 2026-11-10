@@ -55,12 +55,14 @@ class LockTests(unittest.TestCase):
     def test_checksums_and_download_urls_match_architecture(self):
         expected_suffixes = {
             "arm64": {
+                "stratovirt": "stratovirt-2.4.0-15.oe2403sp3.aarch64.rpm",
                 "cloud_hypervisor": "cloud-hypervisor-static-aarch64",
                 "buildkit": "buildkit-v0.32.0.linux-arm64.tar.gz",
                 "distribution_registry": "registry_3.1.1_linux_arm64.tar.gz",
                 "cni_plugins": "cni-plugins-linux-arm64-v1.9.1.tgz",
             },
             "amd64": {
+                "stratovirt": "stratovirt-2.4.0-15.oe2403sp3.x86_64.rpm",
                 "cloud_hypervisor": "cloud-hypervisor-static",
                 "buildkit": "buildkit-v0.32.0.linux-amd64.tar.gz",
                 "distribution_registry": "registry_3.1.1_linux_amd64.tar.gz",
@@ -84,6 +86,29 @@ class LockTests(unittest.TestCase):
             lock = copy.deepcopy(self.lock)
             lock["managed_components"]["buildkit"]["sha256"] = digest
             with self.subTest(digest=digest), self.assertRaises(ValidationError):
+                validate_lock(lock)
+
+
+class StratoVirtRPMTests(unittest.TestCase):
+    def test_wrong_rpm_metadata_is_rejected_before_extraction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for metadata in ("stratovirt 2.4.0-15.oe2403sp3 x86_64", "other 2.4.0-15.oe2403sp3 aarch64"):
+                with self.subTest(metadata=metadata), patch.object(env, "host_architecture", return_value="arm64"), patch.object(
+                    env, "run", return_value=SimpleNamespace(stdout=metadata)
+                ), patch.object(env.subprocess, "Popen") as producer:
+                    with self.assertRaises(env.RunnerEnvError):
+                        env.extract_stratovirt_rpm(Path("fixture.rpm"), Path(directory) / "stratovirt", "2.4.0-15.oe2403sp3")
+                    producer.assert_not_called()
+
+    def test_static_variant_is_not_a_managed_binary(self):
+        self.assertEqual(env.COMPONENT_FILES["stratovirt"], ("bin/stratovirt",))
+        self.assertEqual(env.component_smoke_commands("stratovirt", Path("/tools")), [["/tools/bin/stratovirt", "-version"]])
+
+    def test_stratovirt_requires_an_exact_rpm_release(self):
+        for version in ("latest", "2.4.0", "../../other", "2.4.0-15.oe2403sp3/extra"):
+            lock = load_lock(ROOT / "runner-env.lock.yaml")
+            lock["managed_components"]["stratovirt"]["version"] = version
+            with self.subTest(version=version), self.assertRaises(ValidationError):
                 validate_lock(lock)
 
 

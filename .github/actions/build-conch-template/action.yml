@@ -2,6 +2,10 @@ name: Build Conch template
 description: Build, reuse, and publish a parameterized Conch template
 
 inputs:
+  vmm-backend:
+    description: Managed backend configured in the template producer
+    required: false
+    default: cloud-hypervisor
   conch-repository:
     description: Trusted Conch source repository URL
     required: false
@@ -182,6 +186,7 @@ runs:
       if: ${{ steps.template-plan.outputs.cache-hit != 'true' }}
       uses: ./.github/actions/start-conchd
       with:
+        vmm-backend: ${{ inputs.vmm-backend }}
         conch-source: ${{ runner.temp }}/conch-template-source
         binary-dir: ${{ steps.runner-environment.outputs.binary-dir }}
         runtime-name: conch-template
