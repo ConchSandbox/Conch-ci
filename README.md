@@ -21,7 +21,8 @@ openEuler 仍保留精确的 LTS-SP3 校验。
 模板交给 X64 Runner。RootFS 和工具下载使用对应的 `arm64` / `amd64` 平台。
 
 RootFS 和 Template 仍通过生产机器的 `localhost:5001` registry 按 digest 消费。
-当前部署每种架构各一台 Runner；消费者会校验生产者的 Runner 名称。若增加同架构
+当前可用测试 Runner 为 ARM64；X64 工作流需等待对应 Runner 上线。
+消费者会校验生产者的 Runner 名称。若增加同架构
 Runner，需要先实现镜像跨机器传输或合并生产/消费任务；当前会拒绝跨机器消费，
 不会假定另一台机器拥有相同的本地镜像。
 
@@ -30,7 +31,8 @@ Runner，需要先实现镜像跨机器传输或合并生产/消费任务；当�
 详细前置项见 `scripts/runner-env/runner_env.py` 的 `verify_baseline()`。
 CI 不安装或升级宿主机软件包，`verify` 只读检查，只有专用准备工作流执行 `ensure`。
 新 Runner 需要先补齐这些前置条件，再运行 `prepare-self-hosted-runner.yml`，选择
-`runner_arch: X64` 和 `mode: ensure`；默认 `mode: verify`。
+与机器一致的 `runner_arch`（当前服务器选 `ARM64`）和 `mode: ensure`；默认
+`mode: verify`。
 `runner_arch` 也支持 `ARM64` 或 `all`，默认 `all`；相关 main 分支变更会分别为两种
 架构执行准备任务。离线架构的任务会等待对应 Runner 上线。
 
