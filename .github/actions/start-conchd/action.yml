@@ -8,6 +8,10 @@ inputs:
   binary-dir:
     description: Runner binary directory containing CNI plugins
     required: true
+  vmm-backend:
+    description: Managed backend used by this runtime
+    required: false
+    default: cloud-hypervisor
   runtime-name:
     description: Name used for the job-local runtime directory
     required: true
@@ -55,6 +59,7 @@ runs:
         APP_NAME: ${{ inputs.app-name }}
         LOG_LEVEL: ${{ inputs.log-level }}
         REUSE_RUNTIME: ${{ inputs.reuse-runtime }}
+        VMM_BACKEND: ${{ inputs.vmm-backend }}
       run: |
         set -euo pipefail
         [[ "$CONCH_SOURCE" == /* && -x "$CONCH_SOURCE/bin/conchd" ]]
@@ -63,6 +68,22 @@ runs:
         [[ "$APP_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]
         [[ "$LOG_LEVEL" =~ ^(debug|info|warn|error)$ ]]
         [[ "$REUSE_RUNTIME" =~ ^(true|false)$ ]]
+        [[ "$VMM_BACKEND" =~ ^(stratovirt|cloud-hypervisor)$ ]]
+        [[ -x "$BINARY_DIR/$VMM_BACKEND" ]]
+        if [[ "$VMM_BACKEND" == stratovirt ]]; then
+          [[ -c /dev/vhost-vsock ]] || { echo "StratoVirt requires /dev/vhost-vsock" >&2; exit 1; }
+        fi
+        export PATH="$PATH:/usr/local/sbin:/usr/sbin:/sbin"
+
+        if [[ "$VMM_BACKEND" == stratovirt ]]; then
+          "$BINARY_DIR/stratovirt" -version
+        else
+          "$BINARY_DIR/cloud-hypervisor" --version
+        fi
+        sha256sum "$BINARY_DIR/$VMM_BACKEND"
+        if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+          echo "- Sandbox backend: $VMM_BACKEND" >> "$GITHUB_STEP_SUMMARY"
+        fi
 
         workdir="$RUNNER_TEMP/$RUNTIME_NAME-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
         config="$workdir/config.yaml"
@@ -179,7 +200,7 @@ runs:
             plugin_bin_dirs:
               - "$BINARY_DIR/cni"
         sandbox:
-          backend: cloud-hypervisor
+          backend: "$VMM_BACKEND"
           vsock_signal_retry: 10ms
           vsock_signal_timeout: 90s
           request_timeout: 120s
@@ -191,6 +212,8 @@ runs:
             ram_mb: 2048
           cloud_hypervisor:
             binary: "$BINARY_DIR/cloud-hypervisor"
+          stratovirt:
+            binary: "$BINARY_DIR/stratovirt"
         YAML
           chmod 0600 "$config"
         fi

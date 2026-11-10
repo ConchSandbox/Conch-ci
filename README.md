@@ -51,3 +51,29 @@ CI 不安装或升级宿主机软件包，`verify` 只读检查，只有专用�
 缓存损坏或 CNI DEL 失败会报错并保留运行目录、固定 socket 链接及 CNI 配置挂载，
 阻止后续任务接管未清理完成的资源。
 环境回执要求完整组件列表和 `localhost:5001` registry 端点；不再兼容旧回执格式。
+
+## StratoVirt 主验证后端
+
+`e2b-workload-smoke.yml` 和 `conchd-crash-release.yml` 新增 `vmm_backend`
+输入，默认 `stratovirt`，可选 `cloud-hypervisor` 进行对照。同一后端参数贯穿模板
+生产、SDK、网络策略和崩溃重启；每次启动输出后端名称、二进制版本及 SHA-256。
+`conch-init-smoke.yml` 仍是 Cloud Hypervisor 的独立底层启动检查；StratoVirt 的
+真实启动、vsock 和 Agent 健康由 E2B 工作流的沙箱创建链路验证。
+
+StratoVirt 使用 `runner-env.lock.yaml` 锁定的 openEuler 24.03 LTS-SP3
+`stratovirt-2.4.0-15.oe2403sp3` RPM，分别记录 ARM64/X64 的下载摘要。
+准备工作流仅从通过摘要校验的 RPM 中提取 `/usr/bin/stratovirt` 到
+`${RUNNER_TOOL_CACHE}/conch-ci/bin/stratovirt`，不执行 RPM 安装脚本，不覆盖宿主机
+的 StratoVirt。下载源为用户指定的 `dl-cdn.openeuler.openatom.cn` 仓库。
+
+该 ARM64 RPM 的签名检查通过；包装版本为 2.4.0-15，但常规二进制报告
+`StratoVirt 2.6.0 commit-id unknown`。包内 `/usr/lib64/stratovirt/static/stratovirt`
+在当前服务器执行版本查询即崩溃，故不使用该变体。回执同时记录包装版本、实际
+版本输出、RPM 摘要和安装后二进制摘要，避免仅按包名误判测试版本。
+
+宿主机需预先具备 `rpm`、`rpm2cpio`、`cpio` 和 GNU StratoVirt 的动态库依赖
+（包括 pixman），使用 StratoVirt 的任务还要求 `/dev/vhost-vsock` 已存在。
+Ubuntu Runner 也需要提前准备 RPM 解包工具和对应共享库。CI 不安装宿主软件包
+或加载内核模块。更新此声明后，须先在同一 CI ref 上运行
+`prepare-self-hosted-runner.yml`，选择对应架构及 `mode: ensure`，再运行功能测试。
+旧的五组件环境回执会被重新准备为六组件回执。

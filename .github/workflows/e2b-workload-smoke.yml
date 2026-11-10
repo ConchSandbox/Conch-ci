@@ -1,9 +1,17 @@
 name: E2B Workload End-to-End
-run-name: ${{ github.event.inputs.conch_pr_number || github.event.inputs.conch_ref || github.ref_name }}
+run-name: ${{ inputs.vmm_backend || 'stratovirt' }}-${{ github.event.inputs.conch_pr_number || github.event.inputs.conch_ref || github.ref_name }}
 
 on:
   workflow_dispatch:
     inputs:
+      vmm_backend:
+        description: Virtual machine backend to validate
+        required: true
+        type: choice
+        default: stratovirt
+        options:
+          - stratovirt
+          - cloud-hypervisor
       runner_arch:
         description: Self-hosted runner architecture
         required: true
@@ -129,6 +137,7 @@ jobs:
         id: template
         uses: ./.github/actions/build-conch-template
         with:
+          vmm-backend: ${{ inputs.vmm_backend || 'stratovirt' }}
           conch-repository: ${{ env.CONCH_REPOSITORY }}
           conch-commit: ${{ needs.resolve-conch.outputs.conch-commit }}
           kernel-artifact-name: ${{ needs.build-kernel.outputs.kernel-artifact-name }}
@@ -197,6 +206,7 @@ jobs:
         id: conchd
         uses: ./.github/actions/start-conchd
         with:
+          vmm-backend: ${{ inputs.vmm_backend || 'stratovirt' }}
           conch-source: ${{ runner.temp }}/conch-e2b-sdk-source
           binary-dir: ${{ steps.runner-environment.outputs.binary-dir }}
           runtime-name: conch-e2b-sdk
@@ -327,7 +337,9 @@ jobs:
             [[ "$(basename "$plugin")" != bridge ]] || continue
             ln -s "$plugin" "$tools_dir/cni/$(basename "$plugin")"
           done
-          ln -s "$MANAGED_BINARY_DIR/cloud-hypervisor" "$tools_dir/cloud-hypervisor"
+          for backend in cloud-hypervisor stratovirt; do
+            ln -s "$MANAGED_BINARY_DIR/$backend" "$tools_dir/$backend"
+          done
           install -m 0755 \
             scripts/workflows/e2b-workload-smoke/network-policy/cni-refill-control.py \
             "$tools_dir/cni/bridge"
@@ -354,6 +366,7 @@ jobs:
         id: conchd
         uses: ./.github/actions/start-conchd
         with:
+          vmm-backend: ${{ inputs.vmm_backend || 'stratovirt' }}
           conch-source: ${{ runner.temp }}/conch-e2b-network-policy-source
           binary-dir: ${{ steps.cni-tools.outputs.binary-dir }}
           runtime-name: conch-e2b-network-policy

@@ -46,6 +46,7 @@ LOCK_PATH = REPO_ROOT / "runner-env.lock.yaml"
 EROFS_UTILS_BUILD_RECIPE = SCRIPT_DIR / "jobs/prepare-erofs-utils.sh"
 
 COMPONENTS = (
+    "stratovirt",
     "buildkit",
     "cloud_hypervisor",
     "cni_plugins",
@@ -53,6 +54,7 @@ COMPONENTS = (
     "erofs_utils",
 )
 COMPONENT_FILES = {
+    "stratovirt": ("bin/stratovirt",),
     "cloud_hypervisor": ("bin/cloud-hypervisor",),
     "buildkit": ("bin/buildctl", "bin/buildkitd", "bin/buildkit-runc"),
     "distribution_registry": ("bin/registry",),
@@ -188,6 +190,8 @@ def verify_baseline() -> dict[str, str]:
         "perl",
         "pkg-config",
         "python3",
+        "rpm",
+        "rpm2cpio",
         "rsync",
         "sed",
         "sha256sum",
@@ -352,9 +356,11 @@ def download_sha256(component: str, declaration: dict[str, Any]) -> str:
 
 def asset_name(component: str, version: str) -> str:
     architecture = host_architecture()
+    rpm_architecture = "aarch64" if architecture == "arm64" else "x86_64"
     hypervisor_suffix = "-aarch64" if architecture == "arm64" else ""
     return {
         "cloud_hypervisor": f"cloud-hypervisor-static{hypervisor_suffix}",
+        "stratovirt": f"stratovirt-{version}.{rpm_architecture}.rpm",
         "buildkit": f"buildkit-{version}.linux-{architecture}.tar.gz",
         "distribution_registry": f"registry_{version.removeprefix('v')}_linux_{architecture}.tar.gz",
         "erofs_utils": f"erofs-utils-{version.removeprefix('v')}.tar.gz",
@@ -363,6 +369,10 @@ def asset_name(component: str, version: str) -> str:
 
 
 def source_url(component: str, version: str) -> str:
+    if component == "stratovirt":
+        architecture = "aarch64" if host_architecture() == "arm64" else "x86_64"
+        return ("https://dl-cdn.openeuler.openatom.cn/openEuler-24.03-LTS-SP3/update/"
+                + architecture + "/Packages/" + asset_name(component, version))
     if component == "erofs_utils":
         return (
             "https://git.kernel.org/pub/scm/linux/kernel/git/xiang/erofs-utils.git/snapshot/"
@@ -424,6 +434,7 @@ def download_verified(url: str, expected_sha256: str, destination: Path) -> Path
 def component_smoke_commands(component: str, root: Path) -> list[list[str]]:
     return {
         "cloud_hypervisor": [[str(root / "bin/cloud-hypervisor"), "--version"]],
+        "stratovirt": [[str(root / "bin/stratovirt"), "-version"]],
         "buildkit": [
             [str(root / "bin/buildctl"), "--version"],
             [str(root / "bin/buildkitd"), "--version"],
@@ -660,6 +671,34 @@ def configure_registry_service(paths: dict[str, Path]) -> None:
     )
 
 
+def extract_stratovirt_rpm(archive: Path, output: Path, version: str) -> None:
+    """Read one verified RPM member; never install the RPM or execute its scripts."""
+    architecture = "aarch64" if host_architecture() == "arm64" else "x86_64"
+    metadata = run(["rpm", "-qp", "--qf", "%{NAME} %{VERSION}-%{RELEASE} %{ARCH}", str(archive)], capture=True)
+    if metadata.stdout.strip() != f"stratovirt {version} {architecture}":
+        raise RunnerEnvError("StratoVirt RPM metadata does not match the lock/platform")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    # Extract to stdout, not a filesystem tree: unrelated RPM paths, links and
+    # install hooks cannot affect the runner. The static payload is deliberately
+    # excluded; the supplied ARM64 package's static variant crashes at startup.
+    with tempfile.TemporaryFile() as errors, output.open("wb") as stream:
+        producer = subprocess.Popen(["rpm2cpio", str(archive)], stdout=subprocess.PIPE, stderr=errors)
+        try:
+            result = subprocess.run(["cpio", "--extract", "--to-stdout", "./usr/bin/stratovirt"],
+                                    stdin=producer.stdout, stdout=stream, stderr=subprocess.PIPE, timeout=60)
+            producer.stdout.close()
+            status = producer.wait(timeout=10)
+            if result.returncode or status:
+                raise RunnerEnvError("failed to extract StratoVirt executable from RPM")
+        finally:
+            if producer.poll() is None:
+                producer.kill()
+                producer.wait()
+    if output.stat().st_size == 0:
+        raise RunnerEnvError("StratoVirt executable is missing from RPM")
+    output.chmod(0o755)
+
+
 def install_component(component: str, declaration: dict[str, Any], paths: dict[str, Path]) -> None:
     version = declaration["version"]
     expected_sha256 = download_sha256(component, declaration)
@@ -678,6 +717,8 @@ def install_component(component: str, declaration: dict[str, Any], paths: dict[s
             output.parent.mkdir(parents=True)
             shutil.copyfile(archive, output)
             os.chmod(output, 0o755)
+        elif component == "stratovirt":
+            extract_stratovirt_rpm(archive, output_root / "bin/stratovirt", version)
         elif component == "buildkit":
             extract_selected(
                 archive,
@@ -1070,6 +1111,7 @@ def write_action_outputs(
     values = {
         "binary-dir": str(paths["bin"]),
         "cloud-hypervisor-path": str(paths["root"] / "bin/cloud-hypervisor"),
+        "stratovirt-path": str(paths["root"] / "bin/stratovirt"),
     }
     with Path(output_path).open("a", encoding="utf-8") as stream:
         for key, value in values.items():

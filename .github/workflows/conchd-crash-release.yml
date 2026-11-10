@@ -1,9 +1,17 @@
 name: Conchd Crash Release
-run-name: ${{ github.event.inputs.conch_pr_number || github.event.inputs.conch_ref || github.ref_name }}
+run-name: ${{ inputs.vmm_backend || 'stratovirt' }}-${{ github.event.inputs.conch_pr_number || github.event.inputs.conch_ref || github.ref_name }}
 
 on:
   workflow_dispatch:
     inputs:
+      vmm_backend:
+        description: Virtual machine backend to validate
+        required: true
+        type: choice
+        default: stratovirt
+        options:
+          - stratovirt
+          - cloud-hypervisor
       runner_arch:
         description: Self-hosted runner architecture
         required: true
@@ -121,6 +129,7 @@ jobs:
         id: template
         uses: ./.github/actions/build-conch-template
         with:
+          vmm-backend: ${{ inputs.vmm_backend || 'stratovirt' }}
           conch-repository: ${{ env.CONCH_REPOSITORY }}
           conch-commit: ${{ needs.resolve-conch.outputs.conch-commit }}
           kernel-artifact-name: ${{ needs.build-kernel.outputs.kernel-artifact-name }}
@@ -199,6 +208,7 @@ jobs:
         id: conchd
         uses: ./.github/actions/start-conchd
         with:
+          vmm-backend: ${{ inputs.vmm_backend || 'stratovirt' }}
           conch-source: ${{ env.CONCH_SOURCE }}
           binary-dir: ${{ steps.runner-environment.outputs.binary-dir }}
           runtime-name: conch-crash-release
@@ -253,6 +263,7 @@ jobs:
         id: restarted-conchd
         uses: ./.github/actions/start-conchd
         with:
+          vmm-backend: ${{ inputs.vmm_backend || 'stratovirt' }}
           conch-source: ${{ env.CONCH_SOURCE }}
           binary-dir: ${{ steps.runner-environment.outputs.binary-dir }}
           runtime-name: conch-crash-release

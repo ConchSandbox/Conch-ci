@@ -12,6 +12,7 @@ from typing import Any
 
 
 COMPONENTS = (
+    "stratovirt",
     "cloud_hypervisor",
     "buildkit",
     "distribution_registry",
@@ -101,6 +102,8 @@ def validate_download(value: Any, location: str, *, per_architecture: bool) -> N
             string(digest, f"{location}.sha256.{architecture}", SHA256_RE)
     else:
         string(item["sha256"], f"{location}.sha256", SHA256_RE)
+    if location.endswith(".stratovirt") and not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+-[0-9]+\.oe2403sp3", version):
+        raise ValidationError(f"{location}.version: expected a pinned openEuler SP3 RPM release")
     if FLOATING_RE.search(version):
         raise ValidationError(f"{location}.version: floating version is forbidden")
 
